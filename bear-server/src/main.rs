@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/ws/:session_id", get(ws_handler))
         .with_state(state)
-        .layer(CorsLayer::new().allow_origin(Any).allow_headers(Any));
+        .layer(CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any));
 
     let addr: SocketAddr = DEFAULT_BIND.parse()?;
     tracing::info!("bear-server running on http://{addr}");
