@@ -1,1 +1,0 @@
-/Users/nirupam.biswas/git/bear/target/debug/bear: /Users/nirupam.biswas/git/bear/bear/src/main.rs /Users/nirupam.biswas/git/bear/bear/src/menu.rs /Users/nirupam.biswas/git/bear/bear/src/term.rs /Users/nirupam.biswas/git/bear/bear-core/src/lib.rs

@@ -190,7 +190,6 @@ async fn create_session(
         history: vec![OllamaMessage {
             role: "system".to_string(),
             content: SYSTEM_PROMPT.to_string(),
-            tool_calls: None,
         }],
     };
 
@@ -315,7 +314,6 @@ async fn handle_user_input(
     let user_msg = OllamaMessage {
         role: "user".to_string(),
         content: text,
-        tool_calls: None,
     };
 
     let (history, cwd) = {
@@ -342,7 +340,6 @@ async fn handle_user_input(
                     session.history.push(OllamaMessage {
                         role: "assistant".to_string(),
                         content: reply.content.clone(),
-                        tool_calls: None,
                     });
                 }
             }
@@ -420,7 +417,6 @@ async fn append_tool_result(state: &ServerState, session_id: Uuid, output: &str)
         session.history.push(OllamaMessage {
             role: "user".to_string(),
             content: format!("[Tool output]:\n{output}"),
-            tool_calls: None,
         });
     }
 }
@@ -689,8 +685,6 @@ fn strip_tool_calls(text: &str) -> String {
 struct OllamaMessage {
     role: String,
     content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -729,11 +723,18 @@ async fn call_ollama(
     };
 
     let response = http_client
-        .post(url)
+        .post(&url)
         .json(&payload)
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        tracing::error!("ollama returned {status}: {body}");
+        anyhow::bail!("ollama returned {status}: {body}");
+    }
+
     let body: OllamaChatResponse = response.json().await?;
     Ok(body.message)
 }
