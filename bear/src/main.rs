@@ -1,0 +1,387 @@
+mod menu;
+mod term;
+
+use anyhow::Context;
+use bear_core::{
+    ClientMessage, CreateSessionRequest, CreateSessionResponse, SessionListResponse, ServerMessage,
+    DEFAULT_SERVER_URL,
+};
+use clap::Parser;
+use futures::{SinkExt, StreamExt};
+use reqwest::Url;
+use menu::{interactive_menu, MenuItem, MenuMode, MenuResult};
+use std::sync::mpsc as std_mpsc;
+use term::{RenderCmd, TermEvent};
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
+use uuid::Uuid;
+
+#[derive(Parser, Debug)]
+#[command(name = "bear", about = "Bear client for persistent sessions")]
+struct Cli {
+    #[arg(long)]
+    server_url: Option<String>,
+    #[arg(long)]
+    session: Option<Uuid>,
+    #[arg(long)]
+    new_session: bool,
+}
+
+#[derive(Debug, PartialEq)]
+enum SessionResult {
+    EndSession,
+    Quit,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    let server_url = cli
+        .server_url
+        .or_else(|| std::env::var("BEAR_SERVER_URL").ok())
+        .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string());
+    let base_url = Url::parse(&server_url).context("invalid server URL")?;
+
+    let http_client = reqwest::Client::new();
+
+    // First session: use CLI args
+    let mut session_id = if let Some(id) = cli.session {
+        id
+    } else {
+        resolve_session(&http_client, &base_url, cli.new_session).await?
+    };
+
+    loop {
+        let result = connect_session(&base_url, session_id).await?;
+        if result == SessionResult::Quit {
+            break;
+        }
+        // EndSession: go back to session selection
+        session_id = resolve_session(&http_client, &base_url, false).await?;
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Session selection (runs before raw mode)
+// ---------------------------------------------------------------------------
+
+async fn resolve_session(
+    http_client: &reqwest::Client,
+    base_url: &Url,
+    force_new: bool,
+) -> anyhow::Result<Uuid> {
+    let sessions_url = base_url.join("/sessions")?;
+    let response = http_client
+        .get(sessions_url)
+        .send()
+        .await?
+        .error_for_status()?;
+    let list: SessionListResponse = response.json().await?;
+
+    if list.sessions.is_empty() || force_new {
+        return create_session(http_client, base_url).await;
+    }
+
+    // Build menu items: existing sessions + "New session" option
+    let mut items: Vec<MenuItem> = list
+        .sessions
+        .iter()
+        .map(|s| MenuItem {
+            label: format!("{}", s.id),
+            description: format!("{} | created {}", s.cwd, s.created_at.format("%Y-%m-%d %H:%M")),
+        })
+        .collect();
+    items.push(MenuItem {
+        label: "+ New session".to_string(),
+        description: String::new(),
+    });
+
+    // Print some blank lines so the menu redraw doesn't overshoot
+    let total_lines = items.len() + 2;
+    for _ in 0..total_lines {
+        println!();
+    }
+
+    match interactive_menu("Select a session:", &items, MenuMode::Single) {
+        MenuResult::Single(idx) if idx < list.sessions.len() => {
+            Ok(list.sessions[idx].id)
+        }
+        MenuResult::Single(_) => {
+            // "New session" was selected
+            create_session(http_client, base_url).await
+        }
+        MenuResult::Cancelled => {
+            // Default: create new
+            println!("Cancelled; creating new session.");
+            create_session(http_client, base_url).await
+        }
+        _ => create_session(http_client, base_url).await,
+    }
+}
+
+async fn create_session(http_client: &reqwest::Client, base_url: &Url) -> anyhow::Result<Uuid> {
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|path| path.to_str().map(|s| s.to_string()));
+
+    let sessions_url = base_url.join("/sessions")?;
+    let response = http_client
+        .post(sessions_url)
+        .json(&CreateSessionRequest { cwd })
+        .send()
+        .await?
+        .error_for_status()?;
+    let created: CreateSessionResponse = response.json().await?;
+    Ok(created.session.id)
+}
+
+// ---------------------------------------------------------------------------
+// Connected session loop
+// ---------------------------------------------------------------------------
+
+enum LoopEvent {
+    FromServer(ServerMessage),
+    FromTerm(TermEvent),
+}
+
+async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<SessionResult> {
+    let ws_url = to_ws_url(base_url, session_id)?;
+    let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url).await?;
+    let (mut ws_write, mut ws_read) = ws_stream.split();
+
+    // Channel: server messages forwarded into the main loop
+    let (srv_tx, mut srv_rx) = mpsc::channel::<ServerMessage>(64);
+    tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws_read.next().await {
+            if let Message::Text(text) = msg {
+                if let Ok(m) = serde_json::from_str::<ServerMessage>(&text) {
+                    if srv_tx.send(m).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    // Channel: terminal events (user lines, quit)
+    let (term_event_tx, mut term_event_rx) = mpsc::channel::<TermEvent>(32);
+
+    // Channel: render commands to the terminal thread (std::sync so the
+    // terminal thread can use try_recv without async)
+    let (render_tx, render_rx) = std_mpsc::channel::<RenderCmd>();
+
+    // Spawn the single terminal owner thread
+    let _term_handle = term::spawn_terminal_thread(render_rx, term_event_tx);
+
+    let mut pending_tool_id: Option<String> = None;
+
+    loop {
+        let event = tokio::select! {
+            Some(msg) = srv_rx.recv() => LoopEvent::FromServer(msg),
+            Some(te) = term_event_rx.recv() => LoopEvent::FromTerm(te),
+            else => break,
+        };
+
+        match event {
+            LoopEvent::FromServer(msg) => {
+                dispatch_server_msg(&msg, &render_tx, &mut pending_tool_id);
+            }
+            LoopEvent::FromTerm(TermEvent::UserLine(line)) => {
+                let line = line.trim().to_string();
+                if line.is_empty() {
+                    continue;
+                }
+
+                // If we're waiting for tool confirmation
+                if let Some(tool_id) = pending_tool_id.take() {
+                    let approved = line.eq_ignore_ascii_case("y")
+                        || line.eq_ignore_ascii_case("yes");
+                    let payload = serde_json::to_string(&ClientMessage::ToolConfirm {
+                        tool_call_id: tool_id,
+                        approved,
+                    })?;
+                    ws_write.send(Message::Text(payload)).await?;
+                    continue;
+                }
+
+                // Slash commands
+                if line == "/ps" {
+                    let payload = serde_json::to_string(&ClientMessage::ProcessList)?;
+                    ws_write.send(Message::Text(payload)).await?;
+                } else if let Some(rest) = line.strip_prefix("/kill ") {
+                    match rest.trim().parse::<u32>() {
+                        Ok(pid) => {
+                            let payload = serde_json::to_string(
+                                &ClientMessage::ProcessKill { pid },
+                            )?;
+                            ws_write.send(Message::Text(payload)).await?;
+                        }
+                        Err(_) => {
+                            let _ = render_tx.send(RenderCmd::Error(
+                                "Usage: /kill <pid>".into(),
+                            ));
+                        }
+                    }
+                } else if let Some(rest) = line.strip_prefix("/send ") {
+                    if let Some((pid_str, text)) = rest.split_once(' ') {
+                        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                            let payload = serde_json::to_string(
+                                &ClientMessage::ProcessInput {
+                                    pid,
+                                    text: text.to_string(),
+                                },
+                            )?;
+                            ws_write.send(Message::Text(payload)).await?;
+                        } else {
+                            let _ = render_tx.send(RenderCmd::Error(
+                                "Usage: /send <pid> <text>".into(),
+                            ));
+                        }
+                    } else {
+                        let _ = render_tx.send(RenderCmd::Error(
+                            "Usage: /send <pid> <text>".into(),
+                        ));
+                    }
+                } else if line == "/end" {
+                    let _ = render_tx.send(RenderCmd::Notice(
+                        "Ending current session. Returning to session selection...".into(),
+                    ));
+                    let _ = render_tx.send(RenderCmd::Quit);
+                    return Ok(SessionResult::EndSession);
+                } else if line == "/help" {
+                    let help = [
+                        "Commands:",
+                        "  /ps              List background processes",
+                        "  /kill <pid>      Kill a background process",
+                        "  /send <pid> <text>  Send stdin to a process",
+                        "  /end             End current session, pick another",
+                        "  /help            Show this help",
+                        "  Ctrl+D           Quit",
+                    ]
+                    .join("\n");
+                    let _ = render_tx.send(RenderCmd::Notice(help));
+                } else {
+                    // Regular chat input -> send to server/LLM
+                    let payload = serde_json::to_string(
+                        &ClientMessage::Input { text: line },
+                    )?;
+                    ws_write.send(Message::Text(payload)).await?;
+                }
+            }
+            LoopEvent::FromTerm(TermEvent::Interrupt) => {
+                // Ctrl+C: cancel pending tool call if any
+                if let Some(tool_id) = pending_tool_id.take() {
+                    let payload = serde_json::to_string(&ClientMessage::ToolConfirm {
+                        tool_call_id: tool_id,
+                        approved: false,
+                    })?;
+                    ws_write.send(Message::Text(payload)).await?;
+                    let _ = render_tx.send(RenderCmd::Notice(
+                        "Tool call cancelled.".into(),
+                    ));
+                }
+            }
+            LoopEvent::FromTerm(TermEvent::Quit) => {
+                let _ = render_tx.send(RenderCmd::Quit);
+                return Ok(SessionResult::Quit);
+            }
+        }
+    }
+
+    Ok(SessionResult::Quit)
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch server messages to the render channel
+// ---------------------------------------------------------------------------
+
+fn dispatch_server_msg(
+    msg: &ServerMessage,
+    render_tx: &std_mpsc::Sender<RenderCmd>,
+    pending_tool_id: &mut Option<String>,
+) {
+    match msg {
+        ServerMessage::SessionInfo { session } => {
+            let _ = std::env::set_current_dir(&session.cwd);
+            let _ = render_tx.send(RenderCmd::SessionInfo(
+                session.id.to_string(),
+                session.cwd.clone(),
+            ));
+        }
+        ServerMessage::AssistantText { text } => {
+            let _ = render_tx.send(RenderCmd::Assistant(text.clone()));
+        }
+        ServerMessage::ToolRequest { tool_call } => {
+            let args_str = serde_json::to_string_pretty(&tool_call.arguments)
+                .unwrap_or_else(|_| tool_call.arguments.to_string());
+            *pending_tool_id = Some(tool_call.id.clone());
+            let _ = render_tx.send(RenderCmd::ToolRequest(
+                tool_call.name.clone(),
+                args_str,
+            ));
+        }
+        ServerMessage::ToolOutput { output, .. } => {
+            let _ = render_tx.send(RenderCmd::ToolOutput(output.clone()));
+        }
+        ServerMessage::ProcessStarted { info } => {
+            let _ = render_tx.send(RenderCmd::ProcessEvent(
+                format!("Started pid={} cmd={}", info.pid, info.command),
+            ));
+        }
+        ServerMessage::ProcessOutput { pid, text } => {
+            let _ = render_tx.send(RenderCmd::ProcessEvent(
+                format!("[{}] {}", pid, text),
+            ));
+        }
+        ServerMessage::ProcessExited { pid, code } => {
+            let code_str = code.map(|c| c.to_string()).unwrap_or("unknown".into());
+            let _ = render_tx.send(RenderCmd::ProcessEvent(
+                format!("Process {} exited (code {})", pid, code_str),
+            ));
+        }
+        ServerMessage::ProcessListResult { processes } => {
+            if processes.is_empty() {
+                let _ = render_tx.send(RenderCmd::Notice(
+                    "No background processes.".into(),
+                ));
+            } else {
+                let mut lines = vec!["Background processes:".to_string()];
+                for p in processes {
+                    let status = if p.running { "running" } else { "exited" };
+                    lines.push(format!("  pid={} [{}] {}", p.pid, status, p.command));
+                }
+                let _ = render_tx.send(RenderCmd::Notice(lines.join("\n")));
+            }
+        }
+        ServerMessage::Notice { text } => {
+            let _ = render_tx.send(RenderCmd::Notice(text.clone()));
+        }
+        ServerMessage::Error { text } => {
+            let _ = render_tx.send(RenderCmd::Error(text.clone()));
+        }
+        ServerMessage::Pong => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// URL helpers
+// ---------------------------------------------------------------------------
+
+fn to_ws_url(base_url: &Url, session_id: Uuid) -> anyhow::Result<Url> {
+    let mut ws_url = base_url.clone();
+    let scheme = match ws_url.scheme() {
+        "https" => "wss",
+        "http" => "ws",
+        "wss" => "wss",
+        "ws" => "ws",
+        _ => "ws",
+    };
+    ws_url
+        .set_scheme(scheme)
+        .map_err(|_| anyhow::anyhow!("invalid URL scheme"))?;
+    ws_url.set_path(&format!("/ws/{session_id}"));
+    ws_url.set_query(None);
+    Ok(ws_url)
+}

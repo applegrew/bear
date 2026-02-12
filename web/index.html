@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bear Browser Client</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header>
+        <h1>Bear Browser Client</h1>
+        <p>Connect to a running bear-server and keep sessions alive across terminals.</p>
+      </header>
+
+      <section class="controls">
+        <label>
+          Server URL
+          <input id="serverUrl" value="http://127.0.0.1:49321" />
+        </label>
+        <label>
+          Session
+          <select id="sessionSelect"></select>
+        </label>
+        <button id="refreshSessions">Refresh sessions</button>
+        <button id="connect">Connect</button>
+        <label class="checkbox">
+          <input type="checkbox" id="proxyMode" />
+          Use proxy transport
+        </label>
+      </section>
+
+      <section class="terminal" id="terminal"></section>
+
+      <form id="inputForm" class="input-row">
+        <input id="commandInput" placeholder="Type a command" autocomplete="off" />
+        <button type="submit">Send</button>
+      </form>
+
+      <section class="proxy" id="proxyPanel">
+        <h2>Proxy transport</h2>
+        <p>Outbound messages (send these to your proxy API):</p>
+        <pre id="outboundQueue"></pre>
+        <div class="proxy-row">
+          <textarea id="proxyInbound" placeholder="Paste server JSON to feed into the client"></textarea>
+          <button id="feedInbound">Feed inbound</button>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

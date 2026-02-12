@@ -1,0 +1,133 @@
+:root {
+  --bg: #0f172a;
+  --panel: #111827;
+  --accent: #fbbf24;
+  --text: #f8fafc;
+  --muted: #94a3b8;
+  font-family: "Space Grotesk", sans-serif;
+}
+
+body {
+  margin: 0;
+  background: radial-gradient(circle at top, #1e293b, #0f172a 65%);
+  color: var(--text);
+}
+
+.app {
+  max-width: 960px;
+  margin: 40px auto;
+  padding: 24px;
+}
+
+header h1 {
+  font-size: 2.5rem;
+  margin-bottom: 8px;
+}
+
+header p {
+  color: var(--muted);
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin: 24px 0;
+}
+
+.controls label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.9rem;
+  gap: 6px;
+}
+
+.controls input,
+.controls select,
+.controls button {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #334155;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.controls button {
+  cursor: pointer;
+  border-color: var(--accent);
+}
+
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.terminal {
+  min-height: 240px;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid #334155;
+  border-radius: 12px;
+  padding: 16px;
+  font-family: "JetBrains Mono", monospace;
+  white-space: pre-wrap;
+  margin-bottom: 16px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.6);
+}
+
+.input-row {
+  display: flex;
+  gap: 12px;
+}
+
+.input-row input {
+  flex: 1;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #334155;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.input-row button {
+  padding: 12px 18px;
+  border-radius: 8px;
+  border: none;
+  background: var(--accent);
+  color: #111827;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.proxy {
+  margin-top: 24px;
+  padding: 16px;
+  background: rgba(17, 24, 39, 0.7);
+  border-radius: 12px;
+  border: 1px solid #334155;
+}
+
+.proxy-row {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.proxy-row textarea {
+  flex: 1;
+  min-height: 80px;
+  background: var(--panel);
+  border: 1px solid #334155;
+  color: var(--text);
+  padding: 12px;
+  border-radius: 8px;
+}
+
+.proxy-row button {
+  padding: 12px 18px;
+  border-radius: 8px;
+  background: var(--accent);
+  border: none;
+  font-weight: 600;
+  cursor: pointer;
+}
