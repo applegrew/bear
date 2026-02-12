@@ -148,7 +148,7 @@ struct TermState {
 }
 
 const PROMPT: &str = "bear> ";
-const PROMPT_CONFIRM: &str = "  Allow? [y/n] > ";
+const PROMPT_CONFIRM: &str = "  Allow? [y/n/a(lways)] > ";
 
 impl TermState {
     fn init() -> anyhow::Result<Self> {

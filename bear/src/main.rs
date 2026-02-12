@@ -4,12 +4,13 @@ mod term;
 use anyhow::Context;
 use bear_core::{
     ClientMessage, CreateSessionRequest, CreateSessionResponse, SessionListResponse, ServerMessage,
-    DEFAULT_SERVER_URL,
+    ToolCall, DEFAULT_SERVER_URL,
 };
 use clap::Parser;
 use futures::{SinkExt, StreamExt};
-use reqwest::Url;
 use menu::{interactive_menu, MenuItem, MenuMode, MenuResult};
+use reqwest::Url;
+use std::collections::HashSet;
 use std::sync::mpsc as std_mpsc;
 use term::{RenderCmd, TermEvent};
 use tokio::sync::mpsc;
@@ -175,7 +176,8 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
     // Spawn the single terminal owner thread
     let _term_handle = term::spawn_terminal_thread(render_rx, term_event_tx);
 
-    let mut pending_tool_id: Option<String> = None;
+    let mut pending_tool: Option<PendingTool> = None;
+    let mut auto_approved: HashSet<String> = HashSet::new();
 
     loop {
         let event = tokio::select! {
@@ -186,7 +188,16 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
 
         match event {
             LoopEvent::FromServer(msg) => {
-                dispatch_server_msg(&msg, &render_tx, &mut pending_tool_id);
+                if let Some(auto_confirm) = dispatch_server_msg(
+                    &msg, &render_tx, &mut pending_tool, &auto_approved,
+                ) {
+                    // Auto-approved tool call — send confirmation immediately
+                    let payload = serde_json::to_string(&ClientMessage::ToolConfirm {
+                        tool_call_id: auto_confirm,
+                        approved: true,
+                    })?;
+                    ws_write.send(Message::Text(payload)).await?;
+                }
             }
             LoopEvent::FromTerm(TermEvent::UserLine(line)) => {
                 let line = line.trim().to_string();
@@ -195,11 +206,17 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                 }
 
                 // If we're waiting for tool confirmation
-                if let Some(tool_id) = pending_tool_id.take() {
-                    let approved = line.eq_ignore_ascii_case("y")
-                        || line.eq_ignore_ascii_case("yes");
+                if let Some(tool) = pending_tool.take() {
+                    let lower = line.to_ascii_lowercase();
+                    let approved = lower == "y" || lower == "yes" || lower == "a" || lower == "always";
+                    if lower == "a" || lower == "always" {
+                        auto_approved.insert(tool.base_command.clone());
+                        let _ = render_tx.send(RenderCmd::Notice(
+                            format!("'{}' will be auto-approved for this session.", tool.base_command),
+                        ));
+                    }
                     let payload = serde_json::to_string(&ClientMessage::ToolConfirm {
-                        tool_call_id: tool_id,
+                        tool_call_id: tool.id,
                         approved,
                     })?;
                     ws_write.send(Message::Text(payload)).await?;
@@ -250,15 +267,33 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                     ));
                     let _ = render_tx.send(RenderCmd::Quit);
                     return Ok(SessionResult::EndSession);
+                } else if line == "/allowed" {
+                    if auto_approved.is_empty() {
+                        let _ = render_tx.send(RenderCmd::Notice(
+                            "No auto-approved commands.".into(),
+                        ));
+                    } else {
+                        let mut cmds: Vec<&str> = auto_approved.iter().map(|s| s.as_str()).collect();
+                        cmds.sort();
+                        let _ = render_tx.send(RenderCmd::Notice(
+                            format!("Auto-approved commands: {}", cmds.join(", ")),
+                        ));
+                    }
                 } else if line == "/help" {
                     let help = [
                         "Commands:",
                         "  /ps              List background processes",
                         "  /kill <pid>      Kill a background process",
                         "  /send <pid> <text>  Send stdin to a process",
+                        "  /allowed         Show auto-approved commands",
                         "  /end             End current session, pick another",
                         "  /help            Show this help",
                         "  Ctrl+D           Quit",
+                        "",
+                        "Tool confirmations:",
+                        "  y/yes            Approve this tool call",
+                        "  n/no             Deny this tool call",
+                        "  a/always         Approve and auto-approve this command for the session",
                     ]
                     .join("\n");
                     let _ = render_tx.send(RenderCmd::Notice(help));
@@ -272,9 +307,9 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
             }
             LoopEvent::FromTerm(TermEvent::Interrupt) => {
                 // Ctrl+C: cancel pending tool call if any
-                if let Some(tool_id) = pending_tool_id.take() {
+                if let Some(tool) = pending_tool.take() {
                     let payload = serde_json::to_string(&ClientMessage::ToolConfirm {
-                        tool_call_id: tool_id,
+                        tool_call_id: tool.id,
                         approved: false,
                     })?;
                     ws_write.send(Message::Text(payload)).await?;
@@ -297,11 +332,52 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
 // Dispatch server messages to the render channel
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Pending tool call with base command for auto-approve matching
+// ---------------------------------------------------------------------------
+
+struct PendingTool {
+    id: String,
+    base_command: String,
+}
+
+fn extract_base_command(tool_call: &ToolCall) -> String {
+    match tool_call.name.as_str() {
+        "run_command" => {
+            if let Some(cmd) = tool_call.arguments.get("command").and_then(|v| v.as_str()) {
+                // Extract the first token of the shell command.
+                // Handle common patterns: env vars, sudo, path prefixes.
+                let tokens: Vec<&str> = cmd.split_whitespace().collect();
+                for token in &tokens {
+                    // Skip env var assignments like FOO=bar
+                    if token.contains('=') && !token.starts_with('-') {
+                        continue;
+                    }
+                    // Skip sudo/env
+                    if *token == "sudo" || *token == "env" {
+                        continue;
+                    }
+                    // Extract basename from paths like /usr/bin/ls
+                    let base = token.rsplit('/').next().unwrap_or(token);
+                    return base.to_string();
+                }
+                cmd.to_string()
+            } else {
+                "run_command".to_string()
+            }
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Returns Some(tool_call_id) if the tool call was auto-approved and should be
+/// confirmed immediately without user input.
 fn dispatch_server_msg(
     msg: &ServerMessage,
     render_tx: &std_mpsc::Sender<RenderCmd>,
-    pending_tool_id: &mut Option<String>,
-) {
+    pending_tool: &mut Option<PendingTool>,
+    auto_approved: &HashSet<String>,
+) -> Option<String> {
     match msg {
         ServerMessage::SessionInfo { session } => {
             let _ = std::env::set_current_dir(&session.cwd);
@@ -314,9 +390,22 @@ fn dispatch_server_msg(
             let _ = render_tx.send(RenderCmd::Assistant(text.clone()));
         }
         ServerMessage::ToolRequest { tool_call } => {
+            let base_cmd = extract_base_command(tool_call);
             let args_str = serde_json::to_string_pretty(&tool_call.arguments)
                 .unwrap_or_else(|_| tool_call.arguments.to_string());
-            *pending_tool_id = Some(tool_call.id.clone());
+
+            if auto_approved.contains(&base_cmd) {
+                // Auto-approved: show brief notice and return the ID for immediate confirm
+                let _ = render_tx.send(RenderCmd::Notice(
+                    format!("  [auto-approved] {} {}", tool_call.name, args_str.lines().next().unwrap_or("")),
+                ));
+                return Some(tool_call.id.clone());
+            }
+
+            *pending_tool = Some(PendingTool {
+                id: tool_call.id.clone(),
+                base_command: base_cmd,
+            });
             let _ = render_tx.send(RenderCmd::ToolRequest(
                 tool_call.name.clone(),
                 args_str,
@@ -363,6 +452,7 @@ fn dispatch_server_msg(
         }
         ServerMessage::Pong => {}
     }
+    None
 }
 
 // ---------------------------------------------------------------------------
