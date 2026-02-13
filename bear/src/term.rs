@@ -269,6 +269,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/kill", "Kill a background process"),
     ("/send", "Send stdin to a process"),
     ("/session name", "Name the current session"),
+    ("/session workdir", "Set session working directory"),
     ("/allowed", "Show auto-approved commands"),
     ("/exit", "Disconnect, keep session alive"),
     ("/end", "End session, pick another"),
