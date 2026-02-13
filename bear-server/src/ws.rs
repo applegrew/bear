@@ -46,6 +46,12 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
         ),
     }).await;
 
+    if info.name.is_none() {
+        let _ = send_msg(&mut socket, ServerMessage::Notice {
+            text: "Tip: Name this session with /session name <name>".to_string(),
+        }).await;
+    }
+
     let mut pending: Option<PendingToolCall> = None;
     let mut tool_queue: VecDeque<PendingToolCall> = VecDeque::new();
     let mut tool_depth: usize = 0;
@@ -104,6 +110,22 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
                     }
                     ClientMessage::ProcessInput { pid, text } => {
                         handle_process_input(&state, &mut socket, pid, &text).await;
+                    }
+                    ClientMessage::SessionRename { name } => {
+                        let trimmed = name.trim().to_string();
+                        if trimmed.is_empty() {
+                            let _ = send_msg(&mut socket, ServerMessage::Error {
+                                text: "Session name must not be empty.".to_string(),
+                            }).await;
+                        } else {
+                            let mut sessions = state.sessions.write().await;
+                            if let Some(session) = sessions.get_mut(&session_id) {
+                                session.info.name = Some(trimmed.clone());
+                            }
+                            let _ = send_msg(&mut socket, ServerMessage::SessionRenamed {
+                                name: trimmed,
+                            }).await;
+                        }
                     }
                     ClientMessage::Ping => {
                         let _ = send_msg(&mut socket, ServerMessage::Pong).await;

@@ -11,6 +11,7 @@ pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:49321";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub id: Uuid,
+    pub name: Option<String>,
     pub cwd: String,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
@@ -80,6 +81,7 @@ pub enum ClientMessage {
     ProcessInput { pid: u32, text: String },
     ProcessKill { pid: u32 },
     ProcessList,
+    SessionRename { name: String },
     Ping,
 }
 
@@ -105,6 +107,7 @@ pub enum ServerMessage {
         options: Vec<String>,
         multi: bool,
     },
+    SessionRenamed { name: String },
     Notice { text: String },
     Error { text: String },
     Thinking,

@@ -127,7 +127,7 @@ export class BearClient {
     const items = [
       { label: '+ New Session', detail: '' },
       ...this.pickerSessions.map(s => ({
-        label: s.id.substring(0, 8) + '…',
+        label: s.name || s.id.substring(0, 8) + '…',
         detail: s.cwd,
       })),
     ];
@@ -308,6 +308,12 @@ export class BearClient {
             this._writeln(`${C.gray}    pid=${p.pid} [${status}] ${p.command}${C.reset}`);
           }
         }
+        this._restorePrompt();
+        break;
+
+      case 'session_renamed':
+        this._clearInputLine();
+        this._writeln(`${C.green}  Session renamed to: ${msg.name}${C.reset}`);
         this._restorePrompt();
         break;
 
@@ -732,6 +738,23 @@ export class BearClient {
       return;
     }
 
+    const sessionMatch = text.match(/^\/session\s+name\s+(.+)$/);
+    if (sessionMatch) {
+      const name = sessionMatch[1].trim();
+      if (!name) {
+        this._writeln(`${C.red}  Usage: /session name <session name>${C.reset}`);
+        this._drawPrompt();
+      } else {
+        this._sendJson({ type: 'session_rename', name });
+      }
+      return;
+    }
+    if (text.startsWith('/session')) {
+      this._writeln(`${C.red}  Usage: /session name <session name>${C.reset}`);
+      this._drawPrompt();
+      return;
+    }
+
     // Regular chat input
     this._sendJson({ type: 'input', text: text });
     // Don't draw prompt yet — wait for server response
@@ -874,6 +897,7 @@ export class BearClient {
       `${C.gray}    /ps              ${C.white}List background processes${C.reset}`,
       `${C.gray}    /kill <pid>      ${C.white}Kill a background process${C.reset}`,
       `${C.gray}    /send <pid> <t>  ${C.white}Send stdin to a process${C.reset}`,
+      `${C.gray}    /session name <n>${C.white} Name the current session${C.reset}`,
       `${C.gray}    /allowed         ${C.white}Show auto-approved commands${C.reset}`,
       `${C.gray}    /end             ${C.white}End session, pick another${C.reset}`,
       `${C.gray}    /help            ${C.white}Show this help${C.reset}`,

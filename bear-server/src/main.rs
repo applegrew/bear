@@ -114,6 +114,7 @@ async fn create_session(
     let session = Session {
         info: bear_core::SessionInfo {
             id: Uuid::new_v4(),
+            name: None,
             cwd,
             created_at: Utc::now(),
             last_activity: Utc::now(),

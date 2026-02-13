@@ -90,7 +90,7 @@ async fn resolve_session(
         .sessions
         .iter()
         .map(|s| MenuItem {
-            label: format!("{}", s.id),
+            label: s.name.clone().unwrap_or_else(|| format!("{}", s.id)),
             description: format!("{} | created {}", s.cwd, s.created_at.format("%Y-%m-%d %H:%M")),
         })
         .collect();
@@ -285,12 +285,31 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                             format!("Auto-approved commands: {}", cmds.join(", ")),
                         ));
                     }
+                } else if let Some(rest) = line.strip_prefix("/session ") {
+                    if let Some(name) = rest.strip_prefix("name ") {
+                        let name = name.trim();
+                        if name.is_empty() {
+                            let _ = render_tx.send(RenderCmd::Error(
+                                "Usage: /session name <session name>".into(),
+                            ));
+                        } else {
+                            let payload = serde_json::to_string(
+                                &ClientMessage::SessionRename { name: name.to_string() },
+                            )?;
+                            ws_write.send(Message::Text(payload)).await?;
+                        }
+                    } else {
+                        let _ = render_tx.send(RenderCmd::Error(
+                            "Usage: /session name <session name>".into(),
+                        ));
+                    }
                 } else if line == "/help" {
                     let help = [
                         "Commands:",
                         "  /ps              List background processes",
                         "  /kill <pid>      Kill a background process",
                         "  /send <pid> <text>  Send stdin to a process",
+                        "  /session name <n>  Name the current session",
                         "  /allowed         Show auto-approved commands",
                         "  /end             End current session, pick another",
                         "  /help            Show this help",
@@ -403,8 +422,10 @@ fn dispatch_server_msg(
     match msg {
         ServerMessage::SessionInfo { session } => {
             let _ = std::env::set_current_dir(&session.cwd);
+            let display_name = session.name.clone()
+                .unwrap_or_else(|| session.id.to_string());
             let _ = render_tx.send(RenderCmd::SessionInfo(
-                session.id.to_string(),
+                display_name,
                 session.cwd.clone(),
             ));
         }
@@ -478,6 +499,11 @@ fn dispatch_server_msg(
                 options: options.clone(),
                 multi: *multi,
             });
+        }
+        ServerMessage::SessionRenamed { name } => {
+            let _ = render_tx.send(RenderCmd::Notice(
+                format!("Session renamed to: {name}"),
+            ));
         }
         ServerMessage::Notice { text } => {
             let _ = render_tx.send(RenderCmd::Notice(text.clone()));
