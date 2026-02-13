@@ -329,10 +329,6 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch server messages to the render channel
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Pending tool call with base command for auto-approve matching
 // ---------------------------------------------------------------------------
 

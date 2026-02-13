@@ -187,9 +187,7 @@ dependencies = [
 name = "bear-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "chrono",
- "dirs",
  "serde",
  "serde_json",
  "uuid",
@@ -213,7 +211,6 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
- "url",
  "uuid",
 ]
 

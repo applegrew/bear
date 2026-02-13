@@ -191,6 +191,10 @@ async fn execute_run_command(
 
     let mut all_output = String::new();
     while let Some(line) = output_rx.recv().await {
+        let _ = send_msg(socket, ServerMessage::ProcessOutput {
+            pid,
+            text: line.clone(),
+        }).await;
         all_output.push_str(&line);
         all_output.push('\n');
     }

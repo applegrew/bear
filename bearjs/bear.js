@@ -2,8 +2,9 @@
 // Bear Browser Client — xterm.js powered terminal connecting to bear-server
 // ---------------------------------------------------------------------------
 
-const SERVER_URL = 'http://127.0.0.1:49321';
-const WS_BASE   = 'ws://127.0.0.1:49321';
+const DEFAULT_HOST = '127.0.0.1:49321';
+const SERVER_URL = `http://${DEFAULT_HOST}`;
+const WS_BASE   = `ws://${DEFAULT_HOST}`;
 
 // ANSI color helpers
 const C = {
@@ -215,7 +216,7 @@ export class BearClient {
         for (const line of msg.text.split('\n')) {
           this._writeln(`${C.green}  ${line}${C.reset}`);
         }
-        this._drawPrompt();
+        this._restorePrompt();
         break;
 
       case 'tool_request': {
@@ -247,26 +248,26 @@ export class BearClient {
         for (const line of msg.output.split('\n')) {
           this._writeln(`${C.cyan}  │ ${line}${C.reset}`);
         }
-        this._drawPrompt();
+        this._restorePrompt();
         break;
 
       case 'process_started':
         this._clearInputLine();
         this._writeln(`${C.magenta}  [proc] Started pid=${msg.info.pid} cmd=${msg.info.command}${C.reset}`);
-        this._drawPrompt();
+        this._restorePrompt();
         break;
 
       case 'process_output':
         this._clearInputLine();
         this._writeln(`${C.magenta}  [${msg.pid}] ${msg.text}${C.reset}`);
-        this._drawPrompt();
+        this._restorePrompt();
         break;
 
       case 'process_exited': {
         const code = msg.code !== null && msg.code !== undefined ? msg.code : 'unknown';
         this._clearInputLine();
         this._writeln(`${C.magenta}  [proc] Process ${msg.pid} exited (code ${code})${C.reset}`);
-        this._drawPrompt();
+        this._restorePrompt();
         break;
       }
 
@@ -281,19 +282,19 @@ export class BearClient {
             this._writeln(`${C.gray}    pid=${p.pid} [${status}] ${p.command}${C.reset}`);
           }
         }
-        this._drawPrompt();
+        this._restorePrompt();
         break;
 
       case 'notice':
         this._clearInputLine();
         this._writeln(`${C.gray}  ${msg.text}${C.reset}`);
-        this._drawPrompt();
+        this._restorePrompt();
         break;
 
       case 'error':
         this._clearInputLine();
         this._writeln(`${C.red}  ${msg.text}${C.reset}`);
-        this._drawPrompt();
+        this._restorePrompt();
         break;
 
       case 'pong':
@@ -410,6 +411,20 @@ export class BearClient {
     this.inputBuf = '';
     this.cursorPos = 0;
     this.term.write(PROMPT);
+  }
+
+  _restorePrompt() {
+    // Redraw prompt preserving any in-progress user input
+    if (this.pendingToolCall) {
+      this.term.write(`${C.bold}${C.yellow}  > ${C.reset}${this.inputBuf}`);
+    } else {
+      this.term.write(`${PROMPT}${this.inputBuf}`);
+    }
+    // Reposition cursor if not at end
+    const back = this.inputBuf.length - this.cursorPos;
+    if (back > 0) {
+      this.term.write(`\x1b[${back}D`);
+    }
   }
 
   _drawConfirmPrompt() {

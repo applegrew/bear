@@ -109,7 +109,7 @@ async fn handle_user_input(
         content: text,
     };
 
-    let (history, cwd) = {
+    {
         let mut sessions = state.sessions.write().await;
         let Some(session) = sessions.get_mut(&session_id) else {
             let _ = send_msg(socket, ServerMessage::Error {
@@ -119,6 +119,27 @@ async fn handle_user_input(
         };
         session.info.touch();
         session.history.push(user_msg);
+    }
+
+    invoke_llm(state, session_id, socket, pending).await;
+}
+
+/// Call the LLM with current history, send assistant text, and queue the first
+/// tool call (if any) for user confirmation.
+async fn invoke_llm(
+    state: &ServerState,
+    session_id: Uuid,
+    socket: &mut WebSocket,
+    pending: &mut Option<PendingToolCall>,
+) {
+    let (history, cwd) = {
+        let sessions = state.sessions.read().await;
+        let Some(session) = sessions.get(&session_id) else {
+            let _ = send_msg(socket, ServerMessage::Error {
+                text: "session not found".to_string(),
+            }).await;
+            return;
+        };
         (session.history.clone(), session.info.cwd.clone())
     };
 
@@ -202,6 +223,9 @@ async fn handle_tool_confirm(
         output: output.clone(),
     }).await;
     append_tool_result(state, session_id, &output).await;
+
+    // Re-invoke the LLM so it can see the tool result and continue
+    invoke_llm(state, session_id, socket, pending).await;
 }
 
 async fn append_tool_result(state: &ServerState, session_id: Uuid, output: &str) {
