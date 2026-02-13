@@ -44,6 +44,40 @@ function matchingSlashCommands(input) {
     .slice(0, 3);
 }
 
+/** Format a tool call into human-readable description lines for the card UI. */
+function formatToolDescription(name, args) {
+  switch (name) {
+    case 'run_command':
+      return [`$ ${args.command || '(unknown)'}`];
+    case 'read_file':
+      return [`Reading: ${args.path || '(unknown)'}`];
+    case 'write_file':
+      return [`Writing: ${args.path || '(unknown)'}`];
+    case 'edit_file': {
+      const find = (args.find || '').substring(0, 60);
+      return [`Editing: ${args.path || '(unknown)'}`, `Find: ${find}…`];
+    }
+    case 'patch_file':
+      return [`Patching: ${args.path || '(unknown)'}`];
+    case 'list_files':
+      return [`Listing: ${args.path || '.'}  (glob: ${args.glob || '*'})`];
+    case 'search_text':
+      return [`Searching: "${args.pattern || '(unknown)'}" in ${args.path || '.'}`];
+    case 'undo':
+      return [`Undo ${args.steps || 1} step(s)`];
+    default: {
+      // Fallback: key=value pairs
+      if (args && typeof args === 'object') {
+        return Object.entries(args).map(([k, v]) => {
+          const s = typeof v === 'string' ? v : JSON.stringify(v);
+          return `${k}: ${s.length > 60 ? s.substring(0, 60) + '…' : s}`;
+        });
+      }
+      return [JSON.stringify(args)];
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // BearClient class
 // ---------------------------------------------------------------------------
@@ -284,17 +318,22 @@ export class BearClient {
         this._clearInputLine();
 
         if (this.autoApproved.has(baseCmd)) {
-          const preview = JSON.stringify(tc.arguments).substring(0, 80);
-          this._writeln(`${C.gray}  [auto-approved] ${tc.name} ${preview}${C.reset}`);
+          const descLines = formatToolDescription(tc.name, tc.arguments || {});
+          this._writeln(`${C.gray}  ┌─ ⚡ ${tc.name} ─ (auto-approved)${C.reset}`);
+          for (const line of descLines) {
+            this._writeln(`${C.gray}  │  ${line}${C.reset}`);
+          }
+          this._writeln(`${C.gray}  └─${C.reset}`);
           this._sendJson({ type: 'tool_confirm', tool_call_id: tc.id, approved: true });
           this._drawPrompt();
         } else {
-          // Show tool info
-          const argsStr = JSON.stringify(tc.arguments, null, 2);
-          this._writeln(`${C.bold}${C.yellow}  [tool] ${tc.name}${C.reset}`);
-          for (const line of argsStr.split('\n')) {
-            this._writeln(`${C.yellow}    ${line}${C.reset}`);
+          // Show tool info card
+          const descLines = formatToolDescription(tc.name, tc.arguments || {});
+          this._writeln(`${C.gray}  ┌─ ${C.magenta}⚡ ${tc.name}${C.gray} ─${C.reset}`);
+          for (const line of descLines) {
+            this._writeln(`${C.gray}  │  ${C.white}${line}${C.reset}`);
           }
+          this._writeln(`${C.gray}  └─${C.reset}`);
           // Enter picker mode
           this.toolConfirmCall = tc;
           this.toolConfirmIdx = 0;

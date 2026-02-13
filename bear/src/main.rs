@@ -423,10 +423,14 @@ fn dispatch_server_msg(
                 .unwrap_or_else(|_| tool_call.arguments.to_string());
 
             if auto_approved.contains(&base_cmd) {
-                // Auto-approved: show brief notice and return the ID for immediate confirm
-                let _ = render_tx.send(RenderCmd::Notice(
-                    format!("  [auto-approved] {} {}", tool_call.name, args_str.lines().next().unwrap_or("")),
-                ));
+                // Auto-approved: show card-style notice
+                let desc = term::format_tool_description(&tool_call.name, &tool_call.arguments);
+                let mut card = format!("┌─ ⚡ {} ─ (auto-approved)\n", tool_call.name);
+                for line in &desc {
+                    card.push_str(&format!("│  {line}\n"));
+                }
+                card.push_str("└─");
+                let _ = render_tx.send(RenderCmd::Notice(card));
                 return Some(tool_call.id.clone());
             }
 

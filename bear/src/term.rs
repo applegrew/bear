@@ -263,6 +263,70 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "Show help"),
 ];
 
+/// Format a tool call into human-readable description lines for the card UI.
+pub fn format_tool_description(name: &str, args: &serde_json::Value) -> Vec<String> {
+    match name {
+        "run_command" => {
+            let cmd = args["command"].as_str().unwrap_or("(unknown)");
+            vec![format!("$ {cmd}")]
+        }
+        "read_file" => {
+            let path = args["path"].as_str().unwrap_or("(unknown)");
+            vec![format!("Reading: {path}")]
+        }
+        "write_file" => {
+            let path = args["path"].as_str().unwrap_or("(unknown)");
+            vec![format!("Writing: {path}")]
+        }
+        "edit_file" => {
+            let path = args["path"].as_str().unwrap_or("(unknown)");
+            let find = args["find"].as_str().unwrap_or("");
+            let preview = if find.len() > 60 { &find[..60] } else { find };
+            vec![
+                format!("Editing: {path}"),
+                format!("Find: {preview}…"),
+            ]
+        }
+        "patch_file" => {
+            let path = args["path"].as_str().unwrap_or("(unknown)");
+            vec![format!("Patching: {path}")]
+        }
+        "list_files" => {
+            let path = args["path"].as_str().unwrap_or(".");
+            let glob = args["glob"].as_str().unwrap_or("*");
+            vec![format!("Listing: {path}  (glob: {glob})")]
+        }
+        "search_text" => {
+            let pattern = args["pattern"].as_str().unwrap_or("(unknown)");
+            let path = args["path"].as_str().unwrap_or(".");
+            vec![format!("Searching: \"{pattern}\" in {path}")]
+        }
+        "undo" => {
+            let steps = args["steps"].as_u64().unwrap_or(1);
+            vec![format!("Undo {steps} step(s)")]
+        }
+        _ => {
+            // Fallback: show key=value pairs
+            if let Some(obj) = args.as_object() {
+                obj.iter().map(|(k, v)| {
+                    let val = match v {
+                        serde_json::Value::String(s) => {
+                            if s.len() > 60 { format!("{}…", &s[..60]) } else { s.clone() }
+                        }
+                        other => {
+                            let s = other.to_string();
+                            if s.len() > 60 { format!("{}…", &s[..60]) } else { s }
+                        }
+                    };
+                    format!("{k}: {val}")
+                }).collect()
+            } else {
+                vec![args.to_string()]
+            }
+        }
+    }
+}
+
 /// Return up to 3 slash commands matching the current input prefix.
 fn matching_slash_commands(input: &str) -> Vec<(&'static str, &'static str)> {
     if !input.starts_with('/') {
@@ -547,27 +611,44 @@ impl TermState {
     fn run_tool_confirm_picker(&self, name: &str, args: &str) -> ToolConfirmChoice {
         let mut out = io::stdout();
 
-        // Print tool info header
+        // Parse args JSON for formatting
+        let args_val: serde_json::Value = serde_json::from_str(args)
+            .unwrap_or(serde_json::Value::Null);
+        let desc_lines = format_tool_description(name, &args_val);
+
+        // Draw card
+        let _ = execute!(out, Print("\r"), terminal::Clear(ClearType::CurrentLine));
         let _ = execute!(
             out,
-            Print("\r"),
-            terminal::Clear(ClearType::CurrentLine),
+            SetForegroundColor(Color::DarkGrey),
+            Print("  ┌─ "),
             SetForegroundColor(Color::Magenta),
-            Print("  [tool] "),
-            ResetColor,
+            Print("⚡ "),
             Print(name),
+            SetForegroundColor(Color::DarkGrey),
+            Print(" ─"),
+            ResetColor,
             Print("\r\n"),
         );
-        for line in args.lines() {
+        for line in &desc_lines {
             let _ = execute!(
                 out,
                 SetForegroundColor(Color::DarkGrey),
-                Print("    "),
-                ResetColor,
+                Print("  │  "),
+                SetForegroundColor(Color::White),
                 Print(line),
+                ResetColor,
                 Print("\r\n"),
             );
         }
+        let _ = execute!(
+            out,
+            SetForegroundColor(Color::DarkGrey),
+            Print("  └─"),
+            ResetColor,
+            Print("\r\n"),
+        );
+        let _ = out.flush();
 
         let choices = ["Approve", "Deny", "Always approve for session"];
         let choice_colors = [Color::Green, Color::Red, Color::Yellow];
