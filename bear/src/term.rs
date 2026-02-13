@@ -2,7 +2,7 @@ use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
-    style::{Color, Print, ResetColor, SetForegroundColor},
+    style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
     terminal::{self, ClearType},
 };
 use std::io::{self, Write};
@@ -532,18 +532,19 @@ impl TermState {
                     );
                 }
             }
-            "write_file" => {
-                // output is like "Written 123 bytes to /path" or "Error ..."
-                let icon = if output.starts_with("Error") { ("  ✗ ", Color::Red) } else { ("  ✓ ", Color::Green) };
-                self.print_block(icon.0, icon.1, output);
-            }
-            "edit_file" | "patch_file" => {
-                let icon = if output.starts_with("Error") || output.starts_with("Patch failed") {
-                    ("  ✗ ", Color::Red)
+            "write_file" | "edit_file" | "patch_file" => {
+                let is_err = output.starts_with("Error") || output.starts_with("Patch failed");
+                // Split status line from diff (separated by blank line)
+                let (status, diff) = if let Some(pos) = output.find("\n\n") {
+                    (&output[..pos], Some(output[pos + 2..].trim_end()))
                 } else {
-                    ("  ✓ ", Color::Green)
+                    (output, None)
                 };
-                self.print_block(icon.0, icon.1, output);
+                let icon = if is_err { ("  ✗ ", Color::Red) } else { ("  ✓ ", Color::Green) };
+                self.print_block(icon.0, icon.1, status);
+                if let Some(diff_text) = diff {
+                    self.print_diff(diff_text);
+                }
             }
             "run_command" => {
                 self.print_truncated_output(output);
@@ -577,6 +578,82 @@ impl TermState {
                 // Unknown tool — show truncated output
                 self.print_truncated_output(output);
             }
+        }
+    }
+
+    /// Print a unified diff with syntax-colored lines.
+    fn print_diff(&mut self, diff: &str) {
+        let mut out = io::stdout();
+        let lines: Vec<&str> = diff.lines().collect();
+        let total = lines.len();
+        let max = Self::DISPLAY_MAX_LINES * 2; // allow more lines for diffs
+        let show: &[&str] = if total <= max {
+            &lines
+        } else {
+            // Show head + truncation notice + tail
+            let head = max / 2;
+            let tail = max - head;
+            let _ = execute!(out, Print("\r"));
+            for line in &lines[..head] {
+                Self::print_diff_line(&mut out, line);
+            }
+            let _ = execute!(
+                out,
+                SetForegroundColor(Color::DarkGrey),
+                Print(format!("    … ({} lines hidden) …\r\n", total - head - tail)),
+                ResetColor,
+            );
+            for line in &lines[total - tail..] {
+                Self::print_diff_line(&mut out, line);
+            }
+            let _ = out.flush();
+            return;
+        };
+        let _ = execute!(out, Print("\r"));
+        for line in show {
+            Self::print_diff_line(&mut out, line);
+        }
+        let _ = out.flush();
+    }
+
+    fn print_diff_line(out: &mut io::Stdout, line: &str) {
+        if line.starts_with("+++") || line.starts_with("---") {
+            let _ = execute!(
+                out,
+                SetAttribute(Attribute::Bold),
+                SetForegroundColor(Color::White),
+                Print(format!("    {line}\r\n")),
+                ResetColor,
+                SetAttribute(Attribute::Reset),
+            );
+        } else if line.starts_with("@@") {
+            let _ = execute!(
+                out,
+                SetForegroundColor(Color::Cyan),
+                Print(format!("    {line}\r\n")),
+                ResetColor,
+            );
+        } else if line.starts_with('+') {
+            let _ = execute!(
+                out,
+                SetForegroundColor(Color::Green),
+                Print(format!("    {line}\r\n")),
+                ResetColor,
+            );
+        } else if line.starts_with('-') {
+            let _ = execute!(
+                out,
+                SetForegroundColor(Color::Red),
+                Print(format!("    {line}\r\n")),
+                ResetColor,
+            );
+        } else {
+            let _ = execute!(
+                out,
+                SetForegroundColor(Color::DarkGrey),
+                Print(format!("    {line}\r\n")),
+                ResetColor,
+            );
         }
     }
 

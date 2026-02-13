@@ -86,12 +86,22 @@ pub async fn execute_tool(
                 Ok(p) => p,
                 Err(e) => return e,
             };
+            // Read old content for diff (empty if new file)
+            let old_content = tokio::fs::read_to_string(&full_path).await.unwrap_or_default();
             push_undo(state, session_id, &full_path).await;
             if let Some(parent) = std::path::Path::new(&full_path).parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
             match tokio::fs::write(&full_path, &content).await {
-                Ok(()) => format!("Written {} bytes to {full_path}", content.len()),
+                Ok(()) => {
+                    let mut msg = format!("Written {} bytes to {full_path}", content.len());
+                    let diff = generate_unified_diff(&old_content, &content, &path, 3);
+                    if !diff.is_empty() {
+                        msg.push_str("\n\n");
+                        msg.push_str(&diff);
+                    }
+                    msg
+                }
                 Err(err) => format!("Error writing {full_path}: {err}"),
             }
         }
@@ -318,7 +328,15 @@ async fn execute_edit_file(
     push_undo(state, session_id, &full_path).await;
     let updated = content.replacen(&old_text, &new_text, 1);
     match tokio::fs::write(&full_path, &updated).await {
-        Ok(()) => format!("Edited {full_path} (replaced 1 occurrence)"),
+        Ok(()) => {
+            let mut msg = format!("Edited {full_path} (replaced 1 occurrence)");
+            let diff = generate_unified_diff(&content, &updated, &path, 3);
+            if !diff.is_empty() {
+                msg.push_str("\n\n");
+                msg.push_str(&diff);
+            }
+            msg
+        }
         Err(err) => format!("Error writing {full_path}: {err}"),
     }
 }
@@ -354,7 +372,15 @@ async fn execute_patch_file(
         Ok(patched) => {
             push_undo(state, session_id, &full_path).await;
             match tokio::fs::write(&full_path, &patched).await {
-                Ok(()) => format!("Patched {full_path} successfully"),
+                Ok(()) => {
+                    let mut msg = format!("Patched {full_path} successfully");
+                    let udiff = generate_unified_diff(&content, &patched, &path, 3);
+                    if !udiff.is_empty() {
+                        msg.push_str("\n\n");
+                        msg.push_str(&udiff);
+                    }
+                    msg
+                }
                 Err(err) => format!("Error writing {full_path}: {err}"),
             }
         }
@@ -444,6 +470,116 @@ fn apply_unified_diff(original: &str, diff: &str) -> Result<String, String> {
         output.push('\n');
     }
     Ok(output)
+}
+
+// ---------------------------------------------------------------------------
+// Unified diff generation
+// ---------------------------------------------------------------------------
+
+/// Generate a unified diff between two strings, with `context` lines of context.
+/// Returns an empty string if the contents are identical.
+fn generate_unified_diff(old: &str, new: &str, path: &str, context: usize) -> String {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+
+    // Simple LCS-based diff using a DP table
+    let n = old_lines.len();
+    let m = new_lines.len();
+
+    // Build LCS length table
+    let mut dp = vec![vec![0u32; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if old_lines[i] == new_lines[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+
+    // Trace back to build edit script: 'E' = equal, 'D' = delete, 'I' = insert
+    let mut edits: Vec<(char, usize, usize)> = Vec::new(); // (op, old_idx, new_idx)
+    let (mut i, mut j) = (0, 0);
+    while i < n || j < m {
+        if i < n && j < m && old_lines[i] == new_lines[j] {
+            edits.push(('E', i, j));
+            i += 1;
+            j += 1;
+        } else if i < n && (j >= m || dp[i + 1][j] >= dp[i][j + 1]) {
+            edits.push(('D', i, j));
+            i += 1;
+        } else {
+            edits.push(('I', i, j));
+            j += 1;
+        }
+    }
+
+    if edits.iter().all(|(op, _, _)| *op == 'E') {
+        return String::new(); // no changes
+    }
+
+    // Group edits into hunks with context
+    let mut hunks: Vec<(usize, usize)> = Vec::new(); // (start, end) indices into edits
+    let mut hunk_start: Option<usize> = None;
+    let mut last_change: Option<usize> = None;
+
+    for (idx, (op, _, _)) in edits.iter().enumerate() {
+        if *op != 'E' {
+            if hunk_start.is_none() {
+                hunk_start = Some(idx.saturating_sub(context));
+            }
+            last_change = Some(idx);
+        }
+    }
+
+    // Single hunk for simplicity (covers all changes with context)
+    if let (Some(start), Some(last)) = (hunk_start, last_change) {
+        let end = (last + context + 1).min(edits.len());
+        hunks.push((start, end));
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("--- a/{path}\n"));
+    out.push_str(&format!("+++ b/{path}\n"));
+
+    for (start, end) in &hunks {
+        // Calculate line numbers for the hunk header
+        let mut old_start = 0usize;
+        let mut old_count = 0usize;
+        let mut new_start = 0usize;
+        let mut new_count = 0usize;
+        let mut first = true;
+
+        for idx in *start..*end {
+            let (op, oi, ni) = edits[idx];
+            if first {
+                old_start = oi + 1;
+                new_start = ni + 1;
+                first = false;
+            }
+            match op {
+                'E' => { old_count += 1; new_count += 1; }
+                'D' => { old_count += 1; }
+                'I' => { new_count += 1; }
+                _ => {}
+            }
+        }
+
+        out.push_str(&format!("@@ -{},{} +{},{} @@\n", old_start, old_count, new_start, new_count));
+
+        for idx in *start..*end {
+            let (op, oi, ni) = edits[idx];
+            match op {
+                'E' => out.push_str(&format!(" {}\n", old_lines[oi])),
+                'D' => out.push_str(&format!("-{}\n", old_lines[oi])),
+                'I' => out.push_str(&format!("+{}\n", new_lines[ni])),
+                _ => {}
+            }
+        }
+    }
+
+    out
 }
 
 // ---------------------------------------------------------------------------

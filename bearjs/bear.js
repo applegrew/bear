@@ -1031,18 +1031,20 @@ export class BearClient {
         }
         break;
       }
-      case 'write_file': {
-        const color = output.startsWith('Error') ? C.red : C.green;
-        const icon = output.startsWith('Error') ? '✗' : '✓';
-        this._writeln(`${color}  ${icon} ${output}${C.reset}`);
-        break;
-      }
+      case 'write_file':
       case 'edit_file':
       case 'patch_file': {
         const isErr = output.startsWith('Error') || output.startsWith('Patch failed');
+        // Split status line from diff (separated by blank line)
+        const blankIdx = output.indexOf('\n\n');
+        const status = blankIdx >= 0 ? output.substring(0, blankIdx) : output;
+        const diff = blankIdx >= 0 ? output.substring(blankIdx + 2).trimEnd() : null;
         const color = isErr ? C.red : C.green;
         const icon = isErr ? '✗' : '✓';
-        this._writeln(`${color}  ${icon} ${output}${C.reset}`);
+        this._writeln(`${color}  ${icon} ${status}${C.reset}`);
+        if (diff) {
+          this._writeDiff(diff, MAX_LINES * 2);
+        }
         break;
       }
       case 'run_command':
@@ -1077,6 +1079,33 @@ export class BearClient {
       default:
         this._writeToolTruncated(output, MAX_LINES);
         break;
+    }
+  }
+
+  _writeDiff(diff, maxLines) {
+    const lines = diff.split('\n');
+    const total = lines.length;
+    const renderLine = (line) => {
+      if (line.startsWith('+++') || line.startsWith('---')) {
+        this._writeln(`${C.bold}${C.white}    ${line}${C.reset}`);
+      } else if (line.startsWith('@@')) {
+        this._writeln(`${C.cyan}    ${line}${C.reset}`);
+      } else if (line.startsWith('+')) {
+        this._writeln(`${C.green}    ${line}${C.reset}`);
+      } else if (line.startsWith('-')) {
+        this._writeln(`${C.red}    ${line}${C.reset}`);
+      } else {
+        this._writeln(`${C.gray}    ${line}${C.reset}`);
+      }
+    };
+    if (total <= maxLines) {
+      for (const line of lines) renderLine(line);
+    } else {
+      const head = Math.floor(maxLines / 2);
+      const tail = maxLines - head;
+      for (let i = 0; i < head; i++) renderLine(lines[i]);
+      this._writeln(`${C.gray}    … (${total - head - tail} lines hidden) …${C.reset}`);
+      for (let i = total - tail; i < total; i++) renderLine(lines[i]);
     }
   }
 
