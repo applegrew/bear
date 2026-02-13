@@ -19,6 +19,60 @@ pub struct ParsedToolCall {
     pub arguments: serde_json::Value,
 }
 
+async fn execute_session_workdir(
+    state: &ServerState,
+    session_id: Uuid,
+    socket: &mut WebSocket,
+    path: &str,
+    cwd: &str,
+) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return "Error: path must not be empty".to_string();
+    }
+
+    let cmd = format!("cd {trimmed} && pwd");
+    match Command::new("sh")
+        .arg("-lc")
+        .arg(cmd)
+        .current_dir(cwd)
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => {
+            let new_cwd = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if new_cwd.is_empty() {
+                return "Failed to resolve working directory.".to_string();
+            }
+
+            let updated_session = {
+                let mut sessions = state.sessions.write().await;
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    session.info.cwd = new_cwd.clone();
+                    session.info.touch();
+                    Some(session.info.clone())
+                } else {
+                    None
+                }
+            };
+
+            if let Some(session) = updated_session {
+                let _ = send_msg(socket, ServerMessage::SessionInfo { session }).await;
+            }
+            format!("Working directory set to: {new_cwd}")
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if err.is_empty() {
+                "Failed to change directory.".to_string()
+            } else {
+                format!("Failed to change directory: {err}")
+            }
+        }
+        Err(err) => format!("Failed to change directory: {err}"),
+    }
+}
+
 pub fn parse_tool_calls(text: &str) -> Vec<ParsedToolCall> {
     let mut calls = Vec::new();
     let mut remaining = text;
@@ -72,6 +126,13 @@ pub async fn execute_tool(
                 Ok(content) => content,
                 Err(err) => format!("Error reading {full_path}: {err}"),
             }
+        }
+        "session_workdir" => {
+            let path = ptc.tool_call.arguments["path"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            execute_session_workdir(state, session_id, socket, &path, &ptc.cwd).await
         }
         "write_file" => {
             let path = ptc.tool_call.arguments["path"]
