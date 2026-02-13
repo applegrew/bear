@@ -186,6 +186,40 @@ pub async fn compact_history_if_needed(
 }
 
 // ---------------------------------------------------------------------------
+// Reflection and Planning
+// ---------------------------------------------------------------------------
+
+const REFLECTION_PROMPT: &str = r#"You are an expert software engineer and problem solver. Before responding to the user's request, take time to think through the problem carefully.
+
+Consider:
+- What exactly is the user asking for?
+- What are the key challenges or complexities?
+- What approach would be most effective?
+- What potential pitfalls should be avoided?
+- How can the solution be implemented cleanly and efficiently?
+
+Structure your thinking clearly. After your analysis, provide your response to the user's request."#;
+
+/// Ask the LLM to reflect on a problem before responding.
+/// Makes a non-streaming call with a reflection system prompt, then appends the
+/// reflection as an assistant message so the main LLM call benefits from it.
+pub async fn reflective_thinking(
+    http_client: &reqwest::Client,
+    config: &AppConfig,
+    messages: &[OllamaMessage],
+) -> anyhow::Result<OllamaMessage> {
+    let mut reflective_messages = vec![OllamaMessage {
+        role: "system".to_string(),
+        content: REFLECTION_PROMPT.to_string(),
+    }];
+    // Skip the original system prompt (messages[0]) to avoid two system messages
+    if messages.len() > 1 {
+        reflective_messages.extend_from_slice(&messages[1..]);
+    }
+    call_ollama(http_client, config, &reflective_messages).await
+}
+
+// ---------------------------------------------------------------------------
 // Streaming Ollama API call
 // ---------------------------------------------------------------------------
 

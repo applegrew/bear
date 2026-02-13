@@ -5,10 +5,13 @@ use bear_core::{ClientMessage, ProcessInfo, ServerMessage, ToolCall};
 use futures::StreamExt;
 use uuid::Uuid;
 
-use crate::llm::{call_ollama_streaming, compact_history_if_needed, OllamaMessage};
+use crate::llm::{call_ollama_streaming, compact_history_if_needed, reflective_thinking, OllamaMessage};
 use crate::process::{cleanup_session_processes, handle_process_kill, handle_process_input};
 use crate::state::{PendingToolCall, ServerState};
 use crate::tools::{execute_tool, parse_tool_calls};
+
+/// When true, run a non-streaming reflection call before the main LLM response.
+const ENABLE_REFLECTION: bool = true;
 
 // ---------------------------------------------------------------------------
 // WebSocket handler
@@ -193,6 +196,9 @@ async fn handle_user_input(
 
 /// Call the LLM with current history, send assistant text, and queue all
 /// tool calls for sequential user confirmation.
+/// When `ENABLE_REFLECTION` is true, a non-streaming reflection call runs
+/// first and its output is temporarily injected into the history so the main
+/// streaming response benefits from the reasoning.
 async fn invoke_llm(
     state: &ServerState,
     session_id: Uuid,
@@ -224,7 +230,7 @@ async fn invoke_llm(
         }
     }
 
-    let (history, cwd) = {
+    let (mut history, cwd) = {
         let sessions = state.sessions.read().await;
         let Some(session) = sessions.get(&session_id) else {
             let _ = send_msg(socket, ServerMessage::Error {
@@ -235,14 +241,29 @@ async fn invoke_llm(
         (session.history.clone(), session.info.cwd.clone())
     };
 
+    // Optional reflection: run a non-streaming call to reason about the
+    // problem first, then inject the reflection into the history so the
+    // main streaming response benefits from it. The reflection is NOT
+    // persisted to the session history — it only influences this call.
+    if ENABLE_REFLECTION {
+        match reflective_thinking(&state.http_client, &state.config, &history).await {
+            Ok(reflection) => {
+                tracing::debug!("reflection complete ({} chars)", reflection.content.len());
+                history.push(reflection);
+            }
+            Err(err) => {
+                tracing::warn!("reflective thinking failed, continuing without it: {err}");
+            }
+        }
+    }
+
     // Stream LLM response — send chunks to client as they arrive
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<String>(64);
 
     let http = state.http_client.clone();
     let cfg = state.config.clone();
-    let history_clone = history.clone();
     let llm_handle = tokio::spawn(async move {
-        call_ollama_streaming(&http, &cfg, &history_clone, &chunk_tx).await
+        call_ollama_streaming(&http, &cfg, &history, &chunk_tx).await
     });
 
     // Forward chunks to the client as AssistantText
