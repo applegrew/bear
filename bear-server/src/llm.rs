@@ -207,10 +207,11 @@ pub async fn reflective_thinking(
     http_client: &reqwest::Client,
     config: &AppConfig,
     messages: &[OllamaMessage],
+    session_context: &str,
 ) -> anyhow::Result<OllamaMessage> {
     let mut reflective_messages = vec![OllamaMessage {
         role: "system".to_string(),
-        content: REFLECTION_PROMPT.to_string(),
+        content: format!("{REFLECTION_PROMPT}\n\n{session_context}"),
     }];
     // Skip the original system prompt (messages[0]) to avoid two system messages
     if messages.len() > 1 {

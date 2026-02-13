@@ -364,7 +364,7 @@ async fn invoke_llm(
         }
     }
 
-    let (mut history, cwd) = {
+    let (history, cwd) = {
         let sessions = state.sessions.read().await;
         let Some(session) = sessions.get(&session_id) else {
             let _ = send_msg(socket, ServerMessage::Error {
@@ -375,15 +375,21 @@ async fn invoke_llm(
         (session.history.clone(), session.info.cwd.clone())
     };
 
+    let session_context = format!("Session context:\n- Working directory: {cwd}");
+    let mut history_for_llm = history.clone();
+    if let Some(system_msg) = history_for_llm.first_mut() {
+        system_msg.content = format!("{}\n\n{session_context}", system_msg.content);
+    }
+
     // Optional reflection: run a non-streaming call to reason about the
     // problem first, then inject the reflection into the history so the
     // main streaming response benefits from it. The reflection is NOT
     // persisted to the session history — it only influences this call.
     if ENABLE_REFLECTION {
-        match reflective_thinking(&state.http_client, &state.config, &history).await {
+        match reflective_thinking(&state.http_client, &state.config, &history_for_llm, &session_context).await {
             Ok(reflection) => {
                 tracing::debug!("reflection complete ({} chars)", reflection.content.len());
-                history.push(reflection);
+                history_for_llm.push(reflection);
             }
             Err(err) => {
                 tracing::warn!("reflective thinking failed, continuing without it: {err}");
@@ -397,7 +403,7 @@ async fn invoke_llm(
     let http = state.http_client.clone();
     let cfg = state.config.clone();
     let llm_handle = tokio::spawn(async move {
-        call_ollama_streaming(&http, &cfg, &history, &chunk_tx).await
+        call_ollama_streaming(&http, &cfg, &history_for_llm, &chunk_tx).await
     });
 
     // Forward chunks to the client as AssistantText, but also listen
