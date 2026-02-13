@@ -18,8 +18,10 @@ clap = { version = "4", features = ["derive"] }
 crossterm = "0.27"
 dirs = "5"
 futures = "0.3"
+glob = "0.3"
 fs2 = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "io-std", "io-util", "process", "fs"] }

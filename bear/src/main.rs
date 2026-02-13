@@ -294,6 +294,16 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                         "  y/yes            Approve this tool call",
                         "  n/no             Deny this tool call",
                         "  a/always         Approve and auto-approve this command for the session",
+                        "",
+                        "Agent tools:",
+                        "  run_command      Execute shell commands",
+                        "  read_file        Read file contents",
+                        "  write_file       Create/overwrite files",
+                        "  edit_file        Surgical find-and-replace",
+                        "  patch_file       Apply unified diffs",
+                        "  list_files       Directory listing with glob",
+                        "  search_text      Regex search across files",
+                        "  undo             Revert file changes",
                     ]
                     .join("\n");
                     let _ = render_tx.send(RenderCmd::Notice(help));
@@ -383,7 +393,7 @@ fn dispatch_server_msg(
             ));
         }
         ServerMessage::AssistantText { text } => {
-            let _ = render_tx.send(RenderCmd::Assistant(text.clone()));
+            let _ = render_tx.send(RenderCmd::AssistantChunk(text.clone()));
         }
         ServerMessage::ToolRequest { tool_call } => {
             let base_cmd = extract_base_command(tool_call);
@@ -445,6 +455,12 @@ fn dispatch_server_msg(
         }
         ServerMessage::Error { text } => {
             let _ = render_tx.send(RenderCmd::Error(text.clone()));
+        }
+        ServerMessage::AssistantTextDone => {
+            let _ = render_tx.send(RenderCmd::AssistantDone);
+        }
+        ServerMessage::Thinking => {
+            let _ = render_tx.send(RenderCmd::Thinking);
         }
         ServerMessage::Pong => {}
     }

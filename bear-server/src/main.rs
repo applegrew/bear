@@ -123,6 +123,7 @@ async fn create_session(
             role: "system".to_string(),
             content: SYSTEM_PROMPT.to_string(),
         }],
+        undo_stack: Vec::new(),
     };
 
     let info = session.info.clone();

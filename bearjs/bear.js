@@ -42,6 +42,9 @@ export class BearClient {
     this.historyIdx = -1;
     this.savedInput = '';
 
+    // Streaming state
+    this._streaming = false;
+
     // Tool confirmation state
     this.pendingToolCall = null;
     this.autoApproved = new Set();
@@ -212,9 +215,19 @@ export class BearClient {
         break;
 
       case 'assistant_text':
-        this._clearInputLine();
-        for (const line of msg.text.split('\n')) {
-          this._writeln(`${C.green}  ${line}${C.reset}`);
+        if (!this._streaming) {
+          this._clearInputLine();
+          this._streaming = true;
+          this.term.write(`${C.green}  `);
+        }
+        // Write chunk inline, indenting any newlines
+        this.term.write(`${C.green}${msg.text.replace(/\n/g, '\r\n  ')}${C.reset}`);
+        break;
+
+      case 'assistant_text_done':
+        if (this._streaming) {
+          this._streaming = false;
+          this.term.write(`${C.reset}\r\n`);
         }
         this._restorePrompt();
         break;
@@ -295,6 +308,11 @@ export class BearClient {
         this._clearInputLine();
         this._writeln(`${C.red}  ${msg.text}${C.reset}`);
         this._restorePrompt();
+        break;
+
+      case 'thinking':
+        this._clearInputLine();
+        this._writeln(`${C.dim}${C.gray}  ⟳ Thinking…${C.reset}`);
         break;
 
       case 'pong':
@@ -658,6 +676,16 @@ export class BearClient {
       `${C.green}    y/yes            ${C.white}Approve this tool call${C.reset}`,
       `${C.red}    n/no             ${C.white}Deny this tool call${C.reset}`,
       `${C.yellow}    a/always         ${C.white}Approve & auto-approve for session${C.reset}`,
+      '',
+      `${C.bold}${C.white}  Agent tools:${C.reset}`,
+      `${C.cyan}    run_command      ${C.white}Execute shell commands${C.reset}`,
+      `${C.cyan}    read_file        ${C.white}Read file contents${C.reset}`,
+      `${C.cyan}    write_file       ${C.white}Create/overwrite files${C.reset}`,
+      `${C.cyan}    edit_file        ${C.white}Surgical find-and-replace${C.reset}`,
+      `${C.cyan}    patch_file       ${C.white}Apply unified diffs${C.reset}`,
+      `${C.cyan}    list_files       ${C.white}Directory listing with glob${C.reset}`,
+      `${C.cyan}    search_text      ${C.white}Regex search across files${C.reset}`,
+      `${C.cyan}    undo             ${C.white}Revert file changes${C.reset}`,
       '',
     ];
     for (const l of lines) this._writeln(l);

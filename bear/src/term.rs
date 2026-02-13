@@ -14,13 +14,15 @@ use std::sync::mpsc as std_mpsc;
 
 #[derive(Debug)]
 pub enum RenderCmd {
-    Assistant(String),
+    AssistantChunk(String),
+    AssistantDone,
     Notice(String),
     Error(String),
     ToolRequest(String, String),
     ToolOutput(String),
     ProcessEvent(String),
     SessionInfo(String, String),
+    Thinking,
     Quit,
 }
 
@@ -145,6 +147,7 @@ struct TermState {
     history: Vec<String>,
     history_idx: Option<usize>,
     saved_input: String,
+    streaming: bool,
 }
 
 const PROMPT: &str = "bear> ";
@@ -159,6 +162,7 @@ impl TermState {
             history: Vec::new(),
             history_idx: None,
             saved_input: String::new(),
+            streaming: false,
         })
     }
 
@@ -200,10 +204,39 @@ impl TermState {
         let _ = out.flush();
     }
 
-    fn handle_render(&self, cmd: RenderCmd) {
+    fn handle_render(&mut self, cmd: RenderCmd) {
         match cmd {
-            RenderCmd::Assistant(text) => {
-                self.print_block("  ", Color::Green, &text);
+            RenderCmd::AssistantChunk(text) => {
+                if !self.streaming {
+                    // First chunk — clear prompt line and start green output
+                    self.streaming = true;
+                    let mut out = io::stdout();
+                    let _ = execute!(
+                        out,
+                        Print("\r"),
+                        terminal::Clear(ClearType::CurrentLine),
+                        SetForegroundColor(Color::Green),
+                        Print("  "),
+                    );
+                    let _ = out.flush();
+                }
+                let mut out = io::stdout();
+                // Print chunk, replacing newlines with \r\n + indent
+                let formatted = text.replace('\n', "\r\n  ");
+                let _ = execute!(
+                    out,
+                    SetForegroundColor(Color::Green),
+                    Print(&formatted),
+                );
+                let _ = out.flush();
+            }
+            RenderCmd::AssistantDone => {
+                if self.streaming {
+                    self.streaming = false;
+                    let mut out = io::stdout();
+                    let _ = execute!(out, ResetColor, Print("\r\n"));
+                    let _ = out.flush();
+                }
                 self.draw_prompt();
             }
             RenderCmd::Notice(text) => {
@@ -271,6 +304,19 @@ impl TermState {
                 );
                 let _ = out.flush();
                 self.draw_prompt();
+            }
+            RenderCmd::Thinking => {
+                let mut out = io::stdout();
+                let _ = execute!(
+                    out,
+                    Print("\r"),
+                    terminal::Clear(ClearType::CurrentLine),
+                    SetForegroundColor(Color::DarkGrey),
+                    Print("  ⟳ Thinking…"),
+                    ResetColor,
+                    Print("\r\n"),
+                );
+                let _ = out.flush();
             }
             RenderCmd::Quit => {}
         }

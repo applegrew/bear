@@ -91,6 +91,7 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     SessionInfo { session: SessionInfo },
     AssistantText { text: String },
+    AssistantTextDone,
     ToolRequest { tool_call: ToolCall },
     ToolOutput { tool_call_id: String, output: String },
     ProcessStarted { info: ProcessInfo },
@@ -99,5 +100,6 @@ pub enum ServerMessage {
     ProcessListResult { processes: Vec<ProcessInfo> },
     Notice { text: String },
     Error { text: String },
+    Thinking,
     Pong,
 }
