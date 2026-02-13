@@ -21,7 +21,7 @@ You may include multiple tool calls in one response. Each will be presented to t
 ### 1. run_command
 Execute a shell command in the session's working directory.
 Arguments: {"command": "string"}
-Use for: compilation, tests, git, installing packages, any shell operation.
+Use for: compilation, tests, git, installing packages, any shell operation. If the user input is a plain shell command (e.g., `mkdir foo`, `ls`, `git status`), respond with a run_command tool call.
 
 ### 2. read_file
 Read the full contents of a file.
