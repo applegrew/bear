@@ -6,16 +6,9 @@ use futures::StreamExt;
 use uuid::Uuid;
 
 use crate::llm::{call_ollama_streaming, compact_history_if_needed, OllamaMessage};
-use crate::process::{handle_process_kill, handle_process_input};
+use crate::process::{cleanup_session_processes, handle_process_kill, handle_process_input};
 use crate::state::{PendingToolCall, ServerState};
 use crate::tools::{execute_tool, parse_tool_calls};
-
-fn max_tool_depth() -> usize {
-    std::env::var("BEAR_MAX_TOOL_DEPTH")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(25)
-}
 
 // ---------------------------------------------------------------------------
 // WebSocket handler
@@ -124,6 +117,9 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
             _ => {}
         }
     }
+
+    // Client disconnected — clean up any running processes for this session
+    cleanup_session_processes(&state, session_id).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -169,7 +165,7 @@ async fn invoke_llm(
     tool_queue: &mut VecDeque<PendingToolCall>,
     tool_depth: &mut usize,
 ) {
-    let limit = max_tool_depth();
+    let limit = state.config.max_tool_depth;
     if *tool_depth >= limit {
         let _ = send_msg(socket, ServerMessage::Error {
             text: format!("Tool depth limit reached ({limit}). Send a new message to continue."),
@@ -439,48 +435,61 @@ async fn handle_prompt_response(
     }
 }
 
-const MAX_TOOL_OUTPUT_CHARS: usize = 8000;
-
-fn truncate_tool_output(output: &str) -> String {
-    if output.len() <= MAX_TOOL_OUTPUT_CHARS {
+fn truncate_tool_output(output: &str, max_chars: usize) -> String {
+    if output.len() <= max_chars {
         return output.to_string();
     }
-    let lines: Vec<&str> = output.lines().collect();
-    let total_lines = lines.len();
-    // Show first ~60% and last ~30% of the budget
-    let head_budget = MAX_TOOL_OUTPUT_CHARS * 60 / 100;
-    let tail_budget = MAX_TOOL_OUTPUT_CHARS * 30 / 100;
 
-    let mut head = String::new();
-    for line in &lines {
-        if head.len() + line.len() + 1 > head_budget {
+    let total_lines = output.bytes().filter(|&b| b == b'\n').count() + 1;
+    let head_budget = max_chars * 60 / 100;
+    let tail_budget = max_chars * 30 / 100;
+
+    // Scan forward: collect head lines within budget
+    let mut head_end = 0;
+    let mut head_lines = 0;
+    for line in output.lines() {
+        let next = head_end + line.len() + 1; // +1 for newline
+        if next > head_budget {
             break;
         }
-        head.push_str(line);
-        head.push('\n');
+        head_end = next;
+        head_lines += 1;
     }
-    let head_lines = head.lines().count();
 
-    let mut tail_parts: Vec<&str> = Vec::new();
-    let mut tail_len = 0;
-    for line in lines.iter().rev() {
-        if tail_len + line.len() + 1 > tail_budget {
+    // Scan backward: find tail start within budget
+    let bytes = output.as_bytes();
+    let mut tail_start = output.len();
+    let mut tail_lines = 0;
+    let mut pos = output.len();
+    while pos > 0 {
+        // Find the start of the previous line
+        let line_end = pos;
+        pos = if pos > 0 {
+            bytes[..pos - 1].iter().rposition(|&b| b == b'\n').map(|p| p + 1).unwrap_or(0)
+        } else {
+            0
+        };
+        let line_len = line_end - pos + 1;
+        if (output.len() - pos) + line_len > tail_budget {
             break;
         }
-        tail_parts.push(line);
-        tail_len += line.len() + 1;
+        tail_start = pos;
+        tail_lines += 1;
+        if pos == 0 {
+            break;
+        }
     }
-    tail_parts.reverse();
-    let tail = tail_parts.join("\n");
+
+    let head = &output[..head_end];
+    let tail = &output[tail_start..];
 
     format!(
-        "{head}\n[… truncated — {total_lines} lines total, showing first {head_lines} and last {} …]\n{tail}",
-        tail_parts.len()
+        "{head}\n[… truncated — {total_lines} lines total, showing first {head_lines} and last {tail_lines} …]\n{tail}",
     )
 }
 
 async fn append_tool_result(state: &ServerState, session_id: Uuid, output: &str) {
-    let truncated = truncate_tool_output(output);
+    let truncated = truncate_tool_output(output, state.config.max_tool_output_chars);
     let mut sessions = state.sessions.write().await;
     if let Some(session) = sessions.get_mut(&session_id) {
         session.history.push(OllamaMessage {
@@ -498,4 +507,50 @@ pub async fn send_msg(socket: &mut WebSocket, message: ServerMessage) -> anyhow:
     let payload = serde_json::to_string(&message)?;
     socket.send(Message::Text(payload)).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_short_output_unchanged() {
+        let input = "line1\nline2\nline3";
+        let result = truncate_tool_output(input, 8000);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn truncate_long_output_has_marker() {
+        // Create output that exceeds the limit
+        let lines: Vec<String> = (0..500).map(|i| format!("line {i}: some content here")).collect();
+        let input = lines.join("\n");
+        let result = truncate_tool_output(&input, 2000);
+        assert!(result.contains("truncated"));
+        assert!(result.len() < input.len());
+    }
+
+    #[test]
+    fn truncate_preserves_head_and_tail() {
+        let lines: Vec<String> = (0..100).map(|i| format!("L{i}")).collect();
+        let input = lines.join("\n");
+        let result = truncate_tool_output(&input, 200);
+        // Should contain the first line and the last line
+        assert!(result.contains("L0"));
+        assert!(result.contains("L99"));
+    }
+
+    #[test]
+    fn truncate_exact_boundary() {
+        let input = "x".repeat(8000);
+        let result = truncate_tool_output(&input, 8000);
+        assert_eq!(result, input); // exactly at limit, no truncation
+    }
+
+    #[test]
+    fn truncate_one_over_boundary() {
+        let input = "x".repeat(8001);
+        let result = truncate_tool_output(&input, 8000);
+        assert!(result.contains("truncated"));
+    }
 }

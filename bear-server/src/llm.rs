@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::env;
 use tokio::sync::mpsc;
 
 use crate::state::AppConfig;
@@ -36,41 +35,12 @@ struct OllamaStreamMessage {
 }
 
 // ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-pub fn load_config() -> AppConfig {
-    let ollama_url = env::var("BEAR_OLLAMA_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
-    let ollama_model = env::var("BEAR_OLLAMA_MODEL")
-        .unwrap_or_else(|_| "llama3.1".to_string());
-    AppConfig {
-        ollama_url,
-        ollama_model,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Token estimation
 // ---------------------------------------------------------------------------
 
 /// Rough token estimate: ~4 chars per token for English text.
 pub fn estimate_tokens(messages: &[OllamaMessage]) -> usize {
     messages.iter().map(|m| m.content.len() / 4 + 1).sum()
-}
-
-fn context_budget() -> usize {
-    std::env::var("BEAR_CONTEXT_BUDGET")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(16_000)
-}
-
-fn keep_recent() -> usize {
-    std::env::var("BEAR_KEEP_RECENT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(20)
 }
 
 // ---------------------------------------------------------------------------
@@ -122,13 +92,13 @@ pub async fn compact_history_if_needed(
     config: &AppConfig,
     history: &mut Vec<OllamaMessage>,
 ) {
-    let budget = context_budget();
+    let budget = config.context_budget;
     let tokens = estimate_tokens(history);
     if tokens <= budget {
         return;
     }
 
-    let keep = keep_recent().min(history.len().saturating_sub(1));
+    let keep = config.keep_recent.min(history.len().saturating_sub(1));
     // We need at least the system prompt + 2 messages to compact anything
     if history.len() <= keep + 2 {
         return;

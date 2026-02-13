@@ -101,6 +101,32 @@ pub struct Session {
 pub struct AppConfig {
     pub ollama_url: String,
     pub ollama_model: String,
+    pub max_tool_depth: usize,
+    pub max_tool_output_chars: usize,
+    pub context_budget: usize,
+    pub keep_recent: usize,
+}
+
+impl AppConfig {
+    pub fn load_from_env() -> Self {
+        fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        }
+
+        Self {
+            ollama_url: std::env::var("BEAR_OLLAMA_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string()),
+            ollama_model: std::env::var("BEAR_OLLAMA_MODEL")
+                .unwrap_or_else(|_| "llama3.1".to_string()),
+            max_tool_depth: env_or("BEAR_MAX_TOOL_DEPTH", 25),
+            max_tool_output_chars: env_or("BEAR_MAX_TOOL_OUTPUT_CHARS", 8000),
+            context_budget: env_or("BEAR_CONTEXT_BUDGET", 16_000),
+            keep_recent: env_or("BEAR_KEEP_RECENT", 20),
+        }
+    }
 }
 
 #[derive(Clone)]

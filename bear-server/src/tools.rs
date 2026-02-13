@@ -64,7 +64,10 @@ pub async fn execute_tool(
                 .as_str()
                 .unwrap_or("")
                 .to_string();
-            let full_path = resolve_path(&path, &ptc.cwd);
+            let full_path = match validate_tool_path(&path, &ptc.cwd) {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
             match tokio::fs::read_to_string(&full_path).await {
                 Ok(content) => content,
                 Err(err) => format!("Error reading {full_path}: {err}"),
@@ -79,7 +82,10 @@ pub async fn execute_tool(
                 .as_str()
                 .unwrap_or("")
                 .to_string();
-            let full_path = resolve_path(&path, &ptc.cwd);
+            let full_path = match validate_tool_path(&path, &ptc.cwd) {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
             push_undo(state, session_id, &full_path).await;
             if let Some(parent) = std::path::Path::new(&full_path).parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
@@ -98,12 +104,50 @@ pub async fn execute_tool(
     }
 }
 
+/// Resolve a potentially relative path against the session cwd.
+/// Handles `../`, `./`, and normalizes the result without requiring
+/// the path to exist on disk (unlike std::fs::canonicalize).
 fn resolve_path(path: &str, cwd: &str) -> String {
-    if path.starts_with('/') {
-        path.to_string()
+    use std::path::{Component, PathBuf};
+
+    let raw = if path.starts_with('/') {
+        PathBuf::from(path)
     } else {
-        format!("{}/{}", cwd, path)
+        PathBuf::from(cwd).join(path)
+    };
+
+    // Normalize: resolve `.`, `..`, collapse separators
+    let mut normalized = PathBuf::new();
+    for component in raw.components() {
+        match component {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {} // skip
+            other => normalized.push(other),
+        }
     }
+    normalized.to_string_lossy().to_string()
+}
+
+/// Resolve a path and validate it stays within the session cwd.
+/// Returns Ok(full_path) or Err(user-friendly error message).
+fn validate_tool_path(path: &str, cwd: &str) -> Result<String, String> {
+    if path.is_empty() {
+        return Err("Error: path must not be empty".to_string());
+    }
+    let full = resolve_path(path, cwd);
+    let cwd_normalized = resolve_path(cwd, "/");
+    // Allow paths within cwd or absolute paths the user explicitly provided
+    // (the LLM may legitimately reference /tmp, /etc for reading, etc.)
+    // We only block relative paths that escape cwd via ../
+    if !path.starts_with('/') && !full.starts_with(&cwd_normalized) {
+        return Err(format!(
+            "Error: path '{}' resolves to '{}' which is outside the working directory '{}'",
+            path, full, cwd
+        ));
+    }
+    Ok(full)
 }
 
 async fn push_undo(state: &ServerState, session_id: Uuid, full_path: &str) {
@@ -252,7 +296,10 @@ async fn execute_edit_file(
         return "Error: old_text must not be empty".to_string();
     }
 
-    let full_path = resolve_path(&path, &ptc.cwd);
+    let full_path = match validate_tool_path(&path, &ptc.cwd) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
     let content = match tokio::fs::read_to_string(&full_path).await {
         Ok(c) => c,
         Err(err) => return format!("Error reading {full_path}: {err}"),
@@ -294,7 +341,10 @@ async fn execute_patch_file(
         .unwrap_or("")
         .to_string();
 
-    let full_path = resolve_path(&path, &ptc.cwd);
+    let full_path = match validate_tool_path(&path, &ptc.cwd) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
     let content = match tokio::fs::read_to_string(&full_path).await {
         Ok(c) => c,
         Err(err) => return format!("Error reading {full_path}: {err}"),
@@ -412,7 +462,10 @@ async fn execute_list_files(ptc: &PendingToolCall) -> String {
         .as_u64()
         .unwrap_or(3) as usize;
 
-    let full_path = resolve_path(&path, &ptc.cwd);
+    let full_path = match validate_tool_path(&path, &ptc.cwd) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
 
     // Use blocking I/O in a spawn_blocking since walkdir is sync
     let result = tokio::task::spawn_blocking(move || {
@@ -523,7 +576,10 @@ async fn execute_search_text(ptc: &PendingToolCall) -> String {
         return "Error: pattern must not be empty".to_string();
     }
 
-    let full_path = resolve_path(&path, &ptc.cwd);
+    let full_path = match validate_tool_path(&path, &ptc.cwd) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
 
     let result = tokio::task::spawn_blocking(move || {
         search_text_sync(&full_path, &pattern, include.as_deref(), max_results)
@@ -669,4 +725,157 @@ async fn execute_undo(
         }
     }
     output.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- parse_tool_calls --------------------------------------------------
+
+    #[test]
+    fn parse_single_tool_call() {
+        let text = r#"Let me read that file.
+[TOOL_CALL]{"name": "read_file", "arguments": {"path": "src/main.rs"}}[/TOOL_CALL]"#;
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].arguments["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn parse_multiple_tool_calls() {
+        let text = r#"I'll read both files.
+[TOOL_CALL]{"name": "read_file", "arguments": {"path": "a.rs"}}[/TOOL_CALL]
+Then the second:
+[TOOL_CALL]{"name": "read_file", "arguments": {"path": "b.rs"}}[/TOOL_CALL]"#;
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].arguments["path"], "a.rs");
+        assert_eq!(calls[1].arguments["path"], "b.rs");
+    }
+
+    #[test]
+    fn parse_no_tool_calls() {
+        let text = "Just a normal response with no tools.";
+        let calls = parse_tool_calls(text);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn parse_malformed_json_skipped() {
+        let text = "[TOOL_CALL]{not valid json}[/TOOL_CALL]";
+        let calls = parse_tool_calls(text);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn parse_missing_end_tag() {
+        let text = r#"[TOOL_CALL]{"name": "read_file", "arguments": {"path": "a.rs"}}"#;
+        let calls = parse_tool_calls(text);
+        assert!(calls.is_empty());
+    }
+
+    // -- resolve_path ------------------------------------------------------
+
+    #[test]
+    fn resolve_absolute_path() {
+        assert_eq!(resolve_path("/tmp/foo.txt", "/home/user"), "/tmp/foo.txt");
+    }
+
+    #[test]
+    fn resolve_relative_path() {
+        assert_eq!(resolve_path("src/main.rs", "/home/user/project"), "/home/user/project/src/main.rs");
+    }
+
+    #[test]
+    fn resolve_parent_dir_references() {
+        assert_eq!(resolve_path("../sibling/file.rs", "/home/user/project"), "/home/user/sibling/file.rs");
+    }
+
+    #[test]
+    fn resolve_dot_references() {
+        assert_eq!(resolve_path("./src/../src/main.rs", "/home/user/project"), "/home/user/project/src/main.rs");
+    }
+
+    #[test]
+    fn resolve_multiple_parent_refs() {
+        assert_eq!(resolve_path("../../file.txt", "/a/b/c"), "/a/file.txt");
+    }
+
+    // -- validate_tool_path ------------------------------------------------
+
+    #[test]
+    fn validate_relative_within_cwd() {
+        let result = validate_tool_path("src/main.rs", "/home/user/project");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "/home/user/project/src/main.rs");
+    }
+
+    #[test]
+    fn validate_relative_escaping_cwd_blocked() {
+        let result = validate_tool_path("../../etc/passwd", "/home/user/project");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("outside the working directory"));
+    }
+
+    #[test]
+    fn validate_absolute_path_allowed() {
+        // Absolute paths are allowed (user/LLM may reference /tmp, etc.)
+        let result = validate_tool_path("/tmp/test.txt", "/home/user/project");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "/tmp/test.txt");
+    }
+
+    #[test]
+    fn validate_empty_path_rejected() {
+        let result = validate_tool_path("", "/home/user/project");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must not be empty"));
+    }
+
+    #[test]
+    fn validate_dot_path_is_cwd() {
+        let result = validate_tool_path(".", "/home/user/project");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "/home/user/project");
+    }
+
+    // -- apply_unified_diff ------------------------------------------------
+
+    #[test]
+    fn diff_add_line() {
+        let original = "line1\nline2\nline3\n";
+        let diff = "@@ -2,1 +2,2 @@\n line2\n+inserted\n line3\n";
+        let result = apply_unified_diff(original, diff).unwrap();
+        assert_eq!(result, "line1\nline2\ninserted\nline3\n");
+    }
+
+    #[test]
+    fn diff_remove_line() {
+        let original = "line1\nline2\nline3\n";
+        let diff = "@@ -1,3 +1,2 @@\n line1\n-line2\n line3\n";
+        let result = apply_unified_diff(original, diff).unwrap();
+        assert_eq!(result, "line1\nline3\n");
+    }
+
+    #[test]
+    fn diff_replace_line() {
+        let original = "aaa\nbbb\nccc\n";
+        let diff = "@@ -1,3 +1,3 @@\n aaa\n-bbb\n+BBB\n ccc\n";
+        let result = apply_unified_diff(original, diff).unwrap();
+        assert_eq!(result, "aaa\nBBB\nccc\n");
+    }
+
+    #[test]
+    fn diff_with_header_lines() {
+        let original = "hello\nworld\n";
+        let diff = "--- a/file.txt\n+++ b/file.txt\n@@ -1,2 +1,2 @@\n hello\n-world\n+universe\n";
+        let result = apply_unified_diff(original, diff).unwrap();
+        assert_eq!(result, "hello\nuniverse\n");
+    }
 }

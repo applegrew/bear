@@ -22,8 +22,8 @@ use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
-use llm::{load_config, OllamaMessage};
-use state::{Session, ServerState, DEFAULT_BIND, SYSTEM_PROMPT};
+use llm::OllamaMessage;
+use state::{AppConfig, Session, ServerState, DEFAULT_BIND, SYSTEM_PROMPT};
 
 // ---------------------------------------------------------------------------
 // main
@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
 
     let _lock = acquire_server_lock()?;
 
-    let config = load_config();
+    let config = AppConfig::load_from_env();
     tracing::info!(
         "ollama configured: url={} model={}",
         config.ollama_url,
