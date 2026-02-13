@@ -19,7 +19,7 @@ pub enum RenderCmd {
     Notice(String),
     Error(String),
     ToolRequest(String, String),
-    ToolOutput(String),
+    ToolOutput { tool_name: String, tool_args: serde_json::Value, output: String },
     ProcessEvent(String),
     SessionInfo(String, String),
     UserPrompt {
@@ -220,6 +220,99 @@ impl TermState {
         let _ = out.flush();
     }
 
+    /// Max lines to display for tool output before truncating.
+    const DISPLAY_MAX_LINES: usize = 20;
+
+    /// Render tool output with tool-specific formatting.
+    fn render_tool_output(&self, tool_name: &str, tool_args: &serde_json::Value, output: &str) {
+        match tool_name {
+            "read_file" => {
+                let path = tool_args["path"].as_str().unwrap_or("?");
+                let line_count = output.lines().count();
+                if output.starts_with("Error") {
+                    self.print_block("  ✗ ", Color::Red, output);
+                } else {
+                    self.print_block(
+                        "  ✓ ",
+                        Color::Green,
+                        &format!("Read {} ({} lines)", path, line_count),
+                    );
+                }
+            }
+            "write_file" => {
+                // output is like "Written 123 bytes to /path" or "Error ..."
+                let icon = if output.starts_with("Error") { ("  ✗ ", Color::Red) } else { ("  ✓ ", Color::Green) };
+                self.print_block(icon.0, icon.1, output);
+            }
+            "edit_file" | "patch_file" => {
+                let icon = if output.starts_with("Error") || output.starts_with("Patch failed") {
+                    ("  ✗ ", Color::Red)
+                } else {
+                    ("  ✓ ", Color::Green)
+                };
+                self.print_block(icon.0, icon.1, output);
+            }
+            "run_command" => {
+                self.print_truncated_output(output);
+            }
+            "list_files" => {
+                let count = output.lines().count();
+                self.print_block("  ✓ ", Color::Green, &format!("{count} entries"));
+                self.print_truncated_output(output);
+            }
+            "search_text" => {
+                let count = output.lines().filter(|l| !l.starts_with('[') && !l.is_empty()).count();
+                if output == "No matches found." {
+                    self.print_block("  │ ", Color::DarkGrey, output);
+                } else {
+                    self.print_block("  ✓ ", Color::Green, &format!("{count} matches"));
+                    self.print_truncated_output(output);
+                }
+            }
+            "undo" => {
+                let icon = if output.starts_with("Error") || output == "Nothing to undo." {
+                    ("  │ ", Color::DarkGrey)
+                } else {
+                    ("  ✓ ", Color::Green)
+                };
+                self.print_block(icon.0, icon.1, output);
+            }
+            "user_prompt_options" => {
+                self.print_block("  │ ", Color::Cyan, output);
+            }
+            _ => {
+                // Unknown tool — show truncated output
+                self.print_truncated_output(output);
+            }
+        }
+    }
+
+    /// Print output with a line cap, showing head + tail with a truncation notice.
+    fn print_truncated_output(&self, output: &str) {
+        let lines: Vec<&str> = output.lines().collect();
+        let total = lines.len();
+        if total <= Self::DISPLAY_MAX_LINES {
+            self.print_block("  │ ", Color::DarkGrey, output);
+            return;
+        }
+        let head = Self::DISPLAY_MAX_LINES / 2;
+        let tail = Self::DISPLAY_MAX_LINES - head;
+        let mut display = String::new();
+        for line in &lines[..head] {
+            display.push_str(line);
+            display.push('\n');
+        }
+        display.push_str(&format!(
+            "  … ({} lines hidden) …\n",
+            total - head - tail
+        ));
+        for line in &lines[total - tail..] {
+            display.push_str(line);
+            display.push('\n');
+        }
+        self.print_block("  │ ", Color::DarkGrey, display.trim_end());
+    }
+
     /// Run an inline interactive menu (blocking). Returns selected indices.
     fn run_inline_menu(&self, question: &str, options: &[String], multi: bool) -> Vec<usize> {
         let mut out = io::stdout();
@@ -417,8 +510,8 @@ impl TermState {
                 );
                 let _ = out.flush();
             }
-            RenderCmd::ToolOutput(text) => {
-                self.print_block("  | ", Color::DarkGrey, &text);
+            RenderCmd::ToolOutput { tool_name, tool_args, output } => {
+                self.render_tool_output(&tool_name, &tool_args, &output);
                 self.draw_prompt();
             }
             RenderCmd::ProcessEvent(text) => {

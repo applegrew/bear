@@ -45,6 +45,10 @@ export class BearClient {
     // Streaming state
     this._streaming = false;
 
+    // Last tool tracking for tool-specific output rendering
+    this._lastToolName = '';
+    this._lastToolArgs = {};
+
     // Tool confirmation state
     this.pendingToolCall = null;
     this.autoApproved = new Set();
@@ -243,6 +247,8 @@ export class BearClient {
 
       case 'tool_request': {
         const tc = msg.tool_call;
+        this._lastToolName = tc.name;
+        this._lastToolArgs = tc.arguments;
         const baseCmd = this._extractBaseCommand(tc);
 
         this._clearInputLine();
@@ -267,9 +273,7 @@ export class BearClient {
 
       case 'tool_output':
         this._clearInputLine();
-        for (const line of msg.output.split('\n')) {
-          this._writeln(`${C.cyan}  │ ${line}${C.reset}`);
-        }
+        this._renderToolOutput(this._lastToolName || '', this._lastToolArgs || {}, msg.output);
         this._restorePrompt();
         break;
 
@@ -770,6 +774,93 @@ export class BearClient {
       return cmd;
     }
     return toolCall.name;
+  }
+
+  // -------------------------------------------------------------------------
+  // Tool-specific output rendering
+  // -------------------------------------------------------------------------
+
+  _renderToolOutput(toolName, toolArgs, output) {
+    const MAX_LINES = 20;
+
+    switch (toolName) {
+      case 'read_file': {
+        const path = toolArgs.path || '?';
+        if (output.startsWith('Error')) {
+          this._writeln(`${C.red}  ✗ ${output}${C.reset}`);
+        } else {
+          const lineCount = output.split('\n').length;
+          this._writeln(`${C.green}  ✓ Read ${path} (${lineCount} lines)${C.reset}`);
+        }
+        break;
+      }
+      case 'write_file': {
+        const color = output.startsWith('Error') ? C.red : C.green;
+        const icon = output.startsWith('Error') ? '✗' : '✓';
+        this._writeln(`${color}  ${icon} ${output}${C.reset}`);
+        break;
+      }
+      case 'edit_file':
+      case 'patch_file': {
+        const isErr = output.startsWith('Error') || output.startsWith('Patch failed');
+        const color = isErr ? C.red : C.green;
+        const icon = isErr ? '✗' : '✓';
+        this._writeln(`${color}  ${icon} ${output}${C.reset}`);
+        break;
+      }
+      case 'run_command':
+        this._writeToolTruncated(output, MAX_LINES);
+        break;
+      case 'list_files': {
+        const count = output.split('\n').filter(l => l.length > 0).length;
+        this._writeln(`${C.green}  ✓ ${count} entries${C.reset}`);
+        this._writeToolTruncated(output, MAX_LINES);
+        break;
+      }
+      case 'search_text': {
+        if (output === 'No matches found.') {
+          this._writeln(`${C.gray}  │ ${output}${C.reset}`);
+        } else {
+          const count = output.split('\n').filter(l => l.length > 0 && !l.startsWith('[')).length;
+          this._writeln(`${C.green}  ✓ ${count} matches${C.reset}`);
+          this._writeToolTruncated(output, MAX_LINES);
+        }
+        break;
+      }
+      case 'undo': {
+        const isNoop = output.startsWith('Error') || output === 'Nothing to undo.';
+        const color = isNoop ? C.gray : C.green;
+        const icon = isNoop ? '│' : '✓';
+        this._writeln(`${color}  ${icon} ${output}${C.reset}`);
+        break;
+      }
+      case 'user_prompt_options':
+        this._writeln(`${C.cyan}  │ ${output}${C.reset}`);
+        break;
+      default:
+        this._writeToolTruncated(output, MAX_LINES);
+        break;
+    }
+  }
+
+  _writeToolTruncated(output, maxLines) {
+    const lines = output.split('\n');
+    const total = lines.length;
+    if (total <= maxLines) {
+      for (const line of lines) {
+        this._writeln(`${C.gray}  │ ${line}${C.reset}`);
+      }
+      return;
+    }
+    const head = Math.floor(maxLines / 2);
+    const tail = maxLines - head;
+    for (let i = 0; i < head; i++) {
+      this._writeln(`${C.gray}  │ ${lines[i]}${C.reset}`);
+    }
+    this._writeln(`${C.dim}${C.gray}  │   … (${total - head - tail} lines hidden) …${C.reset}`);
+    for (let i = total - tail; i < total; i++) {
+      this._writeln(`${C.gray}  │ ${lines[i]}${C.reset}`);
+    }
   }
 
   // -------------------------------------------------------------------------

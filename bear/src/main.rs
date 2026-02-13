@@ -178,6 +178,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
 
     let mut pending_tool: Option<PendingTool> = None;
     let mut auto_approved: HashSet<String> = HashSet::new();
+    let mut last_tool: (String, serde_json::Value) = (String::new(), serde_json::Value::Null);
 
     loop {
         let event = tokio::select! {
@@ -189,7 +190,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
         match event {
             LoopEvent::FromServer(msg) => {
                 if let Some(auto_confirm) = dispatch_server_msg(
-                    &msg, &render_tx, &mut pending_tool, &auto_approved,
+                    &msg, &render_tx, &mut pending_tool, &auto_approved, &mut last_tool,
                 ) {
                     // Auto-approved tool call — send confirmation immediately
                     let payload = serde_json::to_string(&ClientMessage::ToolConfirm {
@@ -397,6 +398,7 @@ fn dispatch_server_msg(
     render_tx: &std_mpsc::Sender<RenderCmd>,
     pending_tool: &mut Option<PendingTool>,
     auto_approved: &HashSet<String>,
+    last_tool: &mut (String, serde_json::Value),
 ) -> Option<String> {
     match msg {
         ServerMessage::SessionInfo { session } => {
@@ -410,6 +412,7 @@ fn dispatch_server_msg(
             let _ = render_tx.send(RenderCmd::AssistantChunk(text.clone()));
         }
         ServerMessage::ToolRequest { tool_call } => {
+            *last_tool = (tool_call.name.clone(), tool_call.arguments.clone());
             let base_cmd = extract_base_command(tool_call);
             let args_str = serde_json::to_string_pretty(&tool_call.arguments)
                 .unwrap_or_else(|_| tool_call.arguments.to_string());
@@ -432,7 +435,11 @@ fn dispatch_server_msg(
             ));
         }
         ServerMessage::ToolOutput { output, .. } => {
-            let _ = render_tx.send(RenderCmd::ToolOutput(output.clone()));
+            let _ = render_tx.send(RenderCmd::ToolOutput {
+                tool_name: last_tool.0.clone(),
+                tool_args: last_tool.1.clone(),
+                output: output.clone(),
+            });
         }
         ServerMessage::ProcessStarted { info } => {
             let _ = render_tx.send(RenderCmd::ProcessEvent(
