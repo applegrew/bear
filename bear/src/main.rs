@@ -174,7 +174,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
     let (render_tx, render_rx) = std_mpsc::channel::<RenderCmd>();
 
     // Spawn the single terminal owner thread
-    let _term_handle = term::spawn_terminal_thread(render_rx, term_event_tx);
+    let term_handle = term::spawn_terminal_thread(render_rx, term_event_tx);
 
     let mut pending_tool: Option<PendingTool> = None;
     let mut auto_approved: HashSet<String> = HashSet::new();
@@ -266,6 +266,11 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                         "Ending current session. Returning to session selection...".into(),
                     ));
                     let _ = render_tx.send(RenderCmd::Quit);
+                    // Drop the sender so the terminal thread isn't blocked,
+                    // then join to ensure raw mode is cleaned up before the
+                    // session picker takes over keyboard input.
+                    drop(render_tx);
+                    let _ = term_handle.join();
                     return Ok(SessionResult::EndSession);
                 } else if line == "/allowed" {
                     if auto_approved.is_empty() {
@@ -330,6 +335,8 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
             }
             LoopEvent::FromTerm(TermEvent::Quit) => {
                 let _ = render_tx.send(RenderCmd::Quit);
+                drop(render_tx);
+                let _ = term_handle.join();
                 return Ok(SessionResult::Quit);
             }
         }
