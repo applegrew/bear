@@ -2,6 +2,18 @@
 
 Bear is a Rust-based "claude code"-style CLI with persistent sessions backed by a single `bear-server` process. Multiple `bear` clients can connect to the same server, and sessions persist even after client terminals close.
 
+## Features
+
+- Persistent sessions with a single shared `bear-server`
+- Native and browser clients
+- Interactive session picker and command help
+- Picker-based tool call confirmations (Approve / Deny / Always approve)
+- Auto-handled `user_prompt_options` prompts (no tool confirmation step)
+- Unified diff output for file mutations (`write_file`, `edit_file`, `patch_file`)
+- Esc during streaming shows a prompt to interrupt and send a new request
+- Tool-depth guard with a continuation prompt (continue / continue for next N / stop)
+- Session commands: `/ps`, `/kill`, `/send`, `/session name`, `/allowed`, `/exit`, `/end`, `/help`
+
 ## Quick start
 
 ```bash
