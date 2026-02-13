@@ -473,7 +473,12 @@ export class BearClient {
 
         // Bare Esc (not part of arrow sequence)
         if (code === 27) {
-          if (this._dropdownActive()) {
+          if (this._streaming) {
+            // During streaming: show prompt so user can type to interrupt
+            this.term.write(`${C.reset}\r\n`);
+            this._writeln(`${C.gray}  (type a message and press Enter to interrupt)${C.reset}`);
+            this._drawPrompt();
+          } else if (this._dropdownActive()) {
             this.inputBuf = '';
             this.cursorPos = 0;
             this._dropdownIdx = -1;

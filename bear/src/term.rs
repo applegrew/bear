@@ -209,7 +209,19 @@ pub fn spawn_terminal_thread(
                             // Tab outside dropdown — no-op
                         }
                         KeyAction::Escape => {
-                            // Esc outside dropdown — no-op
+                            if state.streaming {
+                                // During streaming: show prompt so user can type to interrupt
+                                let mut out = io::stdout();
+                                let _ = execute!(out, ResetColor, Print("\r\n"));
+                                let _ = execute!(
+                                    out,
+                                    SetForegroundColor(Color::DarkGrey),
+                                    Print("  (type a message and press Enter to interrupt)\r\n"),
+                                    ResetColor,
+                                );
+                                let _ = out.flush();
+                                state.draw_prompt();
+                            }
                         }
                         KeyAction::Submit => {
                             let line = state.submit();

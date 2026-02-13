@@ -176,6 +176,9 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
                         }).await;
                         break;
                     }
+                    ClientMessage::Interrupt => {
+                        // No-op outside of streaming — handled inside invoke_llm
+                    }
                     ClientMessage::Ping => {
                         let _ = send_msg(&mut socket, ServerMessage::Pong).await;
                     }
@@ -318,28 +321,93 @@ async fn invoke_llm(
         call_ollama_streaming(&http, &cfg, &history, &chunk_tx).await
     });
 
-    // Forward chunks to the client as AssistantText
-    while let Some(chunk) = chunk_rx.recv().await {
-        let _ = send_msg(socket, ServerMessage::AssistantText {
-            text: chunk,
-        }).await;
+    // Forward chunks to the client as AssistantText, but also listen
+    // for an Interrupt message on the socket. If interrupted, abort the
+    // LLM task, save partial output, and return the new user input.
+    let mut partial_content = String::new();
+    let mut interrupted_input: Option<String> = None;
+
+    loop {
+        tokio::select! {
+            chunk = chunk_rx.recv() => {
+                match chunk {
+                    Some(text) => {
+                        partial_content.push_str(&text);
+                        let _ = send_msg(socket, ServerMessage::AssistantText {
+                            text,
+                        }).await;
+                    }
+                    None => break, // channel closed, LLM done
+                }
+            }
+            ws_msg = socket.next() => {
+                if let Some(Ok(Message::Text(raw))) = ws_msg {
+                    if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&raw) {
+                        match client_msg {
+                            ClientMessage::Interrupt => {
+                                // Abort the LLM task
+                                llm_handle.abort();
+                                // Drain remaining chunks
+                                while chunk_rx.try_recv().is_ok() {}
+                                break;
+                            }
+                            ClientMessage::Input { text } => {
+                                // User sent new input — treat as interrupt + new request
+                                llm_handle.abort();
+                                while chunk_rx.try_recv().is_ok() {}
+                                interrupted_input = Some(text);
+                                break;
+                            }
+                            _ => {
+                                // Ignore other messages during streaming
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     let _ = send_msg(socket, ServerMessage::AssistantTextDone).await;
 
+    // Save partial or full response to history
+    if !partial_content.is_empty() {
+        let mut sessions = state.sessions.write().await;
+        if let Some(session) = sessions.get_mut(&session_id) {
+            session.history.push(OllamaMessage {
+                role: "assistant".to_string(),
+                content: partial_content.clone(),
+            });
+        }
+    }
+
+    // If interrupted with new input, process it immediately
+    if let Some(new_input) = interrupted_input {
+        *tool_depth = 0;
+        *depth_limit = state.config.max_tool_depth;
+        *bulk_increment = 50;
+        tool_queue.clear();
+
+        let user_msg = OllamaMessage {
+            role: "user".to_string(),
+            content: new_input,
+        };
+        {
+            let mut sessions = state.sessions.write().await;
+            if let Some(session) = sessions.get_mut(&session_id) {
+                session.info.touch();
+                session.history.push(user_msg);
+            }
+        }
+        // Recurse to handle the new input
+        Box::pin(invoke_llm(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
+        return;
+    }
+
+    // Normal completion — check for tool calls
     match llm_handle.await {
         Ok(Ok(reply)) => {
             let tool_calls = parse_tool_calls(&reply.content);
-
-            {
-                let mut sessions = state.sessions.write().await;
-                if let Some(session) = sessions.get_mut(&session_id) {
-                    session.history.push(OllamaMessage {
-                        role: "assistant".to_string(),
-                        content: reply.content.clone(),
-                    });
-                }
-            }
 
             // Queue all tool calls
             tool_queue.clear();
@@ -364,9 +432,14 @@ async fn invoke_llm(
             }).await;
         }
         Err(err) => {
-            let _ = send_msg(socket, ServerMessage::Error {
-                text: format!("LLM task panicked: {err}"),
-            }).await;
+            // JoinError — could be a panic or abort (from interrupt)
+            if err.is_cancelled() {
+                // Interrupted — already handled above
+            } else {
+                let _ = send_msg(socket, ServerMessage::Error {
+                    text: format!("LLM task panicked: {err}"),
+                }).await;
+            }
         }
     }
 }

@@ -83,6 +83,7 @@ pub enum ClientMessage {
     ProcessList,
     SessionRename { name: String },
     SessionEnd,
+    Interrupt,
     Ping,
 }
 
