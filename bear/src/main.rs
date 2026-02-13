@@ -309,6 +309,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                         "  list_files       Directory listing with glob",
                         "  search_text      Regex search across files",
                         "  undo             Revert file changes",
+                        "  user_prompt_options  Present choices to user",
                     ]
                     .join("\n");
                     let _ = render_tx.send(RenderCmd::Notice(help));
@@ -332,6 +333,12 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                         "Tool call cancelled.".into(),
                     ));
                 }
+            }
+            LoopEvent::FromTerm(TermEvent::UserPromptResult { prompt_id, selected }) => {
+                let payload = serde_json::to_string(
+                    &ClientMessage::UserPromptResponse { prompt_id, selected },
+                )?;
+                ws_write.send(Message::Text(payload)).await?;
             }
             LoopEvent::FromTerm(TermEvent::Quit) => {
                 let _ = render_tx.send(RenderCmd::Quit);
@@ -456,6 +463,14 @@ fn dispatch_server_msg(
                 }
                 let _ = render_tx.send(RenderCmd::Notice(lines.join("\n")));
             }
+        }
+        ServerMessage::UserPrompt { prompt_id, question, options, multi } => {
+            let _ = render_tx.send(RenderCmd::UserPrompt {
+                prompt_id: prompt_id.clone(),
+                question: question.clone(),
+                options: options.clone(),
+                multi: *multi,
+            });
         }
         ServerMessage::Notice { text } => {
             let _ = render_tx.send(RenderCmd::Notice(text.clone()));

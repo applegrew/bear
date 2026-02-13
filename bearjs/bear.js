@@ -55,6 +55,15 @@ export class BearClient {
     this.pickerIdx = 0;
     this.pickerRendered = false;
 
+    // User prompt state
+    this.inUserPrompt = false;
+    this.userPromptId = null;
+    this.userPromptOptions = [];
+    this.userPromptMulti = false;
+    this.userPromptIdx = 0;
+    this.userPromptSelected = [];
+    this.userPromptRendered = false;
+
     this._bindTerminal();
   }
 
@@ -315,6 +324,20 @@ export class BearClient {
         this._writeln(`${C.dim}${C.gray}  ⟳ Thinking…${C.reset}`);
         break;
 
+      case 'user_prompt':
+        this._clearInputLine();
+        this.inUserPrompt = true;
+        this.userPromptId = msg.prompt_id;
+        this.userPromptOptions = msg.options;
+        this.userPromptMulti = msg.multi;
+        this.userPromptIdx = 0;
+        this.userPromptSelected = new Array(msg.options.length).fill(false);
+        this.userPromptRendered = false;
+        this._writeln(`${C.bold}${C.cyan}  ${msg.question}${C.reset}`);
+        this._writeln('');
+        this._renderUserPrompt();
+        break;
+
       case 'pong':
         break;
     }
@@ -329,6 +352,12 @@ export class BearClient {
       // Session picker mode
       if (this.inSessionPicker) {
         this._handlePickerKey(data);
+        return;
+      }
+
+      // User prompt mode
+      if (this.inUserPrompt) {
+        this._handleUserPromptKey(data);
         return;
       }
 
@@ -419,6 +448,92 @@ export class BearClient {
     } else if (data === '\r' || data === '\n') {
       this._pickerSelect();
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // User prompt (interactive option selection)
+  // -------------------------------------------------------------------------
+
+  _handleUserPromptKey(data) {
+    const total = this.userPromptOptions.length;
+
+    if (data === '\x1b[A') {
+      // Up
+      if (this.userPromptIdx > 0) {
+        this.userPromptIdx--;
+        this._renderUserPrompt();
+      }
+    } else if (data === '\x1b[B') {
+      // Down
+      if (this.userPromptIdx < total - 1) {
+        this.userPromptIdx++;
+        this._renderUserPrompt();
+      }
+    } else if (data === ' ' && this.userPromptMulti) {
+      // Toggle selection in multi mode
+      this.userPromptSelected[this.userPromptIdx] = !this.userPromptSelected[this.userPromptIdx];
+      this._renderUserPrompt();
+    } else if (data === '\r' || data === '\n') {
+      this._userPromptSelect();
+    }
+  }
+
+  _renderUserPrompt() {
+    const opts = this.userPromptOptions;
+    const totalLines = opts.length + 1; // options + hint
+
+    // Clear previous render
+    if (this.userPromptRendered) {
+      for (let i = 0; i < totalLines; i++) {
+        this.term.write('\x1b[A\x1b[2K');
+      }
+    }
+    this.userPromptRendered = true;
+
+    for (let i = 0; i < opts.length; i++) {
+      const focused = i === this.userPromptIdx;
+      if (this.userPromptMulti) {
+        const check = this.userPromptSelected[i] ? '[x]' : '[ ]';
+        if (focused) {
+          this.term.writeln(`${C.bold}${C.yellow}  ${check} ${C.white}${opts[i]}${C.reset}`);
+        } else {
+          this.term.writeln(`${C.gray}  ${check} ${opts[i]}${C.reset}`);
+        }
+      } else {
+        if (focused) {
+          this.term.writeln(`${C.bold}${C.blue}  ❯ ${C.white}${opts[i]}${C.reset}`);
+        } else {
+          this.term.writeln(`${C.gray}    ${opts[i]}${C.reset}`);
+        }
+      }
+    }
+
+    const hint = this.userPromptMulti
+      ? `${C.gray}  ↑/↓ navigate, Space toggle, Enter confirm${C.reset}`
+      : `${C.gray}  ↑/↓ navigate, Enter select${C.reset}`;
+    this.term.writeln(hint);
+  }
+
+  _userPromptSelect() {
+    this.inUserPrompt = false;
+    this.term.writeln('');
+
+    let selected;
+    if (this.userPromptMulti) {
+      selected = [];
+      for (let i = 0; i < this.userPromptSelected.length; i++) {
+        if (this.userPromptSelected[i]) selected.push(i);
+      }
+    } else {
+      selected = [this.userPromptIdx];
+    }
+
+    this._sendJson({
+      type: 'user_prompt_response',
+      prompt_id: this.userPromptId,
+      selected,
+    });
+    this._drawPrompt();
   }
 
   // -------------------------------------------------------------------------
@@ -686,6 +801,7 @@ export class BearClient {
       `${C.cyan}    list_files       ${C.white}Directory listing with glob${C.reset}`,
       `${C.cyan}    search_text      ${C.white}Regex search across files${C.reset}`,
       `${C.cyan}    undo             ${C.white}Revert file changes${C.reset}`,
+      `${C.cyan}    user_prompt_options ${C.white}Present choices to user${C.reset}`,
       '',
     ];
     for (const l of lines) this._writeln(l);

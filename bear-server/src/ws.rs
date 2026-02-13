@@ -21,6 +21,14 @@ fn max_tool_depth() -> usize {
 // WebSocket handler
 // ---------------------------------------------------------------------------
 
+/// Tracks a user_prompt_options tool that is waiting for the client's selection.
+struct PendingPrompt {
+    prompt_id: String,
+    tool_call: PendingToolCall,
+    options: Vec<String>,
+    multi: bool,
+}
+
 pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: WebSocket) {
     let session_info = {
         let sessions = state.sessions.read().await;
@@ -48,6 +56,7 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
     let mut pending: Option<PendingToolCall> = None;
     let mut tool_queue: VecDeque<PendingToolCall> = VecDeque::new();
     let mut tool_depth: usize = 0;
+    let mut pending_prompt: Option<PendingPrompt> = None;
 
     while let Some(Ok(msg)) = socket.next().await {
         match msg {
@@ -74,8 +83,17 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
                     ClientMessage::ToolConfirm { tool_call_id, approved } => {
                         handle_tool_confirm(
                             &state, session_id, &mut socket,
-                            &mut pending, &mut tool_queue, &mut tool_depth,
+                            &mut pending, &mut pending_prompt,
+                            &mut tool_queue, &mut tool_depth,
                             &tool_call_id, approved,
+                        ).await;
+                    }
+                    ClientMessage::UserPromptResponse { prompt_id, selected } => {
+                        handle_prompt_response(
+                            &state, session_id, &mut socket,
+                            &mut pending, &mut pending_prompt,
+                            &mut tool_queue, &mut tool_depth,
+                            &prompt_id, selected,
                         ).await;
                     }
                     ClientMessage::ProcessList => {
@@ -270,6 +288,7 @@ async fn handle_tool_confirm(
     session_id: Uuid,
     socket: &mut WebSocket,
     pending: &mut Option<PendingToolCall>,
+    pending_prompt: &mut Option<PendingPrompt>,
     tool_queue: &mut VecDeque<PendingToolCall>,
     tool_depth: &mut usize,
     tool_call_id: &str,
@@ -300,6 +319,49 @@ async fn handle_tool_confirm(
         return;
     }
 
+    // Special handling for user_prompt_options: send prompt to client and wait
+    if ptc.tool_call.name == "user_prompt_options" {
+        let args = &ptc.tool_call.arguments;
+        let question = args["question"].as_str().unwrap_or("Choose:").to_string();
+        let options: Vec<String> = args["options"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let multi = args["multi"].as_bool().unwrap_or(false);
+
+        if options.is_empty() {
+            let output = "Error: user_prompt_options requires a non-empty 'options' array.".to_string();
+            let _ = send_msg(socket, ServerMessage::ToolOutput {
+                tool_call_id: ptc.tool_call.id.clone(),
+                output: output.clone(),
+            }).await;
+            append_tool_result(state, session_id, &output).await;
+            *tool_depth += 1;
+            if !tool_queue.is_empty() {
+                present_next_tool(socket, pending, tool_queue).await;
+            } else {
+                invoke_llm(state, session_id, socket, pending, tool_queue, tool_depth).await;
+            }
+            return;
+        }
+
+        let prompt_id = format!("prompt_{}", Uuid::new_v4());
+        let _ = send_msg(socket, ServerMessage::UserPrompt {
+            prompt_id: prompt_id.clone(),
+            question: question.clone(),
+            options: options.clone(),
+            multi,
+        }).await;
+
+        *pending_prompt = Some(PendingPrompt {
+            prompt_id,
+            tool_call: ptc,
+            options,
+            multi,
+        });
+        return;
+    }
+
     let output = execute_tool(state, session_id, socket, &ptc).await;
     let _ = send_msg(socket, ServerMessage::ToolOutput {
         tool_call_id: ptc.tool_call.id.clone(),
@@ -313,6 +375,66 @@ async fn handle_tool_confirm(
         present_next_tool(socket, pending, tool_queue).await;
     } else {
         // All tools from this response executed — re-invoke LLM
+        invoke_llm(state, session_id, socket, pending, tool_queue, tool_depth).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// User prompt response
+// ---------------------------------------------------------------------------
+
+async fn handle_prompt_response(
+    state: &ServerState,
+    session_id: Uuid,
+    socket: &mut WebSocket,
+    pending: &mut Option<PendingToolCall>,
+    pending_prompt: &mut Option<PendingPrompt>,
+    tool_queue: &mut VecDeque<PendingToolCall>,
+    tool_depth: &mut usize,
+    prompt_id: &str,
+    selected: Vec<usize>,
+) {
+    let pp = match pending_prompt.take() {
+        Some(p) if p.prompt_id == prompt_id => p,
+        other => {
+            *pending_prompt = other;
+            let _ = send_msg(socket, ServerMessage::Error {
+                text: "no matching pending prompt".to_string(),
+            }).await;
+            return;
+        }
+    };
+
+    // Build the tool output from the user's selection
+    let selected_labels: Vec<String> = selected
+        .iter()
+        .filter_map(|&i| pp.options.get(i).cloned())
+        .collect();
+
+    let output = if pp.multi {
+        if selected_labels.is_empty() {
+            "User selected: (none)".to_string()
+        } else {
+            format!("User selected: {}", selected_labels.join(", "))
+        }
+    } else {
+        match selected_labels.first() {
+            Some(label) => format!("User selected: {label}"),
+            None => "User selected: (none)".to_string(),
+        }
+    };
+
+    let _ = send_msg(socket, ServerMessage::ToolOutput {
+        tool_call_id: pp.tool_call.tool_call.id.clone(),
+        output: output.clone(),
+    }).await;
+    append_tool_result(state, session_id, &output).await;
+    *tool_depth += 1;
+
+    // Continue the agentic loop
+    if !tool_queue.is_empty() {
+        present_next_tool(socket, pending, tool_queue).await;
+    } else {
         invoke_llm(state, session_id, socket, pending, tool_queue, tool_depth).await;
     }
 }

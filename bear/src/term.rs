@@ -22,6 +22,12 @@ pub enum RenderCmd {
     ToolOutput(String),
     ProcessEvent(String),
     SessionInfo(String, String),
+    UserPrompt {
+        prompt_id: String,
+        question: String,
+        options: Vec<String>,
+        multi: bool,
+    },
     Thinking,
     Quit,
 }
@@ -33,6 +39,7 @@ pub enum RenderCmd {
 #[derive(Debug)]
 pub enum TermEvent {
     UserLine(String),
+    UserPromptResult { prompt_id: String, selected: Vec<usize> },
     Interrupt,
     Quit,
 }
@@ -65,6 +72,15 @@ pub fn spawn_terminal_thread(
                         if matches!(cmd, RenderCmd::Quit) {
                             state.cleanup();
                             return;
+                        }
+                        // Intercept UserPrompt: run inline menu, send result
+                        if let RenderCmd::UserPrompt { prompt_id, question, options, multi } = cmd {
+                            let selected = state.run_inline_menu(&question, &options, multi);
+                            let _ = rt.block_on(event_tx.send(
+                                TermEvent::UserPromptResult { prompt_id, selected },
+                            ));
+                            state.draw_prompt();
+                            continue;
                         }
                         state.handle_render(cmd);
                     }
@@ -204,6 +220,130 @@ impl TermState {
         let _ = out.flush();
     }
 
+    /// Run an inline interactive menu (blocking). Returns selected indices.
+    fn run_inline_menu(&self, question: &str, options: &[String], multi: bool) -> Vec<usize> {
+        let mut out = io::stdout();
+        let mut cursor_idx: usize = 0;
+        let mut selected: Vec<bool> = vec![false; options.len()];
+
+        // Print question
+        let _ = execute!(
+            out,
+            Print("\r"),
+            terminal::Clear(ClearType::CurrentLine),
+            SetForegroundColor(Color::Cyan),
+            Print("  "),
+            Print(question),
+            ResetColor,
+            Print("\r\n"),
+        );
+        let _ = out.flush();
+
+        let draw = |out: &mut io::Stdout, opts: &[String], cur: usize, sel: &[bool], is_multi: bool, redraw: bool| {
+            if redraw {
+                // Move up to overwrite previous render
+                for _ in 0..opts.len() + 1 {
+                    let _ = execute!(out, cursor::MoveUp(1));
+                }
+                let _ = execute!(out, Print("\r"), terminal::Clear(ClearType::FromCursorDown));
+            }
+            for (i, opt) in opts.iter().enumerate() {
+                let focused = i == cur;
+                if is_multi {
+                    let check = if sel[i] { "[x]" } else { "[ ]" };
+                    if focused {
+                        let _ = execute!(
+                            out,
+                            SetForegroundColor(Color::Yellow),
+                            Print("  "),
+                            Print(check),
+                            Print(" "),
+                            SetForegroundColor(Color::White),
+                            Print(opt),
+                            ResetColor,
+                            Print("\r\n"),
+                        );
+                    } else {
+                        let _ = execute!(
+                            out,
+                            SetForegroundColor(Color::DarkGrey),
+                            Print("  "),
+                            Print(check),
+                            Print(" "),
+                            Print(opt),
+                            ResetColor,
+                            Print("\r\n"),
+                        );
+                    }
+                } else if focused {
+                    let _ = execute!(
+                        out,
+                        SetForegroundColor(Color::Yellow),
+                        Print("  > "),
+                        SetForegroundColor(Color::White),
+                        Print(opt),
+                        ResetColor,
+                        Print("\r\n"),
+                    );
+                } else {
+                    let _ = execute!(
+                        out,
+                        SetForegroundColor(Color::DarkGrey),
+                        Print("    "),
+                        Print(opt),
+                        ResetColor,
+                        Print("\r\n"),
+                    );
+                }
+            }
+            let hint = if is_multi { "  ↑↓ navigate  ␣ toggle  ⏎ confirm" } else { "  ↑↓ navigate  ⏎ select" };
+            let _ = execute!(
+                out,
+                SetForegroundColor(Color::DarkGrey),
+                Print(hint),
+                ResetColor,
+            );
+            let _ = out.flush();
+        };
+
+        draw(&mut out, options, cursor_idx, &selected, multi, false);
+
+        loop {
+            if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
+                if let Ok(Event::Key(key)) = event::read() {
+                    match key.code {
+                        KeyCode::Up => {
+                            cursor_idx = if cursor_idx > 0 { cursor_idx - 1 } else { options.len() - 1 };
+                            draw(&mut out, options, cursor_idx, &selected, multi, true);
+                        }
+                        KeyCode::Down => {
+                            cursor_idx = if cursor_idx + 1 < options.len() { cursor_idx + 1 } else { 0 };
+                            draw(&mut out, options, cursor_idx, &selected, multi, true);
+                        }
+                        KeyCode::Char(' ') if multi => {
+                            selected[cursor_idx] = !selected[cursor_idx];
+                            draw(&mut out, options, cursor_idx, &selected, multi, true);
+                        }
+                        KeyCode::Enter => {
+                            // Clear the hint line
+                            let _ = execute!(out, Print("\r"), terminal::Clear(ClearType::CurrentLine), Print("\r\n"));
+                            let _ = out.flush();
+                            if multi {
+                                return selected.iter().enumerate()
+                                    .filter(|(_, &s)| s)
+                                    .map(|(i, _)| i)
+                                    .collect();
+                            } else {
+                                return vec![cursor_idx];
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
     fn handle_render(&mut self, cmd: RenderCmd) {
         match cmd {
             RenderCmd::AssistantChunk(text) => {
@@ -317,6 +457,9 @@ impl TermState {
                     Print("\r\n"),
                 );
                 let _ = out.flush();
+            }
+            RenderCmd::UserPrompt { .. } => {
+                // Handled in the main loop before handle_render is called
             }
             RenderCmd::Quit => {}
         }

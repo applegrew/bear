@@ -76,6 +76,7 @@ pub struct ProcessInfo {
 pub enum ClientMessage {
     Input { text: String },
     ToolConfirm { tool_call_id: String, approved: bool },
+    UserPromptResponse { prompt_id: String, selected: Vec<usize> },
     ProcessInput { pid: u32, text: String },
     ProcessKill { pid: u32 },
     ProcessList,
@@ -98,6 +99,12 @@ pub enum ServerMessage {
     ProcessOutput { pid: u32, text: String },
     ProcessExited { pid: u32, code: Option<i32> },
     ProcessListResult { processes: Vec<ProcessInfo> },
+    UserPrompt {
+        prompt_id: String,
+        question: String,
+        options: Vec<String>,
+        multi: bool,
+    },
     Notice { text: String },
     Error { text: String },
     Thinking,

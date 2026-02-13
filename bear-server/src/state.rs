@@ -56,6 +56,11 @@ Revert the last file modification(s) made by write_file, edit_file, or patch_fil
 Arguments: {"steps?": number}
 Defaults: steps=1, max=10. Each step undoes one file write.
 
+### 9. user_prompt_options
+Present the user with a list of options to choose from. Use when you need the user to make a decision between specific alternatives.
+Arguments: {"question": "string", "options": ["string", ...], "multi?": boolean}
+Defaults: multi=false. When multi=true, the user can select multiple options. Returns the user's selection(s).
+
 ## Workflow Guidelines
 
 1. **Explore first.** Before making changes, use list_files and search_text to understand the codebase structure and find relevant code. Do not guess file paths or contents.
