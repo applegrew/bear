@@ -25,6 +25,11 @@ struct PendingPrompt {
     multi: bool,
 }
 
+/// Tracks a tool-depth continuation prompt waiting for the user's choice.
+struct PendingDepthPrompt {
+    prompt_id: String,
+}
+
 pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: WebSocket) {
     let session_info = {
         let sessions = state.sessions.read().await;
@@ -59,6 +64,9 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
     let mut tool_queue: VecDeque<PendingToolCall> = VecDeque::new();
     let mut tool_depth: usize = 0;
     let mut pending_prompt: Option<PendingPrompt> = None;
+    let mut pending_depth_prompt: Option<PendingDepthPrompt> = None;
+    let mut depth_limit: usize = state.config.max_tool_depth;
+    let mut bulk_increment: usize = 50;
 
     while let Some(Ok(msg)) = socket.next().await {
         match msg {
@@ -76,10 +84,14 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
                 match client_msg {
                     ClientMessage::Input { text } => {
                         tool_depth = 0;
+                        depth_limit = state.config.max_tool_depth;
+                        bulk_increment = 50;
                         handle_user_input(
                             &state, session_id, &mut socket,
                             &mut pending, &mut pending_prompt,
+                            &mut pending_depth_prompt,
                             &mut tool_queue, &mut tool_depth,
+                            &mut depth_limit, &mut bulk_increment,
                             text,
                         ).await;
                     }
@@ -87,17 +99,38 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
                         handle_tool_confirm(
                             &state, session_id, &mut socket,
                             &mut pending, &mut pending_prompt,
+                            &mut pending_depth_prompt,
                             &mut tool_queue, &mut tool_depth,
+                            &mut depth_limit, &mut bulk_increment,
                             &tool_call_id, approved,
                         ).await;
                     }
                     ClientMessage::UserPromptResponse { prompt_id, selected } => {
-                        handle_prompt_response(
-                            &state, session_id, &mut socket,
-                            &mut pending, &mut pending_prompt,
-                            &mut tool_queue, &mut tool_depth,
-                            &prompt_id, selected,
-                        ).await;
+                        // Check if this is a depth-continuation prompt response
+                        if let Some(dp) = pending_depth_prompt.take() {
+                            if dp.prompt_id == prompt_id {
+                                handle_depth_prompt_response(
+                                    &state, session_id, &mut socket,
+                                    &mut pending, &mut pending_prompt,
+                                    &mut pending_depth_prompt,
+                                    &mut tool_queue, &mut tool_depth,
+                                    &mut depth_limit, &mut bulk_increment,
+                                    selected,
+                                ).await;
+                            } else {
+                                // Not ours, restore it
+                                pending_depth_prompt = Some(dp);
+                            }
+                        } else {
+                            handle_prompt_response(
+                                &state, session_id, &mut socket,
+                                &mut pending, &mut pending_prompt,
+                                &mut pending_depth_prompt,
+                                &mut tool_queue, &mut tool_depth,
+                                &mut depth_limit, &mut bulk_increment,
+                                &prompt_id, selected,
+                            ).await;
+                        }
                     }
                     ClientMessage::ProcessList => {
                         let procs = state.processes.read().await;
@@ -170,8 +203,11 @@ async fn handle_user_input(
     socket: &mut WebSocket,
     pending: &mut Option<PendingToolCall>,
     pending_prompt: &mut Option<PendingPrompt>,
+    pending_depth_prompt: &mut Option<PendingDepthPrompt>,
     tool_queue: &mut VecDeque<PendingToolCall>,
     tool_depth: &mut usize,
+    depth_limit: &mut usize,
+    bulk_increment: &mut usize,
     text: String,
 ) {
     let user_msg = OllamaMessage {
@@ -191,7 +227,7 @@ async fn handle_user_input(
         session.history.push(user_msg);
     }
 
-    invoke_llm(state, session_id, socket, pending, pending_prompt, tool_queue, tool_depth).await;
+    invoke_llm(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
 }
 
 /// Call the LLM with current history, send assistant text, and queue all
@@ -205,14 +241,30 @@ async fn invoke_llm(
     socket: &mut WebSocket,
     pending: &mut Option<PendingToolCall>,
     pending_prompt: &mut Option<PendingPrompt>,
+    pending_depth_prompt: &mut Option<PendingDepthPrompt>,
     tool_queue: &mut VecDeque<PendingToolCall>,
     tool_depth: &mut usize,
+    depth_limit: &mut usize,
+    bulk_increment: &mut usize,
 ) {
-    let limit = state.config.max_tool_depth;
-    if *tool_depth >= limit {
-        let _ = send_msg(socket, ServerMessage::Error {
-            text: format!("Tool depth limit reached ({limit}). Send a new message to continue."),
+    if *tool_depth >= *depth_limit {
+        // Ask the user whether to continue instead of hard-aborting
+        let prompt_id = format!("depth_{}", Uuid::new_v4());
+        let options = vec![
+            "Yes".to_string(),
+            format!("Yes, for next {}", *bulk_increment),
+            "No".to_string(),
+        ];
+        let _ = send_msg(socket, ServerMessage::UserPrompt {
+            prompt_id: prompt_id.clone(),
+            question: format!(
+                "Tool depth limit reached ({} consecutive calls). Continue?",
+                *tool_depth,
+            ),
+            options: options.clone(),
+            multi: false,
         }).await;
+        *pending_depth_prompt = Some(PendingDepthPrompt { prompt_id });
         return;
     }
 
@@ -304,7 +356,7 @@ async fn invoke_llm(
             }
 
             // Present the first tool call to the user
-            Box::pin(present_next_tool(state, session_id, socket, pending, pending_prompt, tool_queue, tool_depth)).await;
+            Box::pin(present_next_tool(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
         }
         Ok(Err(err)) => {
             let _ = send_msg(socket, ServerMessage::Error {
@@ -328,8 +380,11 @@ async fn present_next_tool(
     socket: &mut WebSocket,
     pending: &mut Option<PendingToolCall>,
     pending_prompt: &mut Option<PendingPrompt>,
+    pending_depth_prompt: &mut Option<PendingDepthPrompt>,
     tool_queue: &mut VecDeque<PendingToolCall>,
     tool_depth: &mut usize,
+    depth_limit: &mut usize,
+    bulk_increment: &mut usize,
 ) {
     let Some(ptc) = tool_queue.pop_front() else { return };
 
@@ -353,9 +408,9 @@ async fn present_next_tool(
             *tool_depth += 1;
             if !tool_queue.is_empty() {
                 // Recurse for next tool (box pin to allow recursion)
-                Box::pin(present_next_tool(state, session_id, socket, pending, pending_prompt, tool_queue, tool_depth)).await;
+                Box::pin(present_next_tool(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
             } else {
-                invoke_llm(state, session_id, socket, pending, pending_prompt, tool_queue, tool_depth).await;
+                invoke_llm(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
             }
             return;
         }
@@ -393,8 +448,11 @@ async fn handle_tool_confirm(
     socket: &mut WebSocket,
     pending: &mut Option<PendingToolCall>,
     pending_prompt: &mut Option<PendingPrompt>,
+    pending_depth_prompt: &mut Option<PendingDepthPrompt>,
     tool_queue: &mut VecDeque<PendingToolCall>,
     tool_depth: &mut usize,
+    depth_limit: &mut usize,
+    bulk_increment: &mut usize,
     tool_call_id: &str,
     approved: bool,
 ) {
@@ -419,7 +477,7 @@ async fn handle_tool_confirm(
         // If rejected, skip remaining queued tools and re-invoke LLM
         tool_queue.clear();
         *tool_depth += 1;
-        invoke_llm(state, session_id, socket, pending, pending_prompt, tool_queue, tool_depth).await;
+        invoke_llm(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
         return;
     }
 
@@ -433,10 +491,10 @@ async fn handle_tool_confirm(
 
     // If more tool calls queued from the same LLM response, present the next one
     if !tool_queue.is_empty() {
-        present_next_tool(state, session_id, socket, pending, pending_prompt, tool_queue, tool_depth).await;
+        present_next_tool(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
     } else {
         // All tools from this response executed — re-invoke LLM
-        invoke_llm(state, session_id, socket, pending, pending_prompt, tool_queue, tool_depth).await;
+        invoke_llm(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
     }
 }
 
@@ -450,8 +508,11 @@ async fn handle_prompt_response(
     socket: &mut WebSocket,
     pending: &mut Option<PendingToolCall>,
     pending_prompt: &mut Option<PendingPrompt>,
+    pending_depth_prompt: &mut Option<PendingDepthPrompt>,
     tool_queue: &mut VecDeque<PendingToolCall>,
     tool_depth: &mut usize,
+    depth_limit: &mut usize,
+    bulk_increment: &mut usize,
     prompt_id: &str,
     selected: Vec<usize>,
 ) {
@@ -494,9 +555,55 @@ async fn handle_prompt_response(
 
     // Continue the agentic loop
     if !tool_queue.is_empty() {
-        present_next_tool(state, session_id, socket, pending, pending_prompt, tool_queue, tool_depth).await;
+        present_next_tool(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
     } else {
-        invoke_llm(state, session_id, socket, pending, pending_prompt, tool_queue, tool_depth).await;
+        invoke_llm(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Depth continuation prompt response
+// ---------------------------------------------------------------------------
+
+async fn handle_depth_prompt_response(
+    state: &ServerState,
+    session_id: Uuid,
+    socket: &mut WebSocket,
+    pending: &mut Option<PendingToolCall>,
+    pending_prompt: &mut Option<PendingPrompt>,
+    pending_depth_prompt: &mut Option<PendingDepthPrompt>,
+    tool_queue: &mut VecDeque<PendingToolCall>,
+    tool_depth: &mut usize,
+    depth_limit: &mut usize,
+    bulk_increment: &mut usize,
+    selected: Vec<usize>,
+) {
+    let choice = selected.first().copied().unwrap_or(2); // default to "No"
+
+    match choice {
+        0 => {
+            // "Yes" — continue, pause again after 25 more calls
+            *depth_limit += state.config.max_tool_depth;
+            let _ = send_msg(socket, ServerMessage::Notice {
+                text: format!("Continuing. Will pause again after {} total calls.", *depth_limit),
+            }).await;
+            invoke_llm(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+        }
+        1 => {
+            // "Yes, for next N" — continue, pause after N more calls, increment N
+            *depth_limit += *bulk_increment;
+            let _ = send_msg(socket, ServerMessage::Notice {
+                text: format!("Continuing. Will pause again after {} total calls.", *depth_limit),
+            }).await;
+            *bulk_increment += 25;
+            invoke_llm(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+        }
+        _ => {
+            // "No" — stop
+            let _ = send_msg(socket, ServerMessage::Notice {
+                text: "Stopped. Send a new message to continue.".to_string(),
+            }).await;
+        }
     }
 }
 
