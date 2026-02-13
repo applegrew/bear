@@ -23,6 +23,25 @@ const C = {
 };
 
 const PROMPT = `${C.bold}${C.blue}bear> ${C.reset}`;
+const PROMPT_CMD = `${C.bold}${C.yellow}cmd-> ${C.reset}`;
+
+const SLASH_COMMANDS = [
+  { cmd: '/ps', desc: 'List background processes' },
+  { cmd: '/kill', desc: 'Kill a background process' },
+  { cmd: '/send', desc: 'Send stdin to a process' },
+  { cmd: '/session name', desc: 'Name the current session' },
+  { cmd: '/allowed', desc: 'Show auto-approved commands' },
+  { cmd: '/end', desc: 'End session, pick another' },
+  { cmd: '/help', desc: 'Show help' },
+];
+
+function matchingSlashCommands(input) {
+  if (!input.startsWith('/')) return [];
+  const typed = input.split(/\s/)[0] || input;
+  return SLASH_COMMANDS
+    .filter(s => s.cmd.startsWith(typed) || typed.startsWith(s.cmd))
+    .slice(0, 3);
+}
 
 // ---------------------------------------------------------------------------
 // BearClient class
@@ -44,6 +63,10 @@ export class BearClient {
 
     // Streaming state
     this._streaming = false;
+
+    // Slash command dropdown state
+    this._dropdownLines = 0;
+    this._dropdownIdx = -1; // -1 = no selection
 
     // Last tool tracking for tool-specific output rendering
     this._lastToolName = '';
@@ -378,15 +401,48 @@ export class BearClient {
         // ESC sequence (arrow keys etc)
         if (ch === '\x1b' && data[i + 1] === '[') {
           const arrow = data[i + 2];
-          if (arrow === 'A') { this._historyUp(); i += 2; continue; }
-          if (arrow === 'B') { this._historyDown(); i += 2; continue; }
-          if (arrow === 'C') { this._cursorRight(); i += 2; continue; }
-          if (arrow === 'D') { this._cursorLeft(); i += 2; continue; }
-          i += 2; continue;
+          i += 2;
+          if (this._dropdownActive()) {
+            if (arrow === 'A') { this._dropdownUp(); this._redrawInput(); continue; }
+            if (arrow === 'B') { this._dropdownDown(); this._redrawInput(); continue; }
+            // Left/Right: reset selection, fall through to normal behavior
+            this._dropdownIdx = -1;
+          }
+          if (arrow === 'A') { this._historyUp(); continue; }
+          if (arrow === 'B') { this._historyDown(); continue; }
+          if (arrow === 'C') { this._cursorRight(); continue; }
+          if (arrow === 'D') { this._cursorLeft(); continue; }
+          continue;
+        }
+
+        // Bare Esc (not part of arrow sequence)
+        if (code === 27) {
+          if (this._dropdownActive()) {
+            this.inputBuf = '';
+            this.cursorPos = 0;
+            this._dropdownIdx = -1;
+            this._redrawInput();
+          }
+          continue;
+        }
+
+        // Tab
+        if (code === 9) {
+          if (this._dropdownActive()) {
+            this._acceptDropdown();
+            this._redrawInput();
+          }
+          continue;
         }
 
         // Enter
         if (ch === '\r' || ch === '\n') {
+          if (this._dropdownActive() && this._dropdownIdx >= 0) {
+            this._acceptDropdown();
+            this._redrawInput();
+            continue;
+          }
+          this._clearDropdown();
           this.term.writeln('');
           this._submitInput();
           continue;
@@ -394,6 +450,7 @@ export class BearClient {
 
         // Backspace
         if (code === 127 || code === 8) {
+          this._dropdownIdx = -1;
           this._backspace();
           continue;
         }
@@ -432,6 +489,7 @@ export class BearClient {
 
         // Regular printable character
         if (code >= 32) {
+          this._dropdownIdx = -1;
           this.inputBuf = this.inputBuf.slice(0, this.cursorPos) + ch + this.inputBuf.slice(this.cursorPos);
           this.cursorPos++;
           this._redrawInput();
@@ -553,21 +611,26 @@ export class BearClient {
   _drawPrompt() {
     this.inputBuf = '';
     this.cursorPos = 0;
+    this._dropdownIdx = -1;
+    this._clearDropdown();
     this.term.write(PROMPT);
   }
 
   _restorePrompt() {
     // Redraw prompt preserving any in-progress user input
+    this._clearDropdown();
     if (this.pendingToolCall) {
       this.term.write(`${C.bold}${C.yellow}  > ${C.reset}${this.inputBuf}`);
     } else {
-      this.term.write(`${PROMPT}${this.inputBuf}`);
+      const p = this.inputBuf.startsWith('/') ? PROMPT_CMD : PROMPT;
+      this.term.write(`${p}${this.inputBuf}`);
     }
     // Reposition cursor if not at end
     const back = this.inputBuf.length - this.cursorPos;
     if (back > 0) {
       this.term.write(`\x1b[${back}D`);
     }
+    this._renderDropdown();
   }
 
   _drawConfirmPrompt() {
@@ -577,24 +640,99 @@ export class BearClient {
   }
 
   _redrawInput() {
-    // Clear current line content after prompt, rewrite buffer, position cursor
+    // Clear dropdown first, then redraw prompt line
+    this._clearDropdown();
     this.term.write('\x1b[2K\r');
     if (this.pendingToolCall) {
       this.term.write(`${C.bold}${C.yellow}  > ${C.reset}${this.inputBuf}`);
     } else {
-      this.term.write(`${PROMPT}${this.inputBuf}`);
+      const p = this.inputBuf.startsWith('/') ? PROMPT_CMD : PROMPT;
+      this.term.write(`${p}${this.inputBuf}`);
     }
     // Move cursor to correct position
-    const promptLen = this.pendingToolCall ? 4 : 6; // "  > " or "bear> "
+    const promptLen = this.pendingToolCall ? 4 : 6; // "  > " or "bear> " / "cmd-> "
     const targetCol = promptLen + this.cursorPos;
     const endCol = promptLen + this.inputBuf.length;
     if (targetCol < endCol) {
       this.term.write(`\x1b[${endCol - targetCol}D`);
     }
+    // Show dropdown if in slash mode
+    this._renderDropdown();
   }
 
   _clearInputLine() {
+    this._clearDropdown();
     this.term.write('\x1b[2K\r');
+  }
+
+  _clearDropdown() {
+    if (this._dropdownLines > 0) {
+      this.term.write('\x1b[s');
+      for (let i = 0; i < this._dropdownLines; i++) {
+        this.term.write('\r\n\x1b[2K');
+      }
+      this.term.write('\x1b[u');
+      this._dropdownLines = 0;
+    }
+  }
+
+  _renderDropdown() {
+    if (this.pendingToolCall) return;
+    const matches = matchingSlashCommands(this.inputBuf);
+    if (matches.length === 0) {
+      this._dropdownIdx = -1;
+      return;
+    }
+    // Clamp index
+    if (this._dropdownIdx >= matches.length) {
+      this._dropdownIdx = matches.length - 1;
+    }
+    this.term.write('\x1b[s');
+    for (let i = 0; i < matches.length; i++) {
+      const { cmd, desc } = matches[i];
+      const selected = i === this._dropdownIdx;
+      if (selected) {
+        this.term.write(`\r\n\x1b[2K${C.yellow}    ❯ ${C.white}${cmd}${C.gray}  ${desc}${C.reset}`);
+      } else {
+        this.term.write(`\r\n\x1b[2K${C.gray}      ${C.yellow}${cmd}${C.gray}  ${desc}${C.reset}`);
+      }
+    }
+    this._dropdownLines = matches.length;
+    this.term.write('\x1b[u');
+  }
+
+  _dropdownActive() {
+    return this._dropdownLines > 0 && this.inputBuf.startsWith('/');
+  }
+
+  _dropdownUp() {
+    const matches = matchingSlashCommands(this.inputBuf);
+    if (matches.length === 0) return;
+    if (this._dropdownIdx <= 0) {
+      this._dropdownIdx = matches.length - 1;
+    } else {
+      this._dropdownIdx--;
+    }
+  }
+
+  _dropdownDown() {
+    const matches = matchingSlashCommands(this.inputBuf);
+    if (matches.length === 0) return;
+    if (this._dropdownIdx < 0 || this._dropdownIdx >= matches.length - 1) {
+      this._dropdownIdx = 0;
+    } else {
+      this._dropdownIdx++;
+    }
+  }
+
+  _acceptDropdown() {
+    const matches = matchingSlashCommands(this.inputBuf);
+    const idx = this._dropdownIdx >= 0 ? this._dropdownIdx : 0;
+    if (idx < matches.length) {
+      this.inputBuf = matches[idx].cmd + ' ';
+      this.cursorPos = this.inputBuf.length;
+    }
+    this._dropdownIdx = -1;
   }
 
   _writeln(text) {
@@ -658,6 +796,8 @@ export class BearClient {
   // -------------------------------------------------------------------------
 
   _submitInput() {
+    this._clearDropdown();
+    this._dropdownIdx = -1;
     const text = this.inputBuf.trim();
     this.inputBuf = '';
     this.cursorPos = 0;

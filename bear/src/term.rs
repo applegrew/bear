@@ -95,7 +95,55 @@ pub fn spawn_terminal_thread(
             // Poll for keyboard input (50ms timeout)
             if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
                 if let Ok(Event::Key(key)) = event::read() {
-                    match map_key(key) {
+                    let action = map_key(key);
+
+                    // When the dropdown is visible, intercept navigation keys
+                    if state.dropdown_active() {
+                        match action {
+                            KeyAction::HistoryPrev => {
+                                // Up arrow → move selection up
+                                state.dropdown_up();
+                                state.draw_prompt();
+                                continue;
+                            }
+                            KeyAction::HistoryNext => {
+                                // Down arrow → move selection down
+                                state.dropdown_down();
+                                state.draw_prompt();
+                                continue;
+                            }
+                            KeyAction::Tab => {
+                                // Tab → accept selected item
+                                state.accept_dropdown();
+                                state.draw_prompt();
+                                continue;
+                            }
+                            KeyAction::Submit => {
+                                // Enter → accept selected item (if one is highlighted)
+                                if state.dropdown_idx.is_some() {
+                                    state.accept_dropdown();
+                                    state.draw_prompt();
+                                    continue;
+                                }
+                                // Otherwise fall through to normal submit
+                            }
+                            KeyAction::Escape => {
+                                // Esc → close dropdown, clear input
+                                state.input_buf.clear();
+                                state.cursor_pos = 0;
+                                state.dropdown_idx = None;
+                                state.draw_prompt();
+                                continue;
+                            }
+                            _ => {
+                                // Any other key: reset selection so typing
+                                // re-filters from scratch
+                                state.dropdown_idx = None;
+                            }
+                        }
+                    }
+
+                    match action {
                         KeyAction::Char(c) => {
                             state.insert_char(c);
                             state.draw_prompt();
@@ -132,6 +180,12 @@ pub fn spawn_terminal_thread(
                             state.history_next();
                             state.draw_prompt();
                         }
+                        KeyAction::Tab => {
+                            // Tab outside dropdown — no-op
+                        }
+                        KeyAction::Escape => {
+                            // Esc outside dropdown — no-op
+                        }
                         KeyAction::Submit => {
                             let line = state.submit();
                             let _ = rt.block_on(event_tx.send(TermEvent::UserLine(line)));
@@ -164,10 +218,41 @@ struct TermState {
     history_idx: Option<usize>,
     saved_input: String,
     streaming: bool,
+    /// Number of dropdown lines currently rendered below the prompt.
+    dropdown_lines: usize,
+    /// Currently selected dropdown item index (None = no selection).
+    dropdown_idx: Option<usize>,
 }
 
 const PROMPT: &str = "bear> ";
+const PROMPT_CMD: &str = "cmd-> ";
 const PROMPT_CONFIRM: &str = "  Allow? [y/n/a(lways)] > ";
+
+/// All available slash commands with short descriptions.
+const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/ps", "List background processes"),
+    ("/kill", "Kill a background process"),
+    ("/send", "Send stdin to a process"),
+    ("/session name", "Name the current session"),
+    ("/allowed", "Show auto-approved commands"),
+    ("/end", "End session, pick another"),
+    ("/help", "Show help"),
+];
+
+/// Return up to 3 slash commands matching the current input prefix.
+fn matching_slash_commands(input: &str) -> Vec<(&'static str, &'static str)> {
+    if !input.starts_with('/') {
+        return Vec::new();
+    }
+    // Match against the typed text (which may be just "/")
+    let typed = input.split_whitespace().next().unwrap_or(input);
+    SLASH_COMMANDS
+        .iter()
+        .filter(|(cmd, _)| cmd.starts_with(typed) || typed.starts_with(cmd))
+        .take(3)
+        .copied()
+        .collect()
+}
 
 impl TermState {
     fn init() -> anyhow::Result<Self> {
@@ -179,6 +264,8 @@ impl TermState {
             history_idx: None,
             saved_input: String::new(),
             streaming: false,
+            dropdown_lines: 0,
+            dropdown_idx: None,
         })
     }
 
@@ -186,17 +273,83 @@ impl TermState {
         let _ = terminal::disable_raw_mode();
     }
 
-    fn draw_prompt(&self) {
+    fn draw_prompt(&mut self) {
         let mut out = io::stdout();
+
+        // Clear any previous dropdown lines
+        if self.dropdown_lines > 0 {
+            // Save cursor, move down to clear dropdown, then restore
+            let _ = execute!(out, cursor::SavePosition);
+            for _ in 0..self.dropdown_lines {
+                let _ = execute!(out, Print("\r\n"), terminal::Clear(ClearType::CurrentLine));
+            }
+            let _ = execute!(out, cursor::RestorePosition);
+            self.dropdown_lines = 0;
+        }
+
+        let is_slash = self.input_buf.starts_with('/');
+        let (prompt, prompt_color) = if is_slash {
+            (PROMPT_CMD, Color::Yellow)
+        } else {
+            (PROMPT, Color::Cyan)
+        };
+
         let _ = execute!(
             out,
             Print("\r"),
             terminal::Clear(ClearType::CurrentLine),
-            SetForegroundColor(Color::Cyan),
-            Print(PROMPT),
+            SetForegroundColor(prompt_color),
+            Print(prompt),
             ResetColor,
             Print(&self.input_buf),
         );
+
+        // Render dropdown for slash commands
+        let matches = matching_slash_commands(&self.input_buf);
+        if is_slash && !matches.is_empty() {
+            // Clamp dropdown_idx to valid range
+            if let Some(idx) = self.dropdown_idx {
+                if idx >= matches.len() {
+                    self.dropdown_idx = Some(matches.len() - 1);
+                }
+            }
+            let _ = execute!(out, cursor::SavePosition);
+            for (i, (cmd, desc)) in matches.iter().enumerate() {
+                let selected = self.dropdown_idx == Some(i);
+                let _ = execute!(out, Print("\r\n"), terminal::Clear(ClearType::CurrentLine));
+                if selected {
+                    let _ = execute!(
+                        out,
+                        SetForegroundColor(Color::Yellow),
+                        Print("    ❯ "),
+                        SetForegroundColor(Color::White),
+                        Print(cmd),
+                        SetForegroundColor(Color::DarkGrey),
+                        Print("  "),
+                        Print(desc),
+                        ResetColor,
+                    );
+                } else {
+                    let _ = execute!(
+                        out,
+                        SetForegroundColor(Color::DarkGrey),
+                        Print("      "),
+                        SetForegroundColor(Color::Yellow),
+                        Print(cmd),
+                        SetForegroundColor(Color::DarkGrey),
+                        Print("  "),
+                        Print(desc),
+                        ResetColor,
+                    );
+                }
+            }
+            self.dropdown_lines = matches.len();
+            let _ = execute!(out, cursor::RestorePosition);
+        } else {
+            self.dropdown_idx = None;
+        }
+
+        // Position cursor correctly within the input
         let back = self.input_buf.len() - self.cursor_pos;
         if back > 0 {
             let _ = execute!(out, cursor::MoveLeft(back as u16));
@@ -204,7 +357,59 @@ impl TermState {
         let _ = out.flush();
     }
 
-    fn print_block(&self, prefix: &str, prefix_color: Color, body: &str) {
+    /// Returns true if the slash-command dropdown is currently visible.
+    fn dropdown_active(&self) -> bool {
+        self.dropdown_lines > 0 && self.input_buf.starts_with('/')
+    }
+
+    fn clear_dropdown(&mut self) {
+        if self.dropdown_lines > 0 {
+            let mut out = io::stdout();
+            let _ = execute!(out, cursor::SavePosition);
+            for _ in 0..self.dropdown_lines {
+                let _ = execute!(out, Print("\r\n"), terminal::Clear(ClearType::CurrentLine));
+            }
+            let _ = execute!(out, cursor::RestorePosition);
+            let _ = out.flush();
+            self.dropdown_lines = 0;
+        }
+    }
+
+    /// Move dropdown selection up.
+    fn dropdown_up(&mut self) {
+        let matches = matching_slash_commands(&self.input_buf);
+        if matches.is_empty() { return; }
+        self.dropdown_idx = Some(match self.dropdown_idx {
+            None | Some(0) => matches.len() - 1,
+            Some(i) => i - 1,
+        });
+    }
+
+    /// Move dropdown selection down.
+    fn dropdown_down(&mut self) {
+        let matches = matching_slash_commands(&self.input_buf);
+        if matches.is_empty() { return; }
+        self.dropdown_idx = Some(match self.dropdown_idx {
+            None => 0,
+            Some(i) if i + 1 >= matches.len() => 0,
+            Some(i) => i + 1,
+        });
+    }
+
+    /// Accept the currently selected dropdown item: fill input_buf with
+    /// the command text and a trailing space, then close the dropdown.
+    fn accept_dropdown(&mut self) {
+        let matches = matching_slash_commands(&self.input_buf);
+        let idx = self.dropdown_idx.unwrap_or(0);
+        if let Some((cmd, _)) = matches.get(idx) {
+            self.input_buf = format!("{} ", cmd);
+            self.cursor_pos = self.input_buf.len();
+        }
+        self.dropdown_idx = None;
+    }
+
+    fn print_block(&mut self, prefix: &str, prefix_color: Color, body: &str) {
+        self.clear_dropdown();
         let mut out = io::stdout();
         let _ = execute!(out, Print("\r"), terminal::Clear(ClearType::CurrentLine));
         for line in body.lines() {
@@ -224,7 +429,7 @@ impl TermState {
     const DISPLAY_MAX_LINES: usize = 20;
 
     /// Render tool output with tool-specific formatting.
-    fn render_tool_output(&self, tool_name: &str, tool_args: &serde_json::Value, output: &str) {
+    fn render_tool_output(&mut self, tool_name: &str, tool_args: &serde_json::Value, output: &str) {
         match tool_name {
             "read_file" => {
                 let path = tool_args["path"].as_str().unwrap_or("?");
@@ -288,7 +493,7 @@ impl TermState {
     }
 
     /// Print output with a line cap, showing head + tail with a truncation notice.
-    fn print_truncated_output(&self, output: &str) {
+    fn print_truncated_output(&mut self, output: &str) {
         let lines: Vec<&str> = output.lines().collect();
         let total = lines.len();
         if total <= Self::DISPLAY_MAX_LINES {
@@ -443,6 +648,7 @@ impl TermState {
                 if !self.streaming {
                     // First chunk — clear prompt line and start green output
                     self.streaming = true;
+                    self.clear_dropdown();
                     let mut out = io::stdout();
                     let _ = execute!(
                         out,
@@ -481,6 +687,7 @@ impl TermState {
                 self.draw_prompt();
             }
             RenderCmd::ToolRequest(name, args) => {
+                self.clear_dropdown();
                 let mut out = io::stdout();
                 let _ = execute!(
                     out,
@@ -519,6 +726,7 @@ impl TermState {
                 self.draw_prompt();
             }
             RenderCmd::SessionInfo(id, cwd) => {
+                self.clear_dropdown();
                 let mut out = io::stdout();
                 let _ = execute!(
                     out,
@@ -539,6 +747,7 @@ impl TermState {
                 self.draw_prompt();
             }
             RenderCmd::Thinking => {
+                self.clear_dropdown();
                 let mut out = io::stdout();
                 let _ = execute!(
                     out,
@@ -630,17 +839,32 @@ impl TermState {
         if !text.trim().is_empty() {
             self.history.push(text.clone());
         }
+
+        // Clear any dropdown lines before printing the submitted line
+        let mut out = io::stdout();
+        if self.dropdown_lines > 0 {
+            let _ = execute!(out, cursor::SavePosition);
+            for _ in 0..self.dropdown_lines {
+                let _ = execute!(out, Print("\r\n"), terminal::Clear(ClearType::CurrentLine));
+            }
+            let _ = execute!(out, cursor::RestorePosition);
+            self.dropdown_lines = 0;
+        }
+
+        // Show which prompt was active when submitted
+        let prompt = if text.starts_with('/') { PROMPT_CMD } else { PROMPT };
+
         self.input_buf.clear();
         self.cursor_pos = 0;
         self.history_idx = None;
+        self.dropdown_idx = None;
 
-        let mut out = io::stdout();
         let _ = execute!(
             out,
             Print("\r"),
             terminal::Clear(ClearType::CurrentLine),
             SetForegroundColor(Color::White),
-            Print(PROMPT),
+            Print(prompt),
             Print(&text),
             Print("\r\n"),
             ResetColor,
@@ -670,6 +894,8 @@ enum KeyAction {
     End,
     HistoryPrev,
     HistoryNext,
+    Tab,
+    Escape,
     Submit,
     Interrupt,
     Quit,
@@ -689,6 +915,8 @@ fn map_key(key: KeyEvent) -> KeyAction {
         KeyCode::Delete => KeyAction::Delete,
         KeyCode::Home => KeyAction::Home,
         KeyCode::End => KeyAction::End,
+        KeyCode::Tab => KeyAction::Tab,
+        KeyCode::Esc => KeyAction::Escape,
         KeyCode::Char(c) => KeyAction::Char(c),
         _ => KeyAction::None,
     }
