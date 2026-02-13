@@ -235,6 +235,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/send", "Send stdin to a process"),
     ("/session name", "Name the current session"),
     ("/allowed", "Show auto-approved commands"),
+    ("/exit", "Disconnect, keep session alive"),
     ("/end", "End session, pick another"),
     ("/help", "Show help"),
 ];

@@ -127,6 +127,18 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
                             }).await;
                         }
                     }
+                    ClientMessage::SessionEnd => {
+                        // Remove session and clean up processes
+                        cleanup_session_processes(&state, session_id).await;
+                        {
+                            let mut sessions = state.sessions.write().await;
+                            sessions.remove(&session_id);
+                        }
+                        let _ = send_msg(&mut socket, ServerMessage::Notice {
+                            text: "Session ended and removed.".to_string(),
+                        }).await;
+                        break;
+                    }
                     ClientMessage::Ping => {
                         let _ = send_msg(&mut socket, ServerMessage::Pong).await;
                     }

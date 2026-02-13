@@ -31,6 +31,7 @@ const SLASH_COMMANDS = [
   { cmd: '/send', desc: 'Send stdin to a process' },
   { cmd: '/session name', desc: 'Name the current session' },
   { cmd: '/allowed', desc: 'Show auto-approved commands' },
+  { cmd: '/exit', desc: 'Disconnect, keep session alive' },
   { cmd: '/end', desc: 'End session, pick another' },
   { cmd: '/help', desc: 'Show help' },
 ];
@@ -470,12 +471,8 @@ export class BearClient {
           continue;
         }
 
-        // Ctrl+D
+        // Ctrl+D — disabled in browser client
         if (code === 4) {
-          if (this.inputBuf.length === 0) {
-            this._writeln(`${C.gray}  Goodbye.${C.reset}`);
-            if (this.ws) this.ws.close();
-          }
           continue;
         }
 
@@ -848,7 +845,18 @@ export class BearClient {
     }
 
     if (text === '/end') {
-      this._writeln(`${C.gray}  Ending session…${C.reset}`);
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this._sendJson({ type: 'session_end' });
+      }
+      this._writeln(`${C.gray}  Session ended.${C.reset}`);
+      if (this.ws) { this.ws.close(); this.ws = null; }
+      this.term.writeln('');
+      this._showSessionPicker();
+      return;
+    }
+
+    if (text === '/exit') {
+      this._writeln(`${C.gray}  Disconnecting. Session preserved.${C.reset}`);
       if (this.ws) { this.ws.close(); this.ws = null; }
       this.term.writeln('');
       this._showSessionPicker();
@@ -856,7 +864,7 @@ export class BearClient {
     }
 
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      this._writeln(`${C.red}  Not connected. Use /end to pick a session.${C.reset}`);
+      this._writeln(`${C.red}  Not connected. Use /exit to pick a session.${C.reset}`);
       this._drawPrompt();
       return;
     }
@@ -1039,6 +1047,7 @@ export class BearClient {
       `${C.gray}    /send <pid> <t>  ${C.white}Send stdin to a process${C.reset}`,
       `${C.gray}    /session name <n>${C.white} Name the current session${C.reset}`,
       `${C.gray}    /allowed         ${C.white}Show auto-approved commands${C.reset}`,
+      `${C.gray}    /exit            ${C.white}Disconnect, keep session alive${C.reset}`,
       `${C.gray}    /end             ${C.white}End session, pick another${C.reset}`,
       `${C.gray}    /help            ${C.white}Show this help${C.reset}`,
       '',

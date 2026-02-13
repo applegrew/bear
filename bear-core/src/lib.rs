@@ -82,6 +82,7 @@ pub enum ClientMessage {
     ProcessKill { pid: u32 },
     ProcessList,
     SessionRename { name: String },
+    SessionEnd,
     Ping,
 }
 

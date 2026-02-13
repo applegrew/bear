@@ -263,13 +263,21 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                         ));
                     }
                 } else if line == "/end" {
+                    // Tell the server to delete this session
+                    let payload = serde_json::to_string(&ClientMessage::SessionEnd)?;
+                    ws_write.send(Message::Text(payload)).await?;
                     let _ = render_tx.send(RenderCmd::Notice(
-                        "Ending current session. Returning to session selection...".into(),
+                        "Session ended. Returning to session selection...".into(),
                     ));
                     let _ = render_tx.send(RenderCmd::Quit);
-                    // Drop the sender so the terminal thread isn't blocked,
-                    // then join to ensure raw mode is cleaned up before the
-                    // session picker takes over keyboard input.
+                    drop(render_tx);
+                    let _ = term_handle.join();
+                    return Ok(SessionResult::EndSession);
+                } else if line == "/exit" {
+                    let _ = render_tx.send(RenderCmd::Notice(
+                        "Disconnecting. Session preserved. Returning to session selection...".into(),
+                    ));
+                    let _ = render_tx.send(RenderCmd::Quit);
                     drop(render_tx);
                     let _ = term_handle.join();
                     return Ok(SessionResult::EndSession);
@@ -311,6 +319,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                         "  /send <pid> <text>  Send stdin to a process",
                         "  /session name <n>  Name the current session",
                         "  /allowed         Show auto-approved commands",
+                        "  /exit            Disconnect, keep session alive",
                         "  /end             End current session, pick another",
                         "  /help            Show this help",
                         "  Ctrl+D           Quit",
