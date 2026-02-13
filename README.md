@@ -12,7 +12,7 @@ Bear is a Rust-based "claude code"-style CLI with persistent sessions backed by 
 - Unified diff output for file mutations (`write_file`, `edit_file`, `patch_file`)
 - Esc during streaming shows a prompt to interrupt and send a new request
 - Tool-depth guard with a continuation prompt (continue / continue for next N / stop)
-- Session commands: `/ps`, `/kill`, `/send`, `/session name`, `/allowed`, `/exit`, `/end`, `/help`
+- Session commands: `/ps`, `/kill`, `/send`, `/session name`, `/session workdir`, `/allowed`, `/exit`, `/end`, `/help`
 
 ## Quick start
 

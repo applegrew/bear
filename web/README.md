@@ -15,6 +15,10 @@ python3 -m http.server 8080
 
 Open http://localhost:8080/web/ in your browser, update the server URL if needed, and connect.
 
+## Useful commands
+
+- `/session workdir <path>` — set the session working directory (supports `~` and shell shortcuts)
+
 ## Proxy transport
 
 Enable **Use proxy transport** to queue outbound messages. Read the queued JSON from the UI, send it to your proxy API, and feed responses back into the client using the inbound panel.

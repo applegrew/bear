@@ -909,9 +909,9 @@ export class BearClient {
       return;
     }
 
-    const sessionMatch = text.match(/^\/session\s+name\s+(.+)$/);
-    if (sessionMatch) {
-      const name = sessionMatch[1].trim();
+    const sessionNameMatch = text.match(/^\/session\s+name\s+(.+)$/);
+    if (sessionNameMatch) {
+      const name = sessionNameMatch[1].trim();
       if (!name) {
         this._writeln(`${C.red}  Usage: /session name <session name>${C.reset}`);
         this._drawPrompt();
@@ -920,8 +920,19 @@ export class BearClient {
       }
       return;
     }
+    const sessionWorkdirMatch = text.match(/^\/session\s+workdir\s+(.+)$/);
+    if (sessionWorkdirMatch) {
+      const path = sessionWorkdirMatch[1].trim();
+      if (!path) {
+        this._writeln(`${C.red}  Usage: /session workdir <path>${C.reset}`);
+        this._drawPrompt();
+      } else {
+        this._sendJson({ type: 'session_workdir', path });
+      }
+      return;
+    }
     if (text.startsWith('/session')) {
-      this._writeln(`${C.red}  Usage: /session name <session name>${C.reset}`);
+      this._writeln(`${C.red}  Usage: /session name <session name> OR /session workdir <path>${C.reset}`);
       this._drawPrompt();
       return;
     }
@@ -1145,7 +1156,8 @@ export class BearClient {
       `${C.gray}    /ps              ${C.white}List background processes${C.reset}`,
       `${C.gray}    /kill <pid>      ${C.white}Kill a background process${C.reset}`,
       `${C.gray}    /send <pid> <t>  ${C.white}Send stdin to a process${C.reset}`,
-      `${C.gray}    /session name <n>${C.white} Name the current session${C.reset}`,
+      `${C.gray}    /session name <n>  ${C.white}Name the current session${C.reset}`,
+      `${C.gray}    /session workdir <path>  ${C.white}Set session working directory${C.reset}`,
       `${C.gray}    /allowed         ${C.white}Show auto-approved commands${C.reset}`,
       `${C.gray}    /exit            ${C.white}Disconnect, keep session alive${C.reset}`,
       `${C.gray}    /end             ${C.white}End session, pick another${C.reset}`,

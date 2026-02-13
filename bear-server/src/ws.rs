@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use axum::extract::ws::{Message, WebSocket};
 use bear_core::{ClientMessage, ProcessInfo, ServerMessage, ToolCall};
 use futures::StreamExt;
+use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::llm::{call_ollama_streaming, compact_history_if_needed, reflective_thinking, OllamaMessage};
@@ -162,6 +163,84 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
                             let _ = send_msg(&mut socket, ServerMessage::SessionRenamed {
                                 name: trimmed,
                             }).await;
+                        }
+                    }
+                    ClientMessage::SessionWorkdir { path } => {
+                        let trimmed = path.trim();
+                        if trimmed.is_empty() {
+                            let _ = send_msg(&mut socket, ServerMessage::Error {
+                                text: "Usage: /session workdir <path>".to_string(),
+                            }).await;
+                            continue;
+                        }
+
+                        let current_cwd = {
+                            let sessions = state.sessions.read().await;
+                            sessions.get(&session_id).map(|s| s.info.cwd.clone())
+                        };
+
+                        let Some(current_cwd) = current_cwd else {
+                            let _ = send_msg(&mut socket, ServerMessage::Error {
+                                text: "session not found".to_string(),
+                            }).await;
+                            continue;
+                        };
+
+                        let cmd = format!("cd {trimmed} && pwd");
+                        match Command::new("sh")
+                            .arg("-lc")
+                            .arg(cmd)
+                            .current_dir(&current_cwd)
+                            .output()
+                            .await
+                        {
+                            Ok(out) if out.status.success() => {
+                                let new_cwd = String::from_utf8_lossy(&out.stdout)
+                                    .trim()
+                                    .to_string();
+                                if new_cwd.is_empty() {
+                                    let _ = send_msg(&mut socket, ServerMessage::Error {
+                                        text: "Failed to resolve working directory.".to_string(),
+                                    }).await;
+                                    continue;
+                                }
+
+                                let updated_session = {
+                                    let mut sessions = state.sessions.write().await;
+                                    if let Some(session) = sessions.get_mut(&session_id) {
+                                        session.info.cwd = new_cwd.clone();
+                                        session.info.touch();
+                                        Some(session.info.clone())
+                                    } else {
+                                        None
+                                    }
+                                };
+
+                                if let Some(session) = updated_session {
+                                    let _ = send_msg(&mut socket, ServerMessage::Notice {
+                                        text: format!("Working directory set to: {new_cwd}"),
+                                    }).await;
+                                    let _ = send_msg(&mut socket, ServerMessage::SessionInfo {
+                                        session,
+                                    }).await;
+                                }
+                            }
+                            Ok(out) => {
+                                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                                let msg = if err.is_empty() {
+                                    "Failed to change directory.".to_string()
+                                } else {
+                                    format!("Failed to change directory: {err}")
+                                };
+                                let _ = send_msg(&mut socket, ServerMessage::Error {
+                                    text: msg,
+                                }).await;
+                            }
+                            Err(err) => {
+                                let _ = send_msg(&mut socket, ServerMessage::Error {
+                                    text: format!("Failed to change directory: {err}"),
+                                }).await;
+                            }
                         }
                     }
                     ClientMessage::SessionEnd => {

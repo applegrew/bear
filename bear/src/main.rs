@@ -301,9 +301,21 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                             )?;
                             ws_write.send(Message::Text(payload)).await?;
                         }
+                    } else if let Some(path) = rest.strip_prefix("workdir ") {
+                        let path = path.trim();
+                        if path.is_empty() {
+                            let _ = render_tx.send(RenderCmd::Error(
+                                "Usage: /session workdir <path>".into(),
+                            ));
+                        } else {
+                            let payload = serde_json::to_string(
+                                &ClientMessage::SessionWorkdir { path: path.to_string() },
+                            )?;
+                            ws_write.send(Message::Text(payload)).await?;
+                        }
                     } else {
                         let _ = render_tx.send(RenderCmd::Error(
-                            "Usage: /session name <session name>".into(),
+                            "Usage: /session name <session name> OR /session workdir <path>".into(),
                         ));
                     }
                 } else if line == "/help" {
@@ -313,6 +325,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                         "  /kill <pid>      Kill a background process",
                         "  /send <pid> <text>  Send stdin to a process",
                         "  /session name <n>  Name the current session",
+                        "  /session workdir <path>  Set session working directory",
                         "  /allowed         Show auto-approved commands",
                         "  /exit            Disconnect, keep session alive",
                         "  /end             End current session, pick another",
