@@ -5,7 +5,7 @@ use bear_core::{ClientMessage, ProcessInfo, ServerMessage, ToolCall};
 use futures::StreamExt;
 use uuid::Uuid;
 
-use crate::llm::{call_ollama_streaming, OllamaMessage};
+use crate::llm::{call_ollama_streaming, compact_history_if_needed, OllamaMessage};
 use crate::process::{handle_process_kill, handle_process_input};
 use crate::state::{PendingToolCall, ServerState};
 use crate::tools::{execute_tool, parse_tool_calls};
@@ -160,6 +160,18 @@ async fn invoke_llm(
     }
 
     let _ = send_msg(socket, ServerMessage::Thinking).await;
+
+    // Compact history if it exceeds the token budget
+    {
+        let mut sessions = state.sessions.write().await;
+        if let Some(session) = sessions.get_mut(&session_id) {
+            compact_history_if_needed(
+                &state.http_client,
+                &state.config,
+                &mut session.history,
+            ).await;
+        }
+    }
 
     let (history, cwd) = {
         let sessions = state.sessions.read().await;

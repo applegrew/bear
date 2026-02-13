@@ -51,6 +51,171 @@ pub fn load_config() -> AppConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Token estimation
+// ---------------------------------------------------------------------------
+
+/// Rough token estimate: ~4 chars per token for English text.
+pub fn estimate_tokens(messages: &[OllamaMessage]) -> usize {
+    messages.iter().map(|m| m.content.len() / 4 + 1).sum()
+}
+
+fn context_budget() -> usize {
+    std::env::var("BEAR_CONTEXT_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16_000)
+}
+
+fn keep_recent() -> usize {
+    std::env::var("BEAR_KEEP_RECENT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20)
+}
+
+// ---------------------------------------------------------------------------
+// Non-streaming Ollama call (used internally for compaction)
+// ---------------------------------------------------------------------------
+
+async fn call_ollama(
+    http_client: &reqwest::Client,
+    config: &AppConfig,
+    messages: &[OllamaMessage],
+) -> anyhow::Result<OllamaMessage> {
+    let url = format!("{}/api/chat", config.ollama_url.trim_end_matches('/'));
+    let payload = OllamaChatRequest {
+        model: config.ollama_model.clone(),
+        messages: messages.to_vec(),
+        stream: false,
+    };
+
+    #[derive(Debug, serde::Deserialize)]
+    struct Resp { message: OllamaMessage }
+
+    let response = http_client.post(&url).json(&payload).send().await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("ollama returned {status}: {body}");
+    }
+    let body: Resp = response.json().await?;
+    Ok(body.message)
+}
+
+// ---------------------------------------------------------------------------
+// Context compaction
+// ---------------------------------------------------------------------------
+
+const COMPACTION_PROMPT: &str = r#"You are a summarization assistant. Summarize the following conversation between a user and an AI coding assistant called Bear. Preserve:
+- The user's original goal and intent
+- Key technical decisions and architectural choices
+- File paths, function names, and important code structures discussed
+- What was accomplished and what remains to be done
+- Any errors encountered and how they were resolved
+
+Be concise but thorough. This summary will replace the original messages to save context space."#;
+
+/// If the history exceeds the token budget, compact older messages into a summary.
+/// Layout after compaction: [system_prompt, summary_msg, ...recent_messages]
+pub async fn compact_history_if_needed(
+    http_client: &reqwest::Client,
+    config: &AppConfig,
+    history: &mut Vec<OllamaMessage>,
+) {
+    let budget = context_budget();
+    let tokens = estimate_tokens(history);
+    if tokens <= budget {
+        return;
+    }
+
+    let keep = keep_recent().min(history.len().saturating_sub(1));
+    // We need at least the system prompt + 2 messages to compact anything
+    if history.len() <= keep + 2 {
+        return;
+    }
+
+    tracing::info!(
+        "context compaction triggered: {} tokens > {} budget, {} messages",
+        tokens, budget, history.len()
+    );
+
+    // Split: [system_prompt] [old_messages_to_summarize...] [recent_to_keep...]
+    let split_point = history.len() - keep;
+    let old_count = split_point - 1; // number of messages to summarize (skip system)
+
+    if old_count == 0 {
+        return;
+    }
+
+    // Build the conversation text to summarize (consumes the borrow before mutation)
+    let mut conversation_text = String::new();
+    let mut old_tokens = 0usize;
+    for msg in &history[1..split_point] {
+        let role = &msg.role;
+        old_tokens += msg.content.len() / 4 + 1;
+        let content = if msg.content.len() > 2000 {
+            format!("{}\n[... truncated ...]", &msg.content[..2000])
+        } else {
+            msg.content.clone()
+        };
+        conversation_text.push_str(&format!("[{role}]: {content}\n\n"));
+    }
+
+    let summary_request = vec![
+        OllamaMessage {
+            role: "system".to_string(),
+            content: COMPACTION_PROMPT.to_string(),
+        },
+        OllamaMessage {
+            role: "user".to_string(),
+            content: format!(
+                "Summarize this conversation ({old_count} messages, ~{old_tokens} tokens):\n\n{conversation_text}",
+            ),
+        },
+    ];
+
+    // Helper to rebuild history from system + replacement + recent
+    let rebuild = |history: &mut Vec<OllamaMessage>, replacement: OllamaMessage| {
+        let system = history[0].clone();
+        let recent: Vec<OllamaMessage> = history[split_point..].to_vec();
+        history.clear();
+        history.push(system);
+        history.push(replacement);
+        history.extend(recent);
+    };
+
+    match call_ollama(http_client, config, &summary_request).await {
+        Ok(summary_reply) => {
+            let summary_msg = OllamaMessage {
+                role: "user".to_string(),
+                content: format!(
+                    "[Session Context Summary — compacted from {old_count} earlier messages]\n\n{}",
+                    summary_reply.content,
+                ),
+            };
+            rebuild(history, summary_msg);
+
+            let new_tokens = estimate_tokens(history);
+            tracing::info!(
+                "compaction complete: {} -> {} messages, {} -> {} est. tokens",
+                split_point, history.len(), tokens, new_tokens,
+            );
+        }
+        Err(err) => {
+            tracing::warn!("compaction summarization failed, skipping: {err}");
+            let fallback = OllamaMessage {
+                role: "user".to_string(),
+                content: format!(
+                    "[Session Context — {old_count} earlier messages were dropped due to context limits. \
+                     Some context may be missing.]",
+                ),
+            };
+            rebuild(history, fallback);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Streaming Ollama API call
 // ---------------------------------------------------------------------------
 
