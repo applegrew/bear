@@ -12,7 +12,7 @@ use menu::{interactive_menu, MenuItem, MenuMode, MenuResult};
 use reqwest::Url;
 use std::collections::HashSet;
 use std::sync::mpsc as std_mpsc;
-use term::{RenderCmd, TermEvent};
+use term::{RenderCmd, TermEvent, ToolConfirmChoice};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
@@ -176,7 +176,6 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
     // Spawn the single terminal owner thread
     let term_handle = term::spawn_terminal_thread(render_rx, term_event_tx);
 
-    let mut pending_tool: Option<PendingTool> = None;
     let mut auto_approved: HashSet<String> = HashSet::new();
     let mut last_tool: (String, serde_json::Value) = (String::new(), serde_json::Value::Null);
 
@@ -190,7 +189,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
         match event {
             LoopEvent::FromServer(msg) => {
                 if let Some(auto_confirm) = dispatch_server_msg(
-                    &msg, &render_tx, &mut pending_tool, &auto_approved, &mut last_tool,
+                    &msg, &render_tx, &auto_approved, &mut last_tool,
                 ) {
                     // Auto-approved tool call — send confirmation immediately
                     let payload = serde_json::to_string(&ClientMessage::ToolConfirm {
@@ -200,27 +199,23 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                     ws_write.send(Message::Text(payload)).await?;
                 }
             }
+            LoopEvent::FromTerm(TermEvent::ToolConfirmResult { tool_call_id, base_command, choice }) => {
+                let approved = choice != ToolConfirmChoice::Deny;
+                if choice == ToolConfirmChoice::Always {
+                    auto_approved.insert(base_command.clone());
+                    let _ = render_tx.send(RenderCmd::Notice(
+                        format!("'{}' will be auto-approved for this session.", base_command),
+                    ));
+                }
+                let payload = serde_json::to_string(&ClientMessage::ToolConfirm {
+                    tool_call_id,
+                    approved,
+                })?;
+                ws_write.send(Message::Text(payload)).await?;
+            }
             LoopEvent::FromTerm(TermEvent::UserLine(line)) => {
                 let line = line.trim().to_string();
                 if line.is_empty() {
-                    continue;
-                }
-
-                // If we're waiting for tool confirmation
-                if let Some(tool) = pending_tool.take() {
-                    let lower = line.to_ascii_lowercase();
-                    let approved = lower == "y" || lower == "yes" || lower == "a" || lower == "always";
-                    if lower == "a" || lower == "always" {
-                        auto_approved.insert(tool.base_command.clone());
-                        let _ = render_tx.send(RenderCmd::Notice(
-                            format!("'{}' will be auto-approved for this session.", tool.base_command),
-                        ));
-                    }
-                    let payload = serde_json::to_string(&ClientMessage::ToolConfirm {
-                        tool_call_id: tool.id,
-                        approved,
-                    })?;
-                    ws_write.send(Message::Text(payload)).await?;
                     continue;
                 }
 
@@ -324,10 +319,10 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                         "  /help            Show this help",
                         "  Ctrl+D           Quit",
                         "",
-                        "Tool confirmations:",
-                        "  y/yes            Approve this tool call",
-                        "  n/no             Deny this tool call",
-                        "  a/always         Approve and auto-approve this command for the session",
+                        "Tool confirmations:  (interactive picker)",
+                        "  Approve          Allow this tool call",
+                        "  Deny             Reject this tool call",
+                        "  Always approve   Auto-approve this command for the session",
                         "",
                         "Agent tools:",
                         "  run_command      Execute shell commands",
@@ -351,17 +346,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                 }
             }
             LoopEvent::FromTerm(TermEvent::Interrupt) => {
-                // Ctrl+C: cancel pending tool call if any
-                if let Some(tool) = pending_tool.take() {
-                    let payload = serde_json::to_string(&ClientMessage::ToolConfirm {
-                        tool_call_id: tool.id,
-                        approved: false,
-                    })?;
-                    ws_write.send(Message::Text(payload)).await?;
-                    let _ = render_tx.send(RenderCmd::Notice(
-                        "Tool call cancelled.".into(),
-                    ));
-                }
+                // Ctrl+C — no-op (tool confirmation is handled by picker)
             }
             LoopEvent::FromTerm(TermEvent::UserPromptResult { prompt_id, selected }) => {
                 let payload = serde_json::to_string(
@@ -379,15 +364,6 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
     }
 
     Ok(SessionResult::Quit)
-}
-
-// ---------------------------------------------------------------------------
-// Pending tool call with base command for auto-approve matching
-// ---------------------------------------------------------------------------
-
-struct PendingTool {
-    id: String,
-    base_command: String,
 }
 
 fn extract_base_command(tool_call: &ToolCall) -> String {
@@ -424,7 +400,6 @@ fn extract_base_command(tool_call: &ToolCall) -> String {
 fn dispatch_server_msg(
     msg: &ServerMessage,
     render_tx: &std_mpsc::Sender<RenderCmd>,
-    pending_tool: &mut Option<PendingTool>,
     auto_approved: &HashSet<String>,
     last_tool: &mut (String, serde_json::Value),
 ) -> Option<String> {
@@ -455,14 +430,12 @@ fn dispatch_server_msg(
                 return Some(tool_call.id.clone());
             }
 
-            *pending_tool = Some(PendingTool {
-                id: tool_call.id.clone(),
+            let _ = render_tx.send(RenderCmd::ToolRequest {
+                tool_call_id: tool_call.id.clone(),
                 base_command: base_cmd,
+                name: tool_call.name.clone(),
+                args: args_str,
             });
-            let _ = render_tx.send(RenderCmd::ToolRequest(
-                tool_call.name.clone(),
-                args_str,
-            ));
         }
         ServerMessage::ToolOutput { output, .. } => {
             let _ = render_tx.send(RenderCmd::ToolOutput {

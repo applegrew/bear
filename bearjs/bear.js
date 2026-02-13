@@ -73,8 +73,11 @@ export class BearClient {
     this._lastToolName = '';
     this._lastToolArgs = {};
 
-    // Tool confirmation state
-    this.pendingToolCall = null;
+    // Tool confirmation picker state
+    this.inToolConfirm = false;
+    this.toolConfirmCall = null;   // the tool_call object
+    this.toolConfirmIdx = 0;       // 0=Approve, 1=Deny, 2=Always
+    this.toolConfirmRendered = false;
     this.autoApproved = new Set();
 
     // Session picker state
@@ -209,7 +212,10 @@ export class BearClient {
 
   _connectToSession(sid) {
     this.sessionId = sid;
-    this.pendingToolCall = null;
+    this.inToolConfirm = false;
+    this.toolConfirmCall = null;
+    this.toolConfirmIdx = 0;
+    this.toolConfirmRendered = false;
     this.autoApproved.clear();
 
     if (this.ws) { this.ws.close(); this.ws = null; }
@@ -283,14 +289,18 @@ export class BearClient {
           this._sendJson({ type: 'tool_confirm', tool_call_id: tc.id, approved: true });
           this._drawPrompt();
         } else {
-          this.pendingToolCall = tc;
+          // Show tool info
           const argsStr = JSON.stringify(tc.arguments, null, 2);
           this._writeln(`${C.bold}${C.yellow}  [tool] ${tc.name}${C.reset}`);
           for (const line of argsStr.split('\n')) {
             this._writeln(`${C.yellow}    ${line}${C.reset}`);
           }
-          this._writeln(`${C.white}  Allow? ${C.green}[y]es ${C.red}[n]o ${C.yellow}[a]lways${C.reset}`);
-          this._drawConfirmPrompt();
+          // Enter picker mode
+          this.toolConfirmCall = tc;
+          this.toolConfirmIdx = 0;
+          this.toolConfirmRendered = false;
+          this.inToolConfirm = true;
+          this._renderToolConfirm();
         }
         break;
       }
@@ -389,6 +399,12 @@ export class BearClient {
         return;
       }
 
+      // Tool confirmation picker mode
+      if (this.inToolConfirm) {
+        this._handleToolConfirmKey(data);
+        return;
+      }
+
       // User prompt mode
       if (this.inUserPrompt) {
         this._handleUserPromptKey(data);
@@ -458,16 +474,10 @@ export class BearClient {
 
         // Ctrl+C
         if (code === 3) {
-          if (this.pendingToolCall) {
-            this._confirmTool(false, false);
-            this._writeln(`${C.gray}  Tool call cancelled.${C.reset}`);
-            this._drawPrompt();
-          } else {
-            this.inputBuf = '';
-            this.cursorPos = 0;
-            this.term.writeln('^C');
-            this._drawPrompt();
-          }
+          this.inputBuf = '';
+          this.cursorPos = 0;
+          this.term.writeln('^C');
+          this._drawPrompt();
           continue;
         }
 
@@ -616,12 +626,8 @@ export class BearClient {
   _restorePrompt() {
     // Redraw prompt preserving any in-progress user input
     this._clearDropdown();
-    if (this.pendingToolCall) {
-      this.term.write(`${C.bold}${C.yellow}  > ${C.reset}${this.inputBuf}`);
-    } else {
-      const p = this.inputBuf.startsWith('/') ? PROMPT_CMD : PROMPT;
-      this.term.write(`${p}${this.inputBuf}`);
-    }
+    const p = this.inputBuf.startsWith('/') ? PROMPT_CMD : PROMPT;
+    this.term.write(`${p}${this.inputBuf}`);
     // Reposition cursor if not at end
     const back = this.inputBuf.length - this.cursorPos;
     if (back > 0) {
@@ -630,24 +636,14 @@ export class BearClient {
     this._renderDropdown();
   }
 
-  _drawConfirmPrompt() {
-    this.inputBuf = '';
-    this.cursorPos = 0;
-    this.term.write(`${C.bold}${C.yellow}  > ${C.reset}`);
-  }
-
   _redrawInput() {
     // Clear dropdown first, then redraw prompt line
     this._clearDropdown();
     this.term.write('\x1b[2K\r');
-    if (this.pendingToolCall) {
-      this.term.write(`${C.bold}${C.yellow}  > ${C.reset}${this.inputBuf}`);
-    } else {
-      const p = this.inputBuf.startsWith('/') ? PROMPT_CMD : PROMPT;
-      this.term.write(`${p}${this.inputBuf}`);
-    }
+    const p = this.inputBuf.startsWith('/') ? PROMPT_CMD : PROMPT;
+    this.term.write(`${p}${this.inputBuf}`);
     // Move cursor to correct position
-    const promptLen = this.pendingToolCall ? 4 : 6; // "  > " or "bear> " / "cmd-> "
+    const promptLen = 6; // "bear> " / "cmd-> "
     const targetCol = promptLen + this.cursorPos;
     const endCol = promptLen + this.inputBuf.length;
     if (targetCol < endCol) {
@@ -674,7 +670,6 @@ export class BearClient {
   }
 
   _renderDropdown() {
-    if (this.pendingToolCall) return;
     const matches = matchingSlashCommands(this.inputBuf);
     if (matches.length === 0) {
       this._dropdownIdx = -1;
@@ -811,22 +806,6 @@ export class BearClient {
     this.historyIdx = -1;
     this.savedInput = '';
 
-    // Tool confirmation mode
-    if (this.pendingToolCall) {
-      const lower = text.toLowerCase();
-      if (lower === 'y' || lower === 'yes') {
-        this._confirmTool(true, false);
-      } else if (lower === 'n' || lower === 'no') {
-        this._confirmTool(false, false);
-      } else if (lower === 'a' || lower === 'always') {
-        this._confirmTool(true, true);
-      } else {
-        this._writeln(`${C.gray}  Please type y, n, or a${C.reset}`);
-        this._drawConfirmPrompt();
-      }
-      return;
-    }
-
     // Slash commands
     if (text === '/help') {
       this._showHelp();
@@ -909,15 +888,64 @@ export class BearClient {
   }
 
   // -------------------------------------------------------------------------
-  // Tool confirmation
+  // Tool confirmation picker
   // -------------------------------------------------------------------------
 
-  _confirmTool(approved, alwaysAllow) {
-    if (!this.pendingToolCall) return;
-    const tc = this.pendingToolCall;
-    const baseCmd = this._extractBaseCommand(tc);
+  _handleToolConfirmKey(data) {
+    if (data === '\x1b[A') {
+      // Up
+      if (this.toolConfirmIdx > 0) {
+        this.toolConfirmIdx--;
+        this._renderToolConfirm();
+      }
+    } else if (data === '\x1b[B') {
+      // Down
+      if (this.toolConfirmIdx < 2) {
+        this.toolConfirmIdx++;
+        this._renderToolConfirm();
+      }
+    } else if (data === '\r' || data === '\n') {
+      this._toolConfirmSelect();
+    }
+  }
 
-    if (alwaysAllow) {
+  _renderToolConfirm() {
+    const labels = ['Approve', 'Deny', 'Always approve for session'];
+    const colors = [C.green, C.red, C.yellow];
+    const totalLines = labels.length + 1; // options + hint
+
+    // Clear previous render
+    if (this.toolConfirmRendered) {
+      for (let i = 0; i < totalLines; i++) {
+        this.term.write('\x1b[A\x1b[2K');
+      }
+    }
+    this.toolConfirmRendered = true;
+
+    for (let i = 0; i < labels.length; i++) {
+      const focused = i === this.toolConfirmIdx;
+      if (focused) {
+        this.term.writeln(`${C.yellow}  ❯ ${colors[i]}${labels[i]}${C.reset}`);
+      } else {
+        this.term.writeln(`${C.gray}    ${labels[i]}${C.reset}`);
+      }
+    }
+    this.term.writeln(`${C.gray}  ↑/↓ navigate, Enter select${C.reset}`);
+  }
+
+  _toolConfirmSelect() {
+    const tc = this.toolConfirmCall;
+    if (!tc) return;
+
+    const baseCmd = this._extractBaseCommand(tc);
+    const idx = this.toolConfirmIdx;
+    const approved = idx !== 1; // 0=Approve, 1=Deny, 2=Always
+
+    this.inToolConfirm = false;
+    this.toolConfirmCall = null;
+    this.term.writeln('');
+
+    if (idx === 2) {
       this.autoApproved.add(baseCmd);
       this._writeln(`${C.yellow}  '${baseCmd}' will be auto-approved for this session.${C.reset}`);
     }
@@ -928,7 +956,6 @@ export class BearClient {
     this._writeln(verdict);
 
     this._sendJson({ type: 'tool_confirm', tool_call_id: tc.id, approved });
-    this.pendingToolCall = null;
     // Don't draw prompt — wait for tool_output or next message
   }
 
@@ -1051,10 +1078,10 @@ export class BearClient {
       `${C.gray}    /end             ${C.white}End session, pick another${C.reset}`,
       `${C.gray}    /help            ${C.white}Show this help${C.reset}`,
       '',
-      `${C.bold}${C.white}  Tool confirmations:${C.reset}`,
-      `${C.green}    y/yes            ${C.white}Approve this tool call${C.reset}`,
-      `${C.red}    n/no             ${C.white}Deny this tool call${C.reset}`,
-      `${C.yellow}    a/always         ${C.white}Approve & auto-approve for session${C.reset}`,
+      `${C.bold}${C.white}  Tool confirmations:  ${C.gray}(interactive picker)${C.reset}`,
+      `${C.green}    Approve          ${C.white}Allow this tool call${C.reset}`,
+      `${C.red}    Deny             ${C.white}Reject this tool call${C.reset}`,
+      `${C.yellow}    Always approve   ${C.white}Auto-approve this command for the session${C.reset}`,
       '',
       `${C.bold}${C.white}  Agent tools:${C.reset}`,
       `${C.cyan}    run_command      ${C.white}Execute shell commands${C.reset}`,
