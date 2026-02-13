@@ -279,6 +279,216 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
 // User input handling
 // ---------------------------------------------------------------------------
 
+async fn handle_slash_command(
+    state: &ServerState,
+    session_id: Uuid,
+    socket: &mut WebSocket,
+    text: &str,
+) -> bool {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('/') {
+        return false;
+    }
+
+    match trimmed {
+        "/ps" => {
+            let procs = state.processes.read().await;
+            let list: Vec<ProcessInfo> = procs.values()
+                .filter(|p| p.session_id == session_id)
+                .map(|p| p.info.clone())
+                .collect();
+            let _ = send_msg(socket, ServerMessage::ProcessListResult {
+                processes: list,
+            }).await;
+            return true;
+        }
+        "/allowed" => {
+            let _ = send_msg(socket, ServerMessage::Notice {
+                text: "Auto-approved commands are tracked per client. Use /allowed in the client UI.".to_string(),
+            }).await;
+            return true;
+        }
+        "/help" => {
+            let help = [
+                "Commands:",
+                "  /ps              List background processes",
+                "  /kill <pid>      Kill a background process",
+                "  /send <pid> <text>  Send stdin to a process",
+                "  /session name <n>  Name the current session",
+                "  /session workdir <path>  Set session working directory",
+                "  /allowed         Show auto-approved commands",
+                "  /exit            Disconnect, keep session alive",
+                "  /end             End current session, pick another",
+                "  /help            Show this help",
+            ]
+            .join("\n");
+            let _ = send_msg(socket, ServerMessage::Notice {
+                text: help,
+            }).await;
+            return true;
+        }
+        "/exit" => {
+            let _ = send_msg(socket, ServerMessage::Notice {
+                text: "Disconnecting. Session preserved.".to_string(),
+            }).await;
+            let _ = socket.send(Message::Close(None)).await;
+            return true;
+        }
+        "/end" => {
+            cleanup_session_processes(state, session_id).await;
+            {
+                let mut sessions = state.sessions.write().await;
+                sessions.remove(&session_id);
+            }
+            let _ = send_msg(socket, ServerMessage::Notice {
+                text: "Session ended and removed.".to_string(),
+            }).await;
+            let _ = socket.send(Message::Close(None)).await;
+            return true;
+        }
+        _ => {}
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("/kill ") {
+        match rest.trim().parse::<u32>() {
+            Ok(pid) => {
+                handle_process_kill(state, socket, pid).await;
+            }
+            Err(_) => {
+                let _ = send_msg(socket, ServerMessage::Error {
+                    text: "Usage: /kill <pid>".to_string(),
+                }).await;
+            }
+        }
+        return true;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("/send ") {
+        if let Some((pid_str, input)) = rest.split_once(' ') {
+            if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                handle_process_input(state, socket, pid, input).await;
+            } else {
+                let _ = send_msg(socket, ServerMessage::Error {
+                    text: "Usage: /send <pid> <text>".to_string(),
+                }).await;
+            }
+        } else {
+            let _ = send_msg(socket, ServerMessage::Error {
+                text: "Usage: /send <pid> <text>".to_string(),
+            }).await;
+        }
+        return true;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("/session ") {
+        if let Some(name) = rest.strip_prefix("name ") {
+            let name = name.trim();
+            if name.is_empty() {
+                let _ = send_msg(socket, ServerMessage::Error {
+                    text: "Usage: /session name <session name>".to_string(),
+                }).await;
+            } else {
+                let mut sessions = state.sessions.write().await;
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    session.info.name = Some(name.to_string());
+                }
+                let _ = send_msg(socket, ServerMessage::SessionRenamed {
+                    name: name.to_string(),
+                }).await;
+            }
+            return true;
+        }
+
+        if let Some(path) = rest.strip_prefix("workdir ") {
+            let path = path.trim();
+            if path.is_empty() {
+                let _ = send_msg(socket, ServerMessage::Error {
+                    text: "Usage: /session workdir <path>".to_string(),
+                }).await;
+                return true;
+            }
+
+            let current_cwd = {
+                let sessions = state.sessions.read().await;
+                sessions.get(&session_id).map(|s| s.info.cwd.clone())
+            };
+
+            let Some(current_cwd) = current_cwd else {
+                let _ = send_msg(socket, ServerMessage::Error {
+                    text: "session not found".to_string(),
+                }).await;
+                return true;
+            };
+
+            let cmd = format!("cd {path} && pwd");
+            match Command::new("sh")
+                .arg("-lc")
+                .arg(cmd)
+                .current_dir(&current_cwd)
+                .output()
+                .await
+            {
+                Ok(out) if out.status.success() => {
+                    let new_cwd = String::from_utf8_lossy(&out.stdout)
+                        .trim()
+                        .to_string();
+                    if new_cwd.is_empty() {
+                        let _ = send_msg(socket, ServerMessage::Error {
+                            text: "Failed to resolve working directory.".to_string(),
+                        }).await;
+                        return true;
+                    }
+
+                    let updated_session = {
+                        let mut sessions = state.sessions.write().await;
+                        if let Some(session) = sessions.get_mut(&session_id) {
+                            session.info.cwd = new_cwd.clone();
+                            session.info.touch();
+                            Some(session.info.clone())
+                        } else {
+                            None
+                        }
+                    };
+
+                    if let Some(session) = updated_session {
+                        let _ = send_msg(socket, ServerMessage::Notice {
+                            text: format!("Working directory set to: {new_cwd}"),
+                        }).await;
+                        let _ = send_msg(socket, ServerMessage::SessionInfo {
+                            session,
+                        }).await;
+                    }
+                }
+                Ok(out) => {
+                    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    let msg = if err.is_empty() {
+                        "Failed to change directory.".to_string()
+                    } else {
+                        format!("Failed to change directory: {err}")
+                    };
+                    let _ = send_msg(socket, ServerMessage::Error { text: msg }).await;
+                }
+                Err(err) => {
+                    let _ = send_msg(socket, ServerMessage::Error {
+                        text: format!("Failed to change directory: {err}"),
+                    }).await;
+                }
+            }
+            return true;
+        }
+
+        let _ = send_msg(socket, ServerMessage::Error {
+            text: "Usage: /session name <session name> OR /session workdir <path>".to_string(),
+        }).await;
+        return true;
+    }
+
+    let _ = send_msg(socket, ServerMessage::Error {
+        text: format!("Unknown command: {trimmed}"),
+    }).await;
+    true
+}
+
 async fn handle_user_input(
     state: &ServerState,
     session_id: Uuid,
@@ -292,6 +502,10 @@ async fn handle_user_input(
     bulk_increment: &mut usize,
     text: String,
 ) {
+    if handle_slash_command(state, session_id, socket, &text).await {
+        return;
+    }
+
     let user_msg = OllamaMessage {
         role: "user".to_string(),
         content: text,
