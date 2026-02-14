@@ -1,14 +1,12 @@
 use std::io::BufRead;
 
-use axum::extract::ws::WebSocket;
 use bear_core::{ProcessInfo, ServerMessage};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::state::{ManagedProcess, PendingToolCall, ServerState, UndoEntry};
-use crate::ws::send_msg;
+use crate::state::{BusSender, ManagedProcess, PendingToolCall, ServerState, UndoEntry};
 
 // ---------------------------------------------------------------------------
 // Tool call parsing from LLM output
@@ -22,7 +20,7 @@ pub struct ParsedToolCall {
 async fn execute_session_workdir(
     state: &ServerState,
     session_id: Uuid,
-    socket: &mut WebSocket,
+    bus: &BusSender,
     path: &str,
     cwd: &str,
 ) -> String {
@@ -57,7 +55,7 @@ async fn execute_session_workdir(
             };
 
             if let Some(session) = updated_session {
-                let _ = send_msg(socket, ServerMessage::SessionInfo { session }).await;
+                bus.send(ServerMessage::SessionInfo { session }).await;
             }
             format!("Working directory set to: {new_cwd}")
         }
@@ -102,7 +100,7 @@ pub fn parse_tool_calls(text: &str) -> Vec<ParsedToolCall> {
 pub async fn execute_tool(
     state: &ServerState,
     session_id: Uuid,
-    socket: &mut WebSocket,
+    bus: &BusSender,
     ptc: &PendingToolCall,
 ) -> String {
     match ptc.tool_call.name.as_str() {
@@ -111,7 +109,7 @@ pub async fn execute_tool(
                 .as_str()
                 .unwrap_or("echo 'no command'")
                 .to_string();
-            execute_run_command(state, session_id, socket, &cmd_str, &ptc.cwd).await
+            execute_run_command(state, session_id, bus, &cmd_str, &ptc.cwd).await
         }
         "read_file" => {
             let path = ptc.tool_call.arguments["path"]
@@ -132,7 +130,7 @@ pub async fn execute_tool(
                 .as_str()
                 .unwrap_or("")
                 .to_string();
-            execute_session_workdir(state, session_id, socket, &path, &ptc.cwd).await
+            execute_session_workdir(state, session_id, bus, &path, &ptc.cwd).await
         }
         "write_file" => {
             let path = ptc.tool_call.arguments["path"]
@@ -235,7 +233,7 @@ async fn push_undo(state: &ServerState, session_id: Uuid, full_path: &str) {
 async fn execute_run_command(
     state: &ServerState,
     session_id: Uuid,
-    socket: &mut WebSocket,
+    bus: &BusSender,
     cmd_str: &str,
     cwd: &str,
 ) -> String {
@@ -267,7 +265,7 @@ async fn execute_run_command(
         stdin_tx: Some(stdin_tx),
     });
 
-    let _ = send_msg(socket, ServerMessage::ProcessStarted {
+    bus.send(ServerMessage::ProcessStarted {
         info: proc_info,
     }).await;
 
@@ -313,7 +311,7 @@ async fn execute_run_command(
 
     let mut all_output = String::new();
     while let Some(line) = output_rx.recv().await {
-        let _ = send_msg(socket, ServerMessage::ProcessOutput {
+        bus.send(ServerMessage::ProcessOutput {
             pid,
             text: line.clone(),
         }).await;
@@ -332,7 +330,7 @@ async fn execute_run_command(
         }
     }
 
-    let _ = send_msg(socket, ServerMessage::ProcessExited { pid, code }).await;
+    bus.send(ServerMessage::ProcessExited { pid, code }).await;
 
     if all_output.is_empty() {
         format!("Process exited with code {}", code.map(|c| c.to_string()).unwrap_or("unknown".into()))

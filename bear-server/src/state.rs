@@ -1,7 +1,7 @@
-use bear_core::{ProcessInfo, ToolCall};
+use bear_core::{ClientMessage, ProcessInfo, ServerMessage, ToolCall};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use uuid::Uuid;
 
 use crate::llm::OllamaMessage;
@@ -107,6 +107,57 @@ pub struct Session {
     pub undo_stack: Vec<UndoEntry>,
 }
 
+// ---------------------------------------------------------------------------
+// Session bus: broadcast channel + message log for replay on reconnect
+// ---------------------------------------------------------------------------
+
+/// Holds the broadcast infrastructure for a session so that LLM processing
+/// can continue independently of any connected WebSocket client.
+pub struct SessionBus {
+    /// Broadcast sender — every `ServerMessage` produced by the session worker
+    /// is sent here. Connected clients subscribe via `bus_tx.subscribe()`.
+    pub bus_tx: broadcast::Sender<ServerMessage>,
+    /// Ordered log of every `ServerMessage` sent so far. A reconnecting client
+    /// replays this log before subscribing to the live broadcast.
+    pub message_log: Arc<tokio::sync::Mutex<Vec<ServerMessage>>>,
+    /// Channel for clients to send messages to the session worker.
+    pub client_tx: mpsc::Sender<ClientMessage>,
+}
+
+impl SessionBus {
+    pub fn new(client_tx: mpsc::Sender<ClientMessage>) -> Self {
+        let (bus_tx, _) = broadcast::channel(256);
+        Self {
+            bus_tx,
+            message_log: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            client_tx,
+        }
+    }
+
+    /// Create a lightweight sender handle that the worker task can own.
+    pub fn sender(&self) -> BusSender {
+        BusSender {
+            bus_tx: self.bus_tx.clone(),
+            message_log: self.message_log.clone(),
+        }
+    }
+}
+
+/// Lightweight handle for sending messages from the session worker.
+/// Writes to both the broadcast channel and the message log.
+#[derive(Clone)]
+pub struct BusSender {
+    pub bus_tx: broadcast::Sender<ServerMessage>,
+    message_log: Arc<tokio::sync::Mutex<Vec<ServerMessage>>>,
+}
+
+impl BusSender {
+    pub async fn send(&self, msg: ServerMessage) {
+        self.message_log.lock().await.push(msg.clone());
+        let _ = self.bus_tx.send(msg);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub ollama_url: String,
@@ -142,6 +193,7 @@ impl AppConfig {
 #[derive(Clone)]
 pub struct ServerState {
     pub sessions: Arc<RwLock<HashMap<Uuid, Session>>>,
+    pub buses: Arc<RwLock<HashMap<Uuid, SessionBus>>>,
     pub processes: Arc<RwLock<HashMap<u32, ManagedProcess>>>,
     pub config: AppConfig,
     pub http_client: reqwest::Client,

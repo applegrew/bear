@@ -2,20 +2,21 @@ use std::collections::VecDeque;
 
 use axum::extract::ws::{Message, WebSocket};
 use bear_core::{ClientMessage, ProcessInfo, ServerMessage, SlashCommandInfo, ToolCall};
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::llm::{call_ollama_streaming, compact_history_if_needed, reflective_thinking, OllamaMessage};
 use crate::process::{cleanup_session_processes, handle_process_kill, handle_process_input};
-use crate::state::{PendingToolCall, ServerState};
+use crate::state::{BusSender, PendingToolCall, SessionBus, ServerState};
 use crate::tools::{execute_tool, parse_tool_calls};
 
 /// When true, run a non-streaming reflection call before the main LLM response.
 const ENABLE_REFLECTION: bool = true;
 
 // ---------------------------------------------------------------------------
-// WebSocket handler
+// WebSocket handler — thin relay between client and session bus
 // ---------------------------------------------------------------------------
 
 const SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -53,27 +54,55 @@ struct PendingDepthPrompt {
     prompt_id: String,
 }
 
+/// Ensure a session bus exists and a worker is running. Returns the client_tx
+/// sender for forwarding client messages to the worker.
+async fn ensure_worker_running(
+    state: &ServerState,
+    session_id: Uuid,
+) -> mpsc::Sender<ClientMessage> {
+    let mut buses = state.buses.write().await;
+    if let Some(bus) = buses.get(&session_id) {
+        return bus.client_tx.clone();
+    }
+
+    // Create a new bus and spawn the worker
+    let (client_tx, client_rx) = mpsc::channel::<ClientMessage>(64);
+    let bus = SessionBus::new(client_tx.clone());
+    let bus_sender = bus.sender();
+    buses.insert(session_id, bus);
+    drop(buses); // release lock before spawning
+
+    let worker_state = state.clone();
+    tokio::spawn(async move {
+        session_worker(worker_state, session_id, bus_sender, client_rx).await;
+    });
+
+    client_tx
+}
+
 pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: WebSocket) {
+    // Verify session exists
     let session_info = {
         let sessions = state.sessions.read().await;
         sessions.get(&session_id).map(|s| s.info.clone())
     };
 
     let Some(info) = session_info else {
-        let _ = send_msg(&mut socket, ServerMessage::Error {
+        let _ = ws_send(&mut socket, &ServerMessage::Error {
             text: "session not found".to_string(),
         }).await;
         let _ = socket.close().await;
         return;
     };
 
-    let _ = send_msg(&mut socket, ServerMessage::SessionInfo {
+    // Send session info and slash commands directly to this client
+    let _ = ws_send(&mut socket, &ServerMessage::SessionInfo {
         session: info.clone(),
     }).await;
-    let _ = send_msg(&mut socket, ServerMessage::SlashCommands {
+    let _ = ws_send(&mut socket, &ServerMessage::SlashCommands {
         commands: slash_command_infos(),
     }).await;
-    let _ = send_msg(&mut socket, ServerMessage::Notice {
+    let _ = ws_send(&mut socket, &ServerMessage::Notice {
         text: format!(
             "Session persists after clients disconnect. Working directory is {}.",
             info.cwd
@@ -81,10 +110,111 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
     }).await;
 
     if info.name.is_none() {
-        let _ = send_msg(&mut socket, ServerMessage::Notice {
+        let _ = ws_send(&mut socket, &ServerMessage::Notice {
             text: "Tip: Name this session with /session name <name>".to_string(),
         }).await;
     }
+
+    // Ensure the session worker is running and get the client_tx
+    let client_tx = ensure_worker_running(&state, session_id).await;
+
+    // Subscribe to the session bus broadcast
+    let mut bus_rx = {
+        let buses = state.buses.read().await;
+        let Some(bus) = buses.get(&session_id) else {
+            let _ = ws_send(&mut socket, &ServerMessage::Error {
+                text: "session bus not found".to_string(),
+            }).await;
+            return;
+        };
+        // Replay buffered messages first
+        let log = bus.message_log.lock().await;
+        for msg in log.iter() {
+            if ws_send(&mut socket, msg).await.is_err() {
+                return;
+            }
+        }
+        bus.bus_tx.subscribe()
+    };
+
+    tracing::info!("client connected to session {session_id}, replayed message log");
+
+    // Main relay loop: forward between WebSocket and session bus
+    let (mut ws_sink, mut ws_stream) = socket.split();
+    loop {
+        tokio::select! {
+            // Messages from the session worker → forward to WebSocket client
+            bus_msg = bus_rx.recv() => {
+                match bus_msg {
+                    Ok(msg) => {
+                        let payload = match serde_json::to_string(&msg) {
+                            Ok(p) => p,
+                            Err(_) => continue,
+                        };
+                        if SinkExt::send(&mut ws_sink, Message::Text(payload)).await.is_err() {
+                            tracing::info!("client disconnected from session {session_id} (send failed)");
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("client lagged {n} messages on session {session_id}");
+                        // Continue — client will miss some messages but stay connected
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::info!("session bus closed for {session_id}");
+                        break;
+                    }
+                }
+            }
+            // Messages from WebSocket client → forward to session worker
+            ws_msg = ws_stream.next() => {
+                match ws_msg {
+                    Some(Ok(Message::Text(text))) => {
+                        match serde_json::from_str::<ClientMessage>(&text) {
+                            Ok(ClientMessage::Ping) => {
+                                // Handle ping directly, don't forward to worker
+                                let payload = serde_json::to_string(&ServerMessage::Pong).unwrap_or_default();
+                                let _ = SinkExt::send(&mut ws_sink, Message::Text(payload)).await;
+                            }
+                            Ok(client_msg) => {
+                                let _ = client_tx.send(client_msg).await;
+                            }
+                            Err(err) => {
+                                let payload = serde_json::to_string(&ServerMessage::Error {
+                                    text: format!("invalid message: {err}"),
+                                }).unwrap_or_default();
+                                let _ = SinkExt::send(&mut ws_sink, Message::Text(payload)).await;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = SinkExt::send(&mut ws_sink, Message::Pong(data)).await;
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        tracing::info!("client disconnected from session {session_id}");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Client disconnected — worker keeps running, session persists
+    tracing::info!("WebSocket closed for session {session_id}, worker continues");
+}
+
+// ---------------------------------------------------------------------------
+// Session worker — background task that owns the agentic loop
+// ---------------------------------------------------------------------------
+
+async fn session_worker(
+    state: ServerState,
+    session_id: Uuid,
+    bus: BusSender,
+    mut client_rx: mpsc::Receiver<ClientMessage>,
+) {
+    tracing::info!("session worker started for {session_id}");
 
     let mut pending: Option<PendingToolCall> = None;
     let mut tool_queue: VecDeque<PendingToolCall> = VecDeque::new();
@@ -94,210 +224,197 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
     let mut depth_limit: usize = state.config.max_tool_depth;
     let mut bulk_increment: usize = 50;
 
-    while let Some(Ok(msg)) = socket.next().await {
-        match msg {
-            Message::Text(text) => {
-                let client_msg = match serde_json::from_str::<ClientMessage>(&text) {
-                    Ok(m) => m,
-                    Err(err) => {
-                        let _ = send_msg(&mut socket, ServerMessage::Error {
-                            text: format!("invalid message: {err}"),
-                        }).await;
-                        continue;
-                    }
-                };
-
-                match client_msg {
-                    ClientMessage::Input { text } => {
-                        tool_depth = 0;
-                        depth_limit = state.config.max_tool_depth;
-                        bulk_increment = 50;
-                        handle_user_input(
-                            &state, session_id, &mut socket,
+    while let Some(client_msg) = client_rx.recv().await {
+        match client_msg {
+            ClientMessage::Input { text } => {
+                tool_depth = 0;
+                depth_limit = state.config.max_tool_depth;
+                bulk_increment = 50;
+                handle_user_input(
+                    &state, session_id, &bus, &mut client_rx,
+                    &mut pending, &mut pending_prompt,
+                    &mut pending_depth_prompt,
+                    &mut tool_queue, &mut tool_depth,
+                    &mut depth_limit, &mut bulk_increment,
+                    text,
+                ).await;
+            }
+            ClientMessage::ToolConfirm { tool_call_id, approved } => {
+                handle_tool_confirm(
+                    &state, session_id, &bus, &mut client_rx,
+                    &mut pending, &mut pending_prompt,
+                    &mut pending_depth_prompt,
+                    &mut tool_queue, &mut tool_depth,
+                    &mut depth_limit, &mut bulk_increment,
+                    &tool_call_id, approved,
+                ).await;
+            }
+            ClientMessage::UserPromptResponse { prompt_id, selected } => {
+                if let Some(dp) = pending_depth_prompt.take() {
+                    if dp.prompt_id == prompt_id {
+                        handle_depth_prompt_response(
+                            &state, session_id, &bus, &mut client_rx,
                             &mut pending, &mut pending_prompt,
                             &mut pending_depth_prompt,
                             &mut tool_queue, &mut tool_depth,
                             &mut depth_limit, &mut bulk_increment,
-                            text,
+                            selected,
                         ).await;
+                    } else {
+                        pending_depth_prompt = Some(dp);
                     }
-                    ClientMessage::ToolConfirm { tool_call_id, approved } => {
-                        handle_tool_confirm(
-                            &state, session_id, &mut socket,
-                            &mut pending, &mut pending_prompt,
-                            &mut pending_depth_prompt,
-                            &mut tool_queue, &mut tool_depth,
-                            &mut depth_limit, &mut bulk_increment,
-                            &tool_call_id, approved,
-                        ).await;
-                    }
-                    ClientMessage::UserPromptResponse { prompt_id, selected } => {
-                        // Check if this is a depth-continuation prompt response
-                        if let Some(dp) = pending_depth_prompt.take() {
-                            if dp.prompt_id == prompt_id {
-                                handle_depth_prompt_response(
-                                    &state, session_id, &mut socket,
-                                    &mut pending, &mut pending_prompt,
-                                    &mut pending_depth_prompt,
-                                    &mut tool_queue, &mut tool_depth,
-                                    &mut depth_limit, &mut bulk_increment,
-                                    selected,
-                                ).await;
-                            } else {
-                                // Not ours, restore it
-                                pending_depth_prompt = Some(dp);
-                            }
-                        } else {
-                            handle_prompt_response(
-                                &state, session_id, &mut socket,
-                                &mut pending, &mut pending_prompt,
-                                &mut pending_depth_prompt,
-                                &mut tool_queue, &mut tool_depth,
-                                &mut depth_limit, &mut bulk_increment,
-                                &prompt_id, selected,
-                            ).await;
-                        }
-                    }
-                    ClientMessage::ProcessList => {
-                        let procs = state.processes.read().await;
-                        let list: Vec<ProcessInfo> = procs.values()
-                            .filter(|p| p.session_id == session_id)
-                            .map(|p| p.info.clone())
-                            .collect();
-                        let _ = send_msg(&mut socket, ServerMessage::ProcessListResult {
-                            processes: list,
-                        }).await;
-                    }
-                    ClientMessage::ProcessKill { pid } => {
-                        handle_process_kill(&state, &mut socket, pid).await;
-                    }
-                    ClientMessage::ProcessInput { pid, text } => {
-                        handle_process_input(&state, &mut socket, pid, &text).await;
-                    }
-                    ClientMessage::SessionRename { name } => {
-                        let trimmed = name.trim().to_string();
-                        if trimmed.is_empty() {
-                            let _ = send_msg(&mut socket, ServerMessage::Error {
-                                text: "Session name must not be empty.".to_string(),
-                            }).await;
-                        } else {
-                            let mut sessions = state.sessions.write().await;
-                            if let Some(session) = sessions.get_mut(&session_id) {
-                                session.info.name = Some(trimmed.clone());
-                            }
-                            let _ = send_msg(&mut socket, ServerMessage::SessionRenamed {
-                                name: trimmed,
-                            }).await;
-                        }
-                    }
-                    ClientMessage::SessionWorkdir { path } => {
-                        let trimmed = path.trim();
-                        if trimmed.is_empty() {
-                            let _ = send_msg(&mut socket, ServerMessage::Error {
-                                text: "Usage: /session workdir <path>".to_string(),
-                            }).await;
-                            continue;
-                        }
-
-                        let current_cwd = {
-                            let sessions = state.sessions.read().await;
-                            sessions.get(&session_id).map(|s| s.info.cwd.clone())
-                        };
-
-                        let Some(current_cwd) = current_cwd else {
-                            let _ = send_msg(&mut socket, ServerMessage::Error {
-                                text: "session not found".to_string(),
-                            }).await;
-                            continue;
-                        };
-
-                        let cmd = format!("cd {trimmed} && pwd");
-                        match Command::new("sh")
-                            .arg("-lc")
-                            .arg(cmd)
-                            .current_dir(&current_cwd)
-                            .output()
-                            .await
-                        {
-                            Ok(out) if out.status.success() => {
-                                let new_cwd = String::from_utf8_lossy(&out.stdout)
-                                    .trim()
-                                    .to_string();
-                                if new_cwd.is_empty() {
-                                    let _ = send_msg(&mut socket, ServerMessage::Error {
-                                        text: "Failed to resolve working directory.".to_string(),
-                                    }).await;
-                                    continue;
-                                }
-
-                                let updated_session = {
-                                    let mut sessions = state.sessions.write().await;
-                                    if let Some(session) = sessions.get_mut(&session_id) {
-                                        session.info.cwd = new_cwd.clone();
-                                        session.info.touch();
-                                        Some(session.info.clone())
-                                    } else {
-                                        None
-                                    }
-                                };
-
-                                if let Some(session) = updated_session {
-                                    let _ = send_msg(&mut socket, ServerMessage::Notice {
-                                        text: format!("Working directory set to: {new_cwd}"),
-                                    }).await;
-                                    let _ = send_msg(&mut socket, ServerMessage::SessionInfo {
-                                        session,
-                                    }).await;
-                                }
-                            }
-                            Ok(out) => {
-                                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                                let msg = if err.is_empty() {
-                                    "Failed to change directory.".to_string()
-                                } else {
-                                    format!("Failed to change directory: {err}")
-                                };
-                                let _ = send_msg(&mut socket, ServerMessage::Error {
-                                    text: msg,
-                                }).await;
-                            }
-                            Err(err) => {
-                                let _ = send_msg(&mut socket, ServerMessage::Error {
-                                    text: format!("Failed to change directory: {err}"),
-                                }).await;
-                            }
-                        }
-                    }
-                    ClientMessage::SessionEnd => {
-                        // Remove session and clean up processes
-                        cleanup_session_processes(&state, session_id).await;
-                        {
-                            let mut sessions = state.sessions.write().await;
-                            sessions.remove(&session_id);
-                        }
-                        let _ = send_msg(&mut socket, ServerMessage::Notice {
-                            text: "Session ended and removed.".to_string(),
-                        }).await;
-                        break;
-                    }
-                    ClientMessage::Interrupt => {
-                        // No-op outside of streaming — handled inside invoke_llm
-                    }
-                    ClientMessage::Ping => {
-                        let _ = send_msg(&mut socket, ServerMessage::Pong).await;
-                    }
+                } else {
+                    handle_prompt_response(
+                        &state, session_id, &bus, &mut client_rx,
+                        &mut pending, &mut pending_prompt,
+                        &mut pending_depth_prompt,
+                        &mut tool_queue, &mut tool_depth,
+                        &mut depth_limit, &mut bulk_increment,
+                        &prompt_id, selected,
+                    ).await;
                 }
             }
-            Message::Close(_) => break,
-            Message::Ping(_) => {
-                let _ = socket.send(Message::Pong(vec![])).await;
+            ClientMessage::ProcessList => {
+                let procs = state.processes.read().await;
+                let list: Vec<ProcessInfo> = procs.values()
+                    .filter(|p| p.session_id == session_id)
+                    .map(|p| p.info.clone())
+                    .collect();
+                bus.send(ServerMessage::ProcessListResult {
+                    processes: list,
+                }).await;
             }
-            _ => {}
+            ClientMessage::ProcessKill { pid } => {
+                handle_process_kill(&state, &bus, pid).await;
+            }
+            ClientMessage::ProcessInput { pid, text } => {
+                handle_process_input(&state, &bus, pid, &text).await;
+            }
+            ClientMessage::SessionRename { name } => {
+                let trimmed = name.trim().to_string();
+                if trimmed.is_empty() {
+                    bus.send(ServerMessage::Error {
+                        text: "Session name must not be empty.".to_string(),
+                    }).await;
+                } else {
+                    let mut sessions = state.sessions.write().await;
+                    if let Some(session) = sessions.get_mut(&session_id) {
+                        session.info.name = Some(trimmed.clone());
+                    }
+                    bus.send(ServerMessage::SessionRenamed {
+                        name: trimmed,
+                    }).await;
+                }
+            }
+            ClientMessage::SessionWorkdir { path } => {
+                handle_session_workdir_cmd(&state, session_id, &bus, &path).await;
+            }
+            ClientMessage::SessionEnd => {
+                cleanup_session_processes(&state, session_id).await;
+                {
+                    let mut sessions = state.sessions.write().await;
+                    sessions.remove(&session_id);
+                }
+                bus.send(ServerMessage::Notice {
+                    text: "Session ended and removed.".to_string(),
+                }).await;
+                // Remove the bus too
+                state.buses.write().await.remove(&session_id);
+                break;
+            }
+            ClientMessage::Interrupt => {
+                // No-op outside of streaming — handled inside invoke_llm
+            }
+            ClientMessage::Ping => {
+                // Handled directly in handle_socket, should not reach here
+            }
         }
     }
 
-    // Client disconnected — clean up any running processes for this session
-    cleanup_session_processes(&state, session_id).await;
+    tracing::info!("session worker exiting for {session_id}");
+}
+
+/// Handle /session workdir command (extracted to avoid duplication)
+async fn handle_session_workdir_cmd(
+    state: &ServerState,
+    session_id: Uuid,
+    bus: &BusSender,
+    path: &str,
+) {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        bus.send(ServerMessage::Error {
+            text: "Usage: /session workdir <path>".to_string(),
+        }).await;
+        return;
+    }
+
+    let current_cwd = {
+        let sessions = state.sessions.read().await;
+        sessions.get(&session_id).map(|s| s.info.cwd.clone())
+    };
+
+    let Some(current_cwd) = current_cwd else {
+        bus.send(ServerMessage::Error {
+            text: "session not found".to_string(),
+        }).await;
+        return;
+    };
+
+    let cmd = format!("cd {trimmed} && pwd");
+    match Command::new("sh")
+        .arg("-lc")
+        .arg(cmd)
+        .current_dir(&current_cwd)
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => {
+            let new_cwd = String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .to_string();
+            if new_cwd.is_empty() {
+                bus.send(ServerMessage::Error {
+                    text: "Failed to resolve working directory.".to_string(),
+                }).await;
+                return;
+            }
+
+            let updated_session = {
+                let mut sessions = state.sessions.write().await;
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    session.info.cwd = new_cwd.clone();
+                    session.info.touch();
+                    Some(session.info.clone())
+                } else {
+                    None
+                }
+            };
+
+            if let Some(session) = updated_session {
+                bus.send(ServerMessage::Notice {
+                    text: format!("Working directory set to: {new_cwd}"),
+                }).await;
+                bus.send(ServerMessage::SessionInfo {
+                    session,
+                }).await;
+            }
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let msg = if err.is_empty() {
+                "Failed to change directory.".to_string()
+            } else {
+                format!("Failed to change directory: {err}")
+            };
+            bus.send(ServerMessage::Error { text: msg }).await;
+        }
+        Err(err) => {
+            bus.send(ServerMessage::Error {
+                text: format!("Failed to change directory: {err}"),
+            }).await;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +424,7 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
 async fn handle_slash_command(
     state: &ServerState,
     session_id: Uuid,
-    socket: &mut WebSocket,
+    bus: &BusSender,
     text: &str,
 ) -> bool {
     let trimmed = text.trim();
@@ -322,13 +439,13 @@ async fn handle_slash_command(
                 .filter(|p| p.session_id == session_id)
                 .map(|p| p.info.clone())
                 .collect();
-            let _ = send_msg(socket, ServerMessage::ProcessListResult {
+            bus.send(ServerMessage::ProcessListResult {
                 processes: list,
             }).await;
             return true;
         }
         "/allowed" => {
-            let _ = send_msg(socket, ServerMessage::Notice {
+            bus.send(ServerMessage::Notice {
                 text: "Auto-approved commands are tracked per client. Use /allowed in the client UI.".to_string(),
             }).await;
             return true;
@@ -340,28 +457,19 @@ async fn handle_slash_command(
                 lines.push(format!("  {cmd:<20} {desc}"));
             }
             let help = lines.join("\n");
-            let _ = send_msg(socket, ServerMessage::Notice {
+            bus.send(ServerMessage::Notice {
                 text: help,
             }).await;
             return true;
         }
         "/exit" => {
-            let _ = send_msg(socket, ServerMessage::Notice {
+            bus.send(ServerMessage::Notice {
                 text: "Disconnecting. Session preserved.".to_string(),
             }).await;
-            let _ = socket.send(Message::Close(None)).await;
             return true;
         }
         "/end" => {
-            cleanup_session_processes(state, session_id).await;
-            {
-                let mut sessions = state.sessions.write().await;
-                sessions.remove(&session_id);
-            }
-            let _ = send_msg(socket, ServerMessage::Notice {
-                text: "Session ended and removed.".to_string(),
-            }).await;
-            let _ = socket.send(Message::Close(None)).await;
+            // Handled by session_worker directly via ClientMessage::SessionEnd
             return true;
         }
         _ => {}
@@ -370,10 +478,10 @@ async fn handle_slash_command(
     if let Some(rest) = trimmed.strip_prefix("/kill ") {
         match rest.trim().parse::<u32>() {
             Ok(pid) => {
-                handle_process_kill(state, socket, pid).await;
+                handle_process_kill(state, bus, pid).await;
             }
             Err(_) => {
-                let _ = send_msg(socket, ServerMessage::Error {
+                bus.send(ServerMessage::Error {
                     text: "Usage: /kill <pid>".to_string(),
                 }).await;
             }
@@ -384,14 +492,14 @@ async fn handle_slash_command(
     if let Some(rest) = trimmed.strip_prefix("/send ") {
         if let Some((pid_str, input)) = rest.split_once(' ') {
             if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                handle_process_input(state, socket, pid, input).await;
+                handle_process_input(state, bus, pid, input).await;
             } else {
-                let _ = send_msg(socket, ServerMessage::Error {
+                bus.send(ServerMessage::Error {
                     text: "Usage: /send <pid> <text>".to_string(),
                 }).await;
             }
         } else {
-            let _ = send_msg(socket, ServerMessage::Error {
+            bus.send(ServerMessage::Error {
                 text: "Usage: /send <pid> <text>".to_string(),
             }).await;
         }
@@ -402,7 +510,7 @@ async fn handle_slash_command(
         if let Some(name) = rest.strip_prefix("name ") {
             let name = name.trim();
             if name.is_empty() {
-                let _ = send_msg(socket, ServerMessage::Error {
+                bus.send(ServerMessage::Error {
                     text: "Usage: /session name <session name>".to_string(),
                 }).await;
             } else {
@@ -410,7 +518,7 @@ async fn handle_slash_command(
                 if let Some(session) = sessions.get_mut(&session_id) {
                     session.info.name = Some(name.to_string());
                 }
-                let _ = send_msg(socket, ServerMessage::SessionRenamed {
+                bus.send(ServerMessage::SessionRenamed {
                     name: name.to_string(),
                 }).await;
             }
@@ -418,90 +526,17 @@ async fn handle_slash_command(
         }
 
         if let Some(path) = rest.strip_prefix("workdir ") {
-            let path = path.trim();
-            if path.is_empty() {
-                let _ = send_msg(socket, ServerMessage::Error {
-                    text: "Usage: /session workdir <path>".to_string(),
-                }).await;
-                return true;
-            }
-
-            let current_cwd = {
-                let sessions = state.sessions.read().await;
-                sessions.get(&session_id).map(|s| s.info.cwd.clone())
-            };
-
-            let Some(current_cwd) = current_cwd else {
-                let _ = send_msg(socket, ServerMessage::Error {
-                    text: "session not found".to_string(),
-                }).await;
-                return true;
-            };
-
-            let cmd = format!("cd {path} && pwd");
-            match Command::new("sh")
-                .arg("-lc")
-                .arg(cmd)
-                .current_dir(&current_cwd)
-                .output()
-                .await
-            {
-                Ok(out) if out.status.success() => {
-                    let new_cwd = String::from_utf8_lossy(&out.stdout)
-                        .trim()
-                        .to_string();
-                    if new_cwd.is_empty() {
-                        let _ = send_msg(socket, ServerMessage::Error {
-                            text: "Failed to resolve working directory.".to_string(),
-                        }).await;
-                        return true;
-                    }
-
-                    let updated_session = {
-                        let mut sessions = state.sessions.write().await;
-                        if let Some(session) = sessions.get_mut(&session_id) {
-                            session.info.cwd = new_cwd.clone();
-                            session.info.touch();
-                            Some(session.info.clone())
-                        } else {
-                            None
-                        }
-                    };
-
-                    if let Some(session) = updated_session {
-                        let _ = send_msg(socket, ServerMessage::Notice {
-                            text: format!("Working directory set to: {new_cwd}"),
-                        }).await;
-                        let _ = send_msg(socket, ServerMessage::SessionInfo {
-                            session,
-                        }).await;
-                    }
-                }
-                Ok(out) => {
-                    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                    let msg = if err.is_empty() {
-                        "Failed to change directory.".to_string()
-                    } else {
-                        format!("Failed to change directory: {err}")
-                    };
-                    let _ = send_msg(socket, ServerMessage::Error { text: msg }).await;
-                }
-                Err(err) => {
-                    let _ = send_msg(socket, ServerMessage::Error {
-                        text: format!("Failed to change directory: {err}"),
-                    }).await;
-                }
-            }
+            handle_session_workdir_cmd(state, session_id, bus, path).await;
             return true;
         }
 
-        let _ = send_msg(socket, ServerMessage::Error {
+        bus.send(ServerMessage::Error {
             text: "Usage: /session name <session name> OR /session workdir <path>".to_string(),
         }).await;
         return true;
     }
 
-    let _ = send_msg(socket, ServerMessage::Error {
+    bus.send(ServerMessage::Error {
         text: format!("Unknown command: {trimmed}"),
     }).await;
     true
@@ -510,7 +545,8 @@ async fn handle_slash_command(
 async fn handle_user_input(
     state: &ServerState,
     session_id: Uuid,
-    socket: &mut WebSocket,
+    bus: &BusSender,
+    client_rx: &mut mpsc::Receiver<ClientMessage>,
     pending: &mut Option<PendingToolCall>,
     pending_prompt: &mut Option<PendingPrompt>,
     pending_depth_prompt: &mut Option<PendingDepthPrompt>,
@@ -520,7 +556,7 @@ async fn handle_user_input(
     bulk_increment: &mut usize,
     text: String,
 ) {
-    if handle_slash_command(state, session_id, socket, &text).await {
+    if handle_slash_command(state, session_id, bus, &text).await {
         return;
     }
 
@@ -532,7 +568,7 @@ async fn handle_user_input(
     {
         let mut sessions = state.sessions.write().await;
         let Some(session) = sessions.get_mut(&session_id) else {
-            let _ = send_msg(socket, ServerMessage::Error {
+            bus.send(ServerMessage::Error {
                 text: "session not found".to_string(),
             }).await;
             return;
@@ -541,7 +577,7 @@ async fn handle_user_input(
         session.history.push(user_msg);
     }
 
-    invoke_llm(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+    invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
 }
 
 /// Call the LLM with current history, send assistant text, and queue all
@@ -552,7 +588,8 @@ async fn handle_user_input(
 async fn invoke_llm(
     state: &ServerState,
     session_id: Uuid,
-    socket: &mut WebSocket,
+    bus: &BusSender,
+    client_rx: &mut mpsc::Receiver<ClientMessage>,
     pending: &mut Option<PendingToolCall>,
     pending_prompt: &mut Option<PendingPrompt>,
     pending_depth_prompt: &mut Option<PendingDepthPrompt>,
@@ -569,7 +606,7 @@ async fn invoke_llm(
             format!("Yes, for next {}", *bulk_increment),
             "No".to_string(),
         ];
-        let _ = send_msg(socket, ServerMessage::UserPrompt {
+        bus.send(ServerMessage::UserPrompt {
             prompt_id: prompt_id.clone(),
             question: format!(
                 "Tool depth limit reached ({} consecutive calls). Continue?",
@@ -582,7 +619,7 @@ async fn invoke_llm(
         return;
     }
 
-    let _ = send_msg(socket, ServerMessage::Thinking).await;
+    bus.send(ServerMessage::Thinking).await;
     tracing::info!("invoke_llm: sent Thinking, starting compaction check");
 
     // Compact history if it exceeds the token budget
@@ -600,7 +637,7 @@ async fn invoke_llm(
     let (history, cwd) = {
         let sessions = state.sessions.read().await;
         let Some(session) = sessions.get(&session_id) else {
-            let _ = send_msg(socket, ServerMessage::Error {
+            bus.send(ServerMessage::Error {
                 text: "session not found".to_string(),
             }).await;
             return;
@@ -639,10 +676,10 @@ async fn invoke_llm(
                     || err_str.contains("timed out")
                     || err_str.contains("connection")
                 {
-                    let _ = send_msg(socket, ServerMessage::Error {
+                    bus.send(ServerMessage::Error {
                         text: format!("Cannot reach Ollama ({}): {err}", state.config.ollama_url),
                     }).await;
-                    let _ = send_msg(socket, ServerMessage::AssistantTextDone).await;
+                    bus.send(ServerMessage::AssistantTextDone).await;
                     return;
                 }
                 // Otherwise continue without reflection — the main call may still work
@@ -651,7 +688,7 @@ async fn invoke_llm(
     }
 
     tracing::info!("invoke_llm: starting streaming LLM call");
-    // Stream LLM response — send chunks to client as they arrive
+    // Stream LLM response — send chunks to bus as they arrive
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<String>(64);
 
     let http = state.http_client.clone();
@@ -660,9 +697,11 @@ async fn invoke_llm(
         call_ollama_streaming(&http, &cfg, &history_for_llm, &chunk_tx).await
     });
 
-    // Forward chunks to the client as AssistantText, but also listen
-    // for an Interrupt message on the socket. If interrupted, abort the
-    // LLM task, save partial output, and return the new user input.
+    // Forward chunks to the bus as AssistantText, but also listen
+    // for an Interrupt/Input message from the client. If interrupted,
+    // abort the LLM task, save partial output, and return the new user input.
+    // NOTE: The LLM task continues even if no client is connected — chunks
+    // are buffered in the bus message log for replay on reconnect.
     let mut partial_content = String::new();
     let mut interrupted_input: Option<String> = None;
 
@@ -677,7 +716,7 @@ async fn invoke_llm(
                             tracing::info!("invoke_llm: chunk #{chunk_count} len={}", text.len());
                         }
                         partial_content.push_str(&text);
-                        let _ = send_msg(socket, ServerMessage::AssistantText {
+                        bus.send(ServerMessage::AssistantText {
                             text,
                         }).await;
                     }
@@ -687,49 +726,42 @@ async fn invoke_llm(
                     }
                 }
             }
-            ws_msg = socket.next() => {
-                tracing::info!("invoke_llm: received ws message during streaming: {:?}", ws_msg.as_ref().map(|r| r.as_ref().map(|m| match m { Message::Text(_) => "Text", Message::Ping(_) => "Ping", Message::Pong(_) => "Pong", Message::Close(_) => "Close", _ => "Other" }).unwrap_or("Err")));
-                if let Some(Ok(Message::Text(raw))) = ws_msg {
-                    if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&raw) {
-                        match client_msg {
-                            ClientMessage::Interrupt => {
-                                tracing::info!("invoke_llm: interrupted by client");
-                                // Abort the LLM task
-                                llm_handle.abort();
-                                // Drain remaining chunks
-                                while chunk_rx.try_recv().is_ok() {}
-                                break;
-                            }
-                            ClientMessage::Input { text } => {
-                                tracing::info!("invoke_llm: interrupted by new input: {text}");
-                                // User sent new input — treat as interrupt + new request
-                                llm_handle.abort();
-                                while chunk_rx.try_recv().is_ok() {}
-                                interrupted_input = Some(text);
-                                break;
-                            }
-                            _ => {
-                                tracing::debug!("invoke_llm: ignoring client msg during streaming");
-                            }
-                        }
+            client_msg = client_rx.recv() => {
+                match client_msg {
+                    Some(ClientMessage::Interrupt) => {
+                        tracing::info!("invoke_llm: interrupted by client");
+                        llm_handle.abort();
+                        while chunk_rx.try_recv().is_ok() {}
+                        break;
                     }
-                } else if let Some(Ok(Message::Close(_))) = ws_msg {
-                    tracing::info!("invoke_llm: client closed connection during streaming");
-                    llm_handle.abort();
-                    while chunk_rx.try_recv().is_ok() {}
-                    break;
-                } else if ws_msg.is_none() {
-                    tracing::info!("invoke_llm: socket stream ended during streaming");
-                    llm_handle.abort();
-                    while chunk_rx.try_recv().is_ok() {}
-                    break;
+                    Some(ClientMessage::Input { text }) => {
+                        tracing::info!("invoke_llm: interrupted by new input: {text}");
+                        llm_handle.abort();
+                        while chunk_rx.try_recv().is_ok() {}
+                        interrupted_input = Some(text);
+                        break;
+                    }
+                    Some(_) => {
+                        tracing::debug!("invoke_llm: ignoring client msg during streaming");
+                    }
+                    None => {
+                        // All clients disconnected — but we keep the LLM running!
+                        // Just drain chunks until done, no more client messages to check.
+                        tracing::info!("invoke_llm: client_rx closed, continuing LLM to completion");
+                        // Finish draining chunks from the LLM
+                        while let Some(text) = chunk_rx.recv().await {
+                            partial_content.push_str(&text);
+                            bus.send(ServerMessage::AssistantText { text }).await;
+                        }
+                        break;
+                    }
                 }
             }
         }
     }
 
     tracing::info!("invoke_llm: sending AssistantTextDone, partial_content len={}", partial_content.len());
-    let _ = send_msg(socket, ServerMessage::AssistantTextDone).await;
+    bus.send(ServerMessage::AssistantTextDone).await;
 
     // Save partial or full response to history
     if !partial_content.is_empty() {
@@ -761,7 +793,7 @@ async fn invoke_llm(
             }
         }
         // Recurse to handle the new input
-        Box::pin(invoke_llm(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
+        Box::pin(invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
         return;
     }
 
@@ -785,10 +817,10 @@ async fn invoke_llm(
             }
 
             // Present the first tool call to the user
-            Box::pin(present_next_tool(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
+            Box::pin(present_next_tool(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
         }
         Ok(Err(err)) => {
-            let _ = send_msg(socket, ServerMessage::Error {
+            bus.send(ServerMessage::Error {
                 text: format!("ollama request failed: {err}"),
             }).await;
         }
@@ -797,7 +829,7 @@ async fn invoke_llm(
             if err.is_cancelled() {
                 // Interrupted — already handled above
             } else {
-                let _ = send_msg(socket, ServerMessage::Error {
+                bus.send(ServerMessage::Error {
                     text: format!("LLM task panicked: {err}"),
                 }).await;
             }
@@ -811,7 +843,8 @@ async fn invoke_llm(
 async fn present_next_tool(
     state: &ServerState,
     session_id: Uuid,
-    socket: &mut WebSocket,
+    bus: &BusSender,
+    client_rx: &mut mpsc::Receiver<ClientMessage>,
     pending: &mut Option<PendingToolCall>,
     pending_prompt: &mut Option<PendingPrompt>,
     pending_depth_prompt: &mut Option<PendingDepthPrompt>,
@@ -834,23 +867,22 @@ async fn present_next_tool(
 
         if options.is_empty() {
             let output = "Error: user_prompt_options requires a non-empty 'options' array.".to_string();
-            let _ = send_msg(socket, ServerMessage::ToolOutput {
+            bus.send(ServerMessage::ToolOutput {
                 tool_call_id: ptc.tool_call.id.clone(),
                 output: output.clone(),
             }).await;
             append_tool_result(state, session_id, &output).await;
             *tool_depth += 1;
             if !tool_queue.is_empty() {
-                // Recurse for next tool (box pin to allow recursion)
-                Box::pin(present_next_tool(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
+                Box::pin(present_next_tool(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
             } else {
-                invoke_llm(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+                invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
             }
             return;
         }
 
         let prompt_id = format!("prompt_{}", Uuid::new_v4());
-        let _ = send_msg(socket, ServerMessage::UserPrompt {
+        bus.send(ServerMessage::UserPrompt {
             prompt_id: prompt_id.clone(),
             question: question.clone(),
             options: options.clone(),
@@ -866,7 +898,7 @@ async fn present_next_tool(
         return;
     }
 
-    let _ = send_msg(socket, ServerMessage::ToolRequest {
+    bus.send(ServerMessage::ToolRequest {
         tool_call: ptc.tool_call.clone(),
     }).await;
     *pending = Some(ptc);
@@ -879,7 +911,8 @@ async fn present_next_tool(
 async fn handle_tool_confirm(
     state: &ServerState,
     session_id: Uuid,
-    socket: &mut WebSocket,
+    bus: &BusSender,
+    client_rx: &mut mpsc::Receiver<ClientMessage>,
     pending: &mut Option<PendingToolCall>,
     pending_prompt: &mut Option<PendingPrompt>,
     pending_depth_prompt: &mut Option<PendingDepthPrompt>,
@@ -894,7 +927,7 @@ async fn handle_tool_confirm(
         Some(p) if p.tool_call.id == tool_call_id => p,
         other => {
             *pending = other;
-            let _ = send_msg(socket, ServerMessage::Error {
+            bus.send(ServerMessage::Error {
                 text: "no matching pending tool call".to_string(),
             }).await;
             return;
@@ -903,7 +936,7 @@ async fn handle_tool_confirm(
 
     if !approved {
         let output = "Tool call rejected by user.".to_string();
-        let _ = send_msg(socket, ServerMessage::ToolOutput {
+        bus.send(ServerMessage::ToolOutput {
             tool_call_id: ptc.tool_call.id.clone(),
             output: output.clone(),
         }).await;
@@ -911,12 +944,12 @@ async fn handle_tool_confirm(
         // If rejected, skip remaining queued tools and re-invoke LLM
         tool_queue.clear();
         *tool_depth += 1;
-        invoke_llm(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+        invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
         return;
     }
 
-    let output = execute_tool(state, session_id, socket, &ptc).await;
-    let _ = send_msg(socket, ServerMessage::ToolOutput {
+    let output = execute_tool(state, session_id, bus, &ptc).await;
+    bus.send(ServerMessage::ToolOutput {
         tool_call_id: ptc.tool_call.id.clone(),
         output: output.clone(),
     }).await;
@@ -925,10 +958,10 @@ async fn handle_tool_confirm(
 
     // If more tool calls queued from the same LLM response, present the next one
     if !tool_queue.is_empty() {
-        present_next_tool(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+        present_next_tool(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
     } else {
         // All tools from this response executed — re-invoke LLM
-        invoke_llm(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+        invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
     }
 }
 
@@ -939,7 +972,8 @@ async fn handle_tool_confirm(
 async fn handle_prompt_response(
     state: &ServerState,
     session_id: Uuid,
-    socket: &mut WebSocket,
+    bus: &BusSender,
+    client_rx: &mut mpsc::Receiver<ClientMessage>,
     pending: &mut Option<PendingToolCall>,
     pending_prompt: &mut Option<PendingPrompt>,
     pending_depth_prompt: &mut Option<PendingDepthPrompt>,
@@ -954,7 +988,7 @@ async fn handle_prompt_response(
         Some(p) if p.prompt_id == prompt_id => p,
         other => {
             *pending_prompt = other;
-            let _ = send_msg(socket, ServerMessage::Error {
+            bus.send(ServerMessage::Error {
                 text: "no matching pending prompt".to_string(),
             }).await;
             return;
@@ -980,7 +1014,7 @@ async fn handle_prompt_response(
         }
     };
 
-    let _ = send_msg(socket, ServerMessage::ToolOutput {
+    bus.send(ServerMessage::ToolOutput {
         tool_call_id: pp.tool_call.tool_call.id.clone(),
         output: output.clone(),
     }).await;
@@ -989,9 +1023,9 @@ async fn handle_prompt_response(
 
     // Continue the agentic loop
     if !tool_queue.is_empty() {
-        present_next_tool(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+        present_next_tool(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
     } else {
-        invoke_llm(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+        invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
     }
 }
 
@@ -1002,7 +1036,8 @@ async fn handle_prompt_response(
 async fn handle_depth_prompt_response(
     state: &ServerState,
     session_id: Uuid,
-    socket: &mut WebSocket,
+    bus: &BusSender,
+    client_rx: &mut mpsc::Receiver<ClientMessage>,
     pending: &mut Option<PendingToolCall>,
     pending_prompt: &mut Option<PendingPrompt>,
     pending_depth_prompt: &mut Option<PendingDepthPrompt>,
@@ -1018,23 +1053,23 @@ async fn handle_depth_prompt_response(
         0 => {
             // "Yes" — continue, pause again after 25 more calls
             *depth_limit += state.config.max_tool_depth;
-            let _ = send_msg(socket, ServerMessage::Notice {
+            bus.send(ServerMessage::Notice {
                 text: format!("Continuing. Will pause again after {} total calls.", *depth_limit),
             }).await;
-            invoke_llm(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+            invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
         }
         1 => {
             // "Yes, for next N" — continue, pause after N more calls, increment N
             *depth_limit += *bulk_increment;
-            let _ = send_msg(socket, ServerMessage::Notice {
+            bus.send(ServerMessage::Notice {
                 text: format!("Continuing. Will pause again after {} total calls.", *depth_limit),
             }).await;
             *bulk_increment += 25;
-            invoke_llm(state, session_id, socket, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+            invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
         }
         _ => {
             // "No" — stop
-            let _ = send_msg(socket, ServerMessage::Notice {
+            bus.send(ServerMessage::Notice {
                 text: "Stopped. Send a new message to continue.".to_string(),
             }).await;
         }
@@ -1109,8 +1144,10 @@ async fn append_tool_result(state: &ServerState, session_id: Uuid, output: &str)
 // Helpers
 // ---------------------------------------------------------------------------
 
-pub async fn send_msg(socket: &mut WebSocket, message: ServerMessage) -> anyhow::Result<()> {
-    let payload = serde_json::to_string(&message)?;
+/// Send a ServerMessage directly to a WebSocket (used by handle_socket for
+/// initial handshake messages that are not part of the session bus).
+async fn ws_send(socket: &mut WebSocket, message: &ServerMessage) -> anyhow::Result<()> {
+    let payload = serde_json::to_string(message)?;
     socket.send(Message::Text(payload)).await?;
     Ok(())
 }

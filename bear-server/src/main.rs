@@ -46,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = ServerState {
         sessions: Arc::new(RwLock::new(HashMap::new())),
+        buses: Arc::new(RwLock::new(HashMap::new())),
         processes: Arc::new(RwLock::new(HashMap::new())),
         config,
         http_client: reqwest::Client::builder()
