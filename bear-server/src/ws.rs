@@ -624,7 +624,22 @@ async fn invoke_llm(
                 history_for_llm.push(reflection);
             }
             Err(err) => {
-                tracing::warn!("reflective thinking failed, continuing without it: {err}");
+                tracing::warn!("reflective thinking failed: {err}");
+                // If the error looks like a connection failure, report it to the
+                // client immediately — the main streaming call will likely fail
+                // too, but at least the user sees feedback right away.
+                let err_str = format!("{err}");
+                if err_str.contains("onnect")
+                    || err_str.contains("timed out")
+                    || err_str.contains("connection")
+                {
+                    let _ = send_msg(socket, ServerMessage::Error {
+                        text: format!("Cannot reach Ollama ({}): {err}", state.config.ollama_url),
+                    }).await;
+                    let _ = send_msg(socket, ServerMessage::AssistantTextDone).await;
+                    return;
+                }
+                // Otherwise continue without reflection — the main call may still work
             }
         }
     }

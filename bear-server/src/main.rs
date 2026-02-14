@@ -48,7 +48,11 @@ async fn main() -> anyhow::Result<()> {
         sessions: Arc::new(RwLock::new(HashMap::new())),
         processes: Arc::new(RwLock::new(HashMap::new())),
         config,
-        http_client: reqwest::Client::new(),
+        http_client: reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .expect("failed to build HTTP client"),
     };
 
     let app = Router::new()
