@@ -25,21 +25,10 @@ const C = {
 const PROMPT = `${C.bold}${C.blue}bear> ${C.reset}`;
 const PROMPT_CMD = `${C.bold}${C.yellow}cmd-> ${C.reset}`;
 
-const SLASH_COMMANDS = [
-  { cmd: '/ps', desc: 'List background processes' },
-  { cmd: '/kill', desc: 'Kill a background process' },
-  { cmd: '/send', desc: 'Send stdin to a process' },
-  { cmd: '/session name', desc: 'Name the current session' },
-  { cmd: '/allowed', desc: 'Show auto-approved commands' },
-  { cmd: '/exit', desc: 'Disconnect, keep session alive' },
-  { cmd: '/end', desc: 'End session, pick another' },
-  { cmd: '/help', desc: 'Show help' },
-];
-
-function matchingSlashCommands(input) {
+function matchingSlashCommands(input, commands) {
   if (!input.startsWith('/')) return [];
   const typed = input.split(/\s/)[0] || input;
-  return SLASH_COMMANDS
+  return commands
     .filter(s => s.cmd.startsWith(typed) || typed.startsWith(s.cmd))
     .slice(0, 3);
 }
@@ -102,6 +91,7 @@ export class BearClient {
     // Slash command dropdown state
     this._dropdownLines = 0;
     this._dropdownIdx = -1; // -1 = no selection
+    this.slashCommands = [];
 
     // Last tool tracking for tool-specific output rendering
     this._lastToolName = '';
@@ -283,6 +273,11 @@ export class BearClient {
 
   _handleServerMessage(msg) {
     switch (msg.type) {
+      case 'slash_commands':
+        this.slashCommands = Array.isArray(msg.commands) ? msg.commands : [];
+        this._redrawInput();
+        break;
+
       case 'session_info':
         this._writeln(`${C.green}  Connected to session ${C.bold}${msg.session.id}${C.reset}`);
         this._writeln(`${C.gray}  Working directory: ${msg.session.cwd}${C.reset}`);
@@ -714,7 +709,7 @@ export class BearClient {
   }
 
   _renderDropdown() {
-    const matches = matchingSlashCommands(this.inputBuf);
+    const matches = matchingSlashCommands(this.inputBuf, this.slashCommands);
     if (matches.length === 0) {
       this._dropdownIdx = -1;
       return;
@@ -742,7 +737,7 @@ export class BearClient {
   }
 
   _dropdownUp() {
-    const matches = matchingSlashCommands(this.inputBuf);
+    const matches = matchingSlashCommands(this.inputBuf, this.slashCommands);
     if (matches.length === 0) return;
     if (this._dropdownIdx <= 0) {
       this._dropdownIdx = matches.length - 1;
@@ -752,7 +747,7 @@ export class BearClient {
   }
 
   _dropdownDown() {
-    const matches = matchingSlashCommands(this.inputBuf);
+    const matches = matchingSlashCommands(this.inputBuf, this.slashCommands);
     if (matches.length === 0) return;
     if (this._dropdownIdx < 0 || this._dropdownIdx >= matches.length - 1) {
       this._dropdownIdx = 0;
@@ -762,7 +757,7 @@ export class BearClient {
   }
 
   _acceptDropdown() {
-    const matches = matchingSlashCommands(this.inputBuf);
+    const matches = matchingSlashCommands(this.inputBuf, this.slashCommands);
     const idx = this._dropdownIdx >= 0 ? this._dropdownIdx : 0;
     if (idx < matches.length) {
       this.inputBuf = matches[idx].cmd + ' ';
@@ -1150,18 +1145,17 @@ export class BearClient {
   // -------------------------------------------------------------------------
 
   _showHelp() {
+    const commandLines = this.slashCommands.length > 0
+      ? this.slashCommands.map(({ cmd, desc }) => {
+        const padded = cmd.padEnd(20, ' ');
+        return `${C.gray}    ${padded}${C.white}${desc}${C.reset}`;
+      })
+      : [`${C.gray}    (commands not loaded yet)${C.reset}`];
+
     const lines = [
       '',
       `${C.bold}${C.white}  Commands:${C.reset}`,
-      `${C.gray}    /ps              ${C.white}List background processes${C.reset}`,
-      `${C.gray}    /kill <pid>      ${C.white}Kill a background process${C.reset}`,
-      `${C.gray}    /send <pid> <t>  ${C.white}Send stdin to a process${C.reset}`,
-      `${C.gray}    /session name <n>  ${C.white}Name the current session${C.reset}`,
-      `${C.gray}    /session workdir <path>  ${C.white}Set session working directory${C.reset}`,
-      `${C.gray}    /allowed         ${C.white}Show auto-approved commands${C.reset}`,
-      `${C.gray}    /exit            ${C.white}Disconnect, keep session alive${C.reset}`,
-      `${C.gray}    /end             ${C.white}End session, pick another${C.reset}`,
-      `${C.gray}    /help            ${C.white}Show this help${C.reset}`,
+      ...commandLines,
       '',
       `${C.bold}${C.white}  Tool confirmations:  ${C.gray}(interactive picker)${C.reset}`,
       `${C.green}    Approve          ${C.white}Allow this tool call${C.reset}`,

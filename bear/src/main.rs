@@ -178,6 +178,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
 
     let mut auto_approved: HashSet<String> = HashSet::new();
     let mut last_tool: (String, serde_json::Value) = (String::new(), serde_json::Value::Null);
+    let mut slash_commands: Vec<(String, String)> = Vec::new();
 
     loop {
         let event = tokio::select! {
@@ -189,7 +190,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
         match event {
             LoopEvent::FromServer(msg) => {
                 if let Some(auto_confirm) = dispatch_server_msg(
-                    &msg, &render_tx, &auto_approved, &mut last_tool,
+                    &msg, &render_tx, &auto_approved, &mut last_tool, &mut slash_commands,
                 ) {
                     // Auto-approved tool call — send confirmation immediately
                     let payload = serde_json::to_string(&ClientMessage::ToolConfirm {
@@ -319,18 +320,16 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                         ));
                     }
                 } else if line == "/help" {
-                    let help = [
-                        "Commands:",
-                        "  /ps              List background processes",
-                        "  /kill <pid>      Kill a background process",
-                        "  /send <pid> <text>  Send stdin to a process",
-                        "  /session name <n>  Name the current session",
-                        "  /session workdir <path>  Set session working directory",
-                        "  /allowed         Show auto-approved commands",
-                        "  /exit            Disconnect, keep session alive",
-                        "  /end             End current session, pick another",
-                        "  /help            Show this help",
-                        "  Ctrl+D           Quit",
+                    let command_lines = if slash_commands.is_empty() {
+                        vec!["  (commands not loaded yet)".to_string()]
+                    } else {
+                        slash_commands.iter()
+                            .map(|(cmd, desc)| format!("  {cmd:<20} {desc}"))
+                            .collect()
+                    };
+                    let mut help_lines = vec!["Commands:".to_string()];
+                    help_lines.extend(command_lines);
+                    help_lines.extend([
                         "",
                         "Tool confirmations:  (interactive picker)",
                         "  Approve          Allow this tool call",
@@ -347,8 +346,8 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                         "  search_text      Regex search across files",
                         "  undo             Revert file changes",
                         "  user_prompt_options  Present choices to user",
-                    ]
-                    .join("\n");
+                    ].iter().map(|s| s.to_string()));
+                    let help = help_lines.join("\n");
                     let _ = render_tx.send(RenderCmd::Notice(help));
                 } else {
                     // Regular chat input -> send to server/LLM
@@ -415,6 +414,7 @@ fn dispatch_server_msg(
     render_tx: &std_mpsc::Sender<RenderCmd>,
     auto_approved: &HashSet<String>,
     last_tool: &mut (String, serde_json::Value),
+    slash_commands: &mut Vec<(String, String)>,
 ) -> Option<String> {
     match msg {
         ServerMessage::SessionInfo { session } => {
@@ -425,6 +425,13 @@ fn dispatch_server_msg(
                 display_name,
                 session.cwd.clone(),
             ));
+        }
+        ServerMessage::SlashCommands { commands } => {
+            let list: Vec<(String, String)> = commands.iter()
+                .map(|cmd| (cmd.cmd.clone(), cmd.desc.clone()))
+                .collect();
+            *slash_commands = list.clone();
+            let _ = render_tx.send(RenderCmd::SlashCommands(list));
         }
         ServerMessage::AssistantText { text } => {
             let _ = render_tx.send(RenderCmd::AssistantChunk(text.clone()));

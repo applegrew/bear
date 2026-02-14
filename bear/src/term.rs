@@ -27,6 +27,7 @@ pub enum RenderCmd {
     ToolOutput { tool_name: String, tool_args: serde_json::Value, output: String },
     ProcessEvent(String),
     SessionInfo(String, String),
+    SlashCommands(Vec<(String, String)>),
     UserPrompt {
         prompt_id: String,
         question: String,
@@ -259,22 +260,11 @@ struct TermState {
     dropdown_lines: usize,
     /// Currently selected dropdown item index (None = no selection).
     dropdown_idx: Option<usize>,
+    slash_commands: Vec<(String, String)>,
 }
 
 const PROMPT: &str = "bear> ";
 const PROMPT_CMD: &str = "cmd-> ";
-/// All available slash commands with short descriptions.
-const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("/ps", "List background processes"),
-    ("/kill", "Kill a background process"),
-    ("/send", "Send stdin to a process"),
-    ("/session name", "Name the current session"),
-    ("/session workdir", "Set session working directory"),
-    ("/allowed", "Show auto-approved commands"),
-    ("/exit", "Disconnect, keep session alive"),
-    ("/end", "End session, pick another"),
-    ("/help", "Show help"),
-];
 
 /// Format a tool call into human-readable description lines for the card UI.
 pub fn format_tool_description(name: &str, args: &serde_json::Value) -> Vec<String> {
@@ -340,21 +330,6 @@ pub fn format_tool_description(name: &str, args: &serde_json::Value) -> Vec<Stri
     }
 }
 
-/// Return up to 3 slash commands matching the current input prefix.
-fn matching_slash_commands(input: &str) -> Vec<(&'static str, &'static str)> {
-    if !input.starts_with('/') {
-        return Vec::new();
-    }
-    // Match against the typed text (which may be just "/")
-    let typed = input.split_whitespace().next().unwrap_or(input);
-    SLASH_COMMANDS
-        .iter()
-        .filter(|(cmd, _)| cmd.starts_with(typed) || typed.starts_with(cmd))
-        .take(3)
-        .copied()
-        .collect()
-}
-
 impl TermState {
     fn init() -> anyhow::Result<Self> {
         terminal::enable_raw_mode()?;
@@ -367,6 +342,7 @@ impl TermState {
             streaming: false,
             dropdown_lines: 0,
             dropdown_idx: None,
+            slash_commands: Vec::new(),
         })
     }
 
@@ -406,7 +382,7 @@ impl TermState {
         );
 
         // Render dropdown for slash commands
-        let matches = matching_slash_commands(&self.input_buf);
+        let matches = self.matching_slash_commands(&self.input_buf);
         if is_slash && !matches.is_empty() {
             // Clamp dropdown_idx to valid range
             if let Some(idx) = self.dropdown_idx {
@@ -478,7 +454,7 @@ impl TermState {
 
     /// Move dropdown selection up.
     fn dropdown_up(&mut self) {
-        let matches = matching_slash_commands(&self.input_buf);
+        let matches = self.matching_slash_commands(&self.input_buf);
         if matches.is_empty() { return; }
         self.dropdown_idx = Some(match self.dropdown_idx {
             None | Some(0) => matches.len() - 1,
@@ -488,7 +464,7 @@ impl TermState {
 
     /// Move dropdown selection down.
     fn dropdown_down(&mut self) {
-        let matches = matching_slash_commands(&self.input_buf);
+        let matches = self.matching_slash_commands(&self.input_buf);
         if matches.is_empty() { return; }
         self.dropdown_idx = Some(match self.dropdown_idx {
             None => 0,
@@ -500,13 +476,28 @@ impl TermState {
     /// Accept the currently selected dropdown item: fill input_buf with
     /// the command text and a trailing space, then close the dropdown.
     fn accept_dropdown(&mut self) {
-        let matches = matching_slash_commands(&self.input_buf);
+        let matches = self.matching_slash_commands(&self.input_buf);
         let idx = self.dropdown_idx.unwrap_or(0);
         if let Some((cmd, _)) = matches.get(idx) {
             self.input_buf = format!("{} ", cmd);
             self.cursor_pos = self.input_buf.len();
         }
         self.dropdown_idx = None;
+    }
+
+    /// Return up to 3 slash commands matching the current input prefix.
+    fn matching_slash_commands(&self, input: &str) -> Vec<(String, String)> {
+        if !input.starts_with('/') {
+            return Vec::new();
+        }
+        // Match against the typed text (which may be just "/")
+        let typed = input.split_whitespace().next().unwrap_or(input);
+        self.slash_commands
+            .iter()
+            .filter(|(cmd, _)| cmd.starts_with(typed) || typed.starts_with(cmd))
+            .take(3)
+            .cloned()
+            .collect()
     }
 
     fn print_block(&mut self, prefix: &str, prefix_color: Color, body: &str) {
@@ -1014,6 +1005,10 @@ impl TermState {
                     Print("\r\n"),
                 );
                 let _ = out.flush();
+                self.draw_prompt();
+            }
+            RenderCmd::SlashCommands(commands) => {
+                self.slash_commands = commands;
                 self.draw_prompt();
             }
             RenderCmd::Thinking => {

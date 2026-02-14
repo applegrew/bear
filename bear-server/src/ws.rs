@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use axum::extract::ws::{Message, WebSocket};
-use bear_core::{ClientMessage, ProcessInfo, ServerMessage, ToolCall};
+use bear_core::{ClientMessage, ProcessInfo, ServerMessage, SlashCommandInfo, ToolCall};
 use futures::StreamExt;
 use tokio::process::Command;
 use uuid::Uuid;
@@ -17,6 +17,28 @@ const ENABLE_REFLECTION: bool = true;
 // ---------------------------------------------------------------------------
 // WebSocket handler
 // ---------------------------------------------------------------------------
+
+const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/ps", "List background processes"),
+    ("/kill", "Kill a background process (usage: /kill <pid>)"),
+    ("/send", "Send stdin to a process (usage: /send <pid> <text>)"),
+    ("/session name", "Name the current session (usage: /session name <n>)"),
+    ("/session workdir", "Set session working directory (usage: /session workdir <path>)"),
+    ("/allowed", "Show auto-approved commands"),
+    ("/exit", "Disconnect, keep session alive"),
+    ("/end", "End session, pick another"),
+    ("/help", "Show help"),
+];
+
+fn slash_command_infos() -> Vec<SlashCommandInfo> {
+    SLASH_COMMANDS
+        .iter()
+        .map(|(cmd, desc)| SlashCommandInfo {
+            cmd: (*cmd).to_string(),
+            desc: (*desc).to_string(),
+        })
+        .collect()
+}
 
 /// Tracks a user_prompt_options tool that is waiting for the client's selection.
 struct PendingPrompt {
@@ -47,6 +69,9 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
 
     let _ = send_msg(&mut socket, ServerMessage::SessionInfo {
         session: info.clone(),
+    }).await;
+    let _ = send_msg(&mut socket, ServerMessage::SlashCommands {
+        commands: slash_command_infos(),
     }).await;
     let _ = send_msg(&mut socket, ServerMessage::Notice {
         text: format!(
@@ -309,19 +334,12 @@ async fn handle_slash_command(
             return true;
         }
         "/help" => {
-            let help = [
-                "Commands:",
-                "  /ps              List background processes",
-                "  /kill <pid>      Kill a background process",
-                "  /send <pid> <text>  Send stdin to a process",
-                "  /session name <n>  Name the current session",
-                "  /session workdir <path>  Set session working directory",
-                "  /allowed         Show auto-approved commands",
-                "  /exit            Disconnect, keep session alive",
-                "  /end             End current session, pick another",
-                "  /help            Show this help",
-            ]
-            .join("\n");
+            let mut lines = Vec::with_capacity(SLASH_COMMANDS.len() + 1);
+            lines.push("Commands:".to_string());
+            for (cmd, desc) in SLASH_COMMANDS {
+                lines.push(format!("  {cmd:<20} {desc}"));
+            }
+            let help = lines.join("\n");
             let _ = send_msg(socket, ServerMessage::Notice {
                 text: help,
             }).await;

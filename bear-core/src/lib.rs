@@ -68,6 +68,12 @@ pub struct ProcessInfo {
     pub running: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlashCommandInfo {
+    pub cmd: String,
+    pub desc: String,
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket protocol: client → server
 // ---------------------------------------------------------------------------
@@ -96,6 +102,7 @@ pub enum ClientMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     SessionInfo { session: SessionInfo },
+    SlashCommands { commands: Vec<SlashCommandInfo> },
     AssistantText { text: String },
     AssistantTextDone,
     ToolRequest { tool_call: ToolCall },
