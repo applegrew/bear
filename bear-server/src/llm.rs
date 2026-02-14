@@ -62,7 +62,9 @@ async fn call_ollama(
     #[derive(Debug, serde::Deserialize)]
     struct Resp { message: OllamaMessage }
 
+    tracing::info!("ollama non-streaming request to {url} model={}", config.ollama_model);
     let response = http_client.post(&url).json(&payload).send().await?;
+    tracing::info!("ollama non-streaming response status={}", response.status());
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
@@ -239,11 +241,13 @@ pub async fn call_ollama_streaming(
         stream: true,
     };
 
+    tracing::info!("ollama streaming request to {url} model={}", config.ollama_model);
     let response = http_client
         .post(&url)
         .json(&payload)
         .send()
         .await?;
+    tracing::info!("ollama streaming response status={}", response.status());
 
     if !response.status().is_success() {
         let status = response.status();
@@ -258,34 +262,49 @@ pub async fn call_ollama_streaming(
     use futures::StreamExt;
     let mut buffer = String::new();
 
+    let mut raw_byte_count = 0usize;
+    let mut line_count = 0usize;
     while let Some(chunk_result) = bytes_stream.next().await {
         let chunk_bytes = chunk_result?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk_bytes));
+        raw_byte_count += chunk_bytes.len();
+        let chunk_str = String::from_utf8_lossy(&chunk_bytes);
+        if raw_byte_count <= 2000 {
+            tracing::info!("ollama stream raw ({} bytes): {:?}", chunk_bytes.len(), &chunk_str[..chunk_str.len().min(200)]);
+        }
+        buffer.push_str(&chunk_str);
 
         // Process complete NDJSON lines from the buffer
         while let Some(newline_pos) = buffer.find('\n') {
             let line = buffer[..newline_pos].trim().to_string();
             buffer = buffer[newline_pos + 1..].to_string();
+            line_count += 1;
 
             if line.is_empty() {
                 continue;
             }
 
-            if let Ok(chunk) = serde_json::from_str::<OllamaStreamChunk>(&line) {
-                if !chunk.message.content.is_empty() {
-                    full_content.push_str(&chunk.message.content);
-                    let _ = chunk_tx.send(chunk.message.content).await;
+            match serde_json::from_str::<OllamaStreamChunk>(&line) {
+                Ok(chunk) => {
+                    if !chunk.message.content.is_empty() {
+                        full_content.push_str(&chunk.message.content);
+                        let _ = chunk_tx.send(chunk.message.content).await;
+                    }
+                    if chunk.done {
+                        tracing::info!("ollama stream done: {raw_byte_count} bytes, {line_count} lines, content len={}", full_content.len());
+                        return Ok(OllamaMessage {
+                            role: "assistant".to_string(),
+                            content: full_content,
+                        });
+                    }
                 }
-                if chunk.done {
-                    return Ok(OllamaMessage {
-                        role: "assistant".to_string(),
-                        content: full_content,
-                    });
+                Err(err) => {
+                    tracing::warn!("ollama stream JSON parse error: {err}, line: {:?}", &line[..line.len().min(300)]);
                 }
             }
         }
     }
 
+    tracing::info!("ollama stream ended without done=true: {raw_byte_count} bytes, {line_count} lines, content len={}, remaining buffer={:?}", full_content.len(), &buffer[..buffer.len().min(500)]);
     // If we get here without a done=true, return what we have
     Ok(OllamaMessage {
         role: "assistant".to_string(),

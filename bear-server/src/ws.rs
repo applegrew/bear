@@ -583,6 +583,7 @@ async fn invoke_llm(
     }
 
     let _ = send_msg(socket, ServerMessage::Thinking).await;
+    tracing::info!("invoke_llm: sent Thinking, starting compaction check");
 
     // Compact history if it exceeds the token budget
     {
@@ -607,6 +608,7 @@ async fn invoke_llm(
         (session.history.clone(), session.info.cwd.clone())
     };
 
+    tracing::info!("invoke_llm: history has {} messages, cwd={cwd}", history.len());
     let session_context = format!("Session context:\n- Working directory: {cwd}");
     let mut history_for_llm = history.clone();
     if let Some(system_msg) = history_for_llm.first_mut() {
@@ -618,10 +620,14 @@ async fn invoke_llm(
     // main streaming response benefits from it. The reflection is NOT
     // persisted to the session history — it only influences this call.
     if ENABLE_REFLECTION {
+        tracing::info!("invoke_llm: starting reflective_thinking call");
         match reflective_thinking(&state.http_client, &state.config, &history_for_llm, &session_context).await {
             Ok(reflection) => {
                 tracing::debug!("reflection complete ({} chars)", reflection.content.len());
-                history_for_llm.push(reflection);
+                // Insert the reflection BEFORE the last user message so the
+                // model still sees the user message last and knows to respond.
+                let insert_pos = history_for_llm.len().saturating_sub(1);
+                history_for_llm.insert(insert_pos, reflection);
             }
             Err(err) => {
                 tracing::warn!("reflective thinking failed: {err}");
@@ -644,6 +650,7 @@ async fn invoke_llm(
         }
     }
 
+    tracing::info!("invoke_llm: starting streaming LLM call");
     // Stream LLM response — send chunks to client as they arrive
     let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<String>(64);
 
@@ -659,24 +666,34 @@ async fn invoke_llm(
     let mut partial_content = String::new();
     let mut interrupted_input: Option<String> = None;
 
+    let mut chunk_count = 0usize;
     loop {
         tokio::select! {
             chunk = chunk_rx.recv() => {
                 match chunk {
                     Some(text) => {
+                        chunk_count += 1;
+                        if chunk_count <= 3 || chunk_count % 20 == 0 {
+                            tracing::info!("invoke_llm: chunk #{chunk_count} len={}", text.len());
+                        }
                         partial_content.push_str(&text);
                         let _ = send_msg(socket, ServerMessage::AssistantText {
                             text,
                         }).await;
                     }
-                    None => break, // channel closed, LLM done
+                    None => {
+                        tracing::info!("invoke_llm: chunk channel closed after {chunk_count} chunks");
+                        break;
+                    }
                 }
             }
             ws_msg = socket.next() => {
+                tracing::info!("invoke_llm: received ws message during streaming: {:?}", ws_msg.as_ref().map(|r| r.as_ref().map(|m| match m { Message::Text(_) => "Text", Message::Ping(_) => "Ping", Message::Pong(_) => "Pong", Message::Close(_) => "Close", _ => "Other" }).unwrap_or("Err")));
                 if let Some(Ok(Message::Text(raw))) = ws_msg {
                     if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&raw) {
                         match client_msg {
                             ClientMessage::Interrupt => {
+                                tracing::info!("invoke_llm: interrupted by client");
                                 // Abort the LLM task
                                 llm_handle.abort();
                                 // Drain remaining chunks
@@ -684,6 +701,7 @@ async fn invoke_llm(
                                 break;
                             }
                             ClientMessage::Input { text } => {
+                                tracing::info!("invoke_llm: interrupted by new input: {text}");
                                 // User sent new input — treat as interrupt + new request
                                 llm_handle.abort();
                                 while chunk_rx.try_recv().is_ok() {}
@@ -691,15 +709,26 @@ async fn invoke_llm(
                                 break;
                             }
                             _ => {
-                                // Ignore other messages during streaming
+                                tracing::debug!("invoke_llm: ignoring client msg during streaming");
                             }
                         }
                     }
+                } else if let Some(Ok(Message::Close(_))) = ws_msg {
+                    tracing::info!("invoke_llm: client closed connection during streaming");
+                    llm_handle.abort();
+                    while chunk_rx.try_recv().is_ok() {}
+                    break;
+                } else if ws_msg.is_none() {
+                    tracing::info!("invoke_llm: socket stream ended during streaming");
+                    llm_handle.abort();
+                    while chunk_rx.try_recv().is_ok() {}
+                    break;
                 }
             }
         }
     }
 
+    tracing::info!("invoke_llm: sending AssistantTextDone, partial_content len={}", partial_content.len());
     let _ = send_msg(socket, ServerMessage::AssistantTextDone).await;
 
     // Save partial or full response to history
