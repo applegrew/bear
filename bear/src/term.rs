@@ -1011,6 +1011,7 @@ impl TermState {
                 self.draw_prompt();
             }
             RenderCmd::Thinking => {
+                self.streaming = true;
                 self.clear_dropdown();
                 let mut out = io::stdout();
                 let _ = execute!(

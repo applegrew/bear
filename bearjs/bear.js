@@ -399,6 +399,7 @@ export class BearClient {
 
       case 'thinking':
         this._clearInputLine();
+        this._streaming = true;
         this._writeln(`${C.dim}${C.gray}  ⟳ Thinking…${C.reset}`);
         break;
 
