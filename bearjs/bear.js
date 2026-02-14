@@ -27,10 +27,10 @@ const PROMPT_CMD = `${C.bold}${C.yellow}cmd-> ${C.reset}`;
 
 function matchingSlashCommands(input, commands) {
   if (!input.startsWith('/')) return [];
-  const typed = input.split(/\s/)[0] || input;
-  return commands
-    .filter(s => s.cmd.startsWith(typed) || typed.startsWith(s.cmd))
-    .slice(0, 3);
+  const typed = input.trimEnd();
+  const matches = commands
+    .filter(s => s.cmd.startsWith(typed) || typed.startsWith(s.cmd));
+  return matches.slice(0, 5);
 }
 
 /** Format a tool call into human-readable description lines for the card UI. */

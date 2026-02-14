@@ -490,8 +490,7 @@ impl TermState {
         if !input.starts_with('/') {
             return Vec::new();
         }
-        // Match against the typed text (which may be just "/")
-        let typed = input.split_whitespace().next().unwrap_or(input);
+        let typed = input.trim_end();
         self.slash_commands
             .iter()
             .filter(|(cmd, _)| cmd.starts_with(typed) || typed.starts_with(cmd))
