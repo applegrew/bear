@@ -77,6 +77,7 @@ export class BearClient {
     this.fitAddon = fitAddon;
     this.ws = null;
     this.sessionId = null;
+    this._audioCtx = null;
 
     // Input state
     this.inputBuf = '';
@@ -347,6 +348,7 @@ export class BearClient {
           this.toolConfirmIdx = 0;
           this.toolConfirmRendered = false;
           this.inToolConfirm = true;
+          this._playAlert();
           this._renderToolConfirm();
         }
         break;
@@ -427,6 +429,7 @@ export class BearClient {
         this.userPromptRendered = false;
         this._writeln(`${C.bold}${C.cyan}  ${msg.question}${C.reset}`);
         this._writeln('');
+        this._playAlert();
         this._renderUserPrompt();
         break;
 
@@ -782,6 +785,27 @@ export class BearClient {
 
   _writeln(text) {
     this.term.writeln(text);
+  }
+
+  _playAlert() {
+    try {
+      if (!this._audioCtx) {
+        this._audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      const ctx = this._audioCtx;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.15);
+    } catch (_) {
+      // Audio not available — ignore silently
+    }
   }
 
   // -------------------------------------------------------------------------

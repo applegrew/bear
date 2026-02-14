@@ -692,6 +692,8 @@ impl TermState {
     /// menu: Approve / Deny / Always approve.
     fn run_tool_confirm_picker(&self, name: &str, args: &str) -> ToolConfirmChoice {
         let mut out = io::stdout();
+        // Play terminal bell to alert user
+        let _ = execute!(out, Print("\x07"));
 
         // Parse args JSON for formatting
         let args_val: serde_json::Value = serde_json::from_str(args)
@@ -810,6 +812,8 @@ impl TermState {
     /// Run an inline interactive menu (blocking). Returns selected indices.
     fn run_inline_menu(&self, question: &str, options: &[String], multi: bool) -> Vec<usize> {
         let mut out = io::stdout();
+        // Play terminal bell to alert user
+        let _ = execute!(out, Print("\x07"));
         let mut cursor_idx: usize = 0;
         let mut selected: Vec<bool> = vec![false; options.len()];
 
