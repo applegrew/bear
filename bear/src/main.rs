@@ -200,13 +200,24 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                     ws_write.send(Message::Text(payload)).await?;
                 }
             }
-            LoopEvent::FromTerm(TermEvent::ToolConfirmResult { tool_call_id, base_command, choice }) => {
+            LoopEvent::FromTerm(TermEvent::ToolConfirmResult { tool_call_id, base_command, extracted_commands, choice }) => {
                 let approved = choice != ToolConfirmChoice::Deny;
                 if choice == ToolConfirmChoice::Always {
-                    auto_approved.insert(base_command.clone());
-                    let _ = render_tx.send(RenderCmd::Notice(
-                        format!("'{}' will be auto-approved for this session.", base_command),
-                    ));
+                    // Add all extracted commands to auto-approved set
+                    if extracted_commands.is_empty() {
+                        auto_approved.insert(base_command.clone());
+                        let _ = render_tx.send(RenderCmd::Notice(
+                            format!("'{}' will be auto-approved for this session.", base_command),
+                        ));
+                    } else {
+                        for cmd in &extracted_commands {
+                            auto_approved.insert(cmd.clone());
+                        }
+                        let label = extracted_commands.join("', '");
+                        let _ = render_tx.send(RenderCmd::Notice(
+                            format!("'{}' will be auto-approved for this session.", label),
+                        ));
+                    }
                 }
                 let payload = serde_json::to_string(&ClientMessage::ToolConfirm {
                     tool_call_id,
@@ -436,13 +447,17 @@ fn dispatch_server_msg(
         ServerMessage::AssistantText { text } => {
             let _ = render_tx.send(RenderCmd::AssistantChunk(text.clone()));
         }
-        ServerMessage::ToolRequest { tool_call } => {
+        ServerMessage::ToolRequest { tool_call, extracted_commands } => {
             *last_tool = (tool_call.name.clone(), tool_call.arguments.clone());
-            let base_cmd = extract_base_command(tool_call);
-            let args_str = serde_json::to_string_pretty(&tool_call.arguments)
-                .unwrap_or_else(|_| tool_call.arguments.to_string());
+            // Use server-provided extracted commands if available, otherwise
+            // fall back to the old single-command extraction.
+            let cmds: Vec<String> = extracted_commands.clone().unwrap_or_else(|| {
+                vec![extract_base_command(tool_call)]
+            });
 
-            if auto_approved.contains(&base_cmd) {
+            let all_approved = !cmds.is_empty() && cmds.iter().all(|c| auto_approved.contains(c));
+
+            if all_approved {
                 // Auto-approved: show card-style notice
                 let desc = term::format_tool_description(&tool_call.name, &tool_call.arguments);
                 let mut card = format!("┌─ ⚡ {} ─ (auto-approved)\n", tool_call.name);
@@ -456,9 +471,11 @@ fn dispatch_server_msg(
 
             let _ = render_tx.send(RenderCmd::ToolRequest {
                 tool_call_id: tool_call.id.clone(),
-                base_command: base_cmd,
+                base_command: cmds.join(", "),
+                extracted_commands: cmds,
                 name: tool_call.name.clone(),
-                args: args_str,
+                args: serde_json::to_string_pretty(&tool_call.arguments)
+                    .unwrap_or_else(|_| tool_call.arguments.to_string()),
             });
         }
         ServerMessage::ToolOutput { output, .. } => {

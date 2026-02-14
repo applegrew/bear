@@ -103,6 +103,7 @@ export class BearClient {
     this.toolConfirmIdx = 0;       // 0=Approve, 1=Deny, 2=Always
     this.toolConfirmRendered = false;
     this.autoApproved = new Set();
+    this._lastExtractedCommands = [];
 
     // Session picker state
     this.inSessionPicker = false;
@@ -308,11 +309,15 @@ export class BearClient {
         const tc = msg.tool_call;
         this._lastToolName = tc.name;
         this._lastToolArgs = tc.arguments;
-        const baseCmd = this._extractBaseCommand(tc);
+        // Use server-provided extracted commands if available, else fall back
+        const cmds = msg.extracted_commands || [this._extractBaseCommand(tc)];
+        this._lastExtractedCommands = cmds;
 
         this._clearInputLine();
 
-        if (this.autoApproved.has(baseCmd)) {
+        const allApproved = cmds.length > 0 && cmds.every(c => this.autoApproved.has(c));
+
+        if (allApproved) {
           const descLines = formatToolDescription(tc.name, tc.arguments || {});
           this._writeln(`${C.gray}  ┌─ ⚡ ${tc.name} ─ (auto-approved)${C.reset}`);
           for (const line of descLines) {
@@ -327,6 +332,14 @@ export class BearClient {
           this._writeln(`${C.gray}  ┌─ ${C.magenta}⚡ ${tc.name}${C.gray} ─${C.reset}`);
           for (const line of descLines) {
             this._writeln(`${C.gray}  │  ${C.white}${line}${C.reset}`);
+          }
+          // Show which commands need approval
+          if (tc.name === 'run_command' && cmds.length > 0) {
+            const unapproved = cmds.filter(c => !this.autoApproved.has(c));
+            if (unapproved.length > 0) {
+              const cmdList = unapproved.map(c => `'${c}'`).join(' and ');
+              this._writeln(`${C.gray}  │  ${C.yellow}Requires approval for ${cmdList}${C.reset}`);
+            }
           }
           this._writeln(`${C.gray}  └─${C.reset}`);
           // Enter picker mode
@@ -988,7 +1001,7 @@ export class BearClient {
     const tc = this.toolConfirmCall;
     if (!tc) return;
 
-    const baseCmd = this._extractBaseCommand(tc);
+    const cmds = this._lastExtractedCommands || [this._extractBaseCommand(tc)];
     const idx = this.toolConfirmIdx;
     const approved = idx !== 1; // 0=Approve, 1=Deny, 2=Always
 
@@ -997,8 +1010,12 @@ export class BearClient {
     this.term.writeln('');
 
     if (idx === 2) {
-      this.autoApproved.add(baseCmd);
-      this._writeln(`${C.yellow}  '${baseCmd}' will be auto-approved for this session.${C.reset}`);
+      // Add all extracted commands to auto-approved set
+      for (const cmd of cmds) {
+        this.autoApproved.add(cmd);
+      }
+      const label = cmds.map(c => `'${c}'`).join(', ');
+      this._writeln(`${C.yellow}  ${label} will be auto-approved for this session.${C.reset}`);
     }
 
     const verdict = approved

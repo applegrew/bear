@@ -16,6 +16,87 @@ use crate::tools::{execute_tool, parse_tool_calls};
 const ENABLE_REFLECTION: bool = true;
 
 // ---------------------------------------------------------------------------
+// Tool-call tag filter for streamed chunks
+// ---------------------------------------------------------------------------
+
+const TOOL_OPEN: &str = "[TOOL_CALL]";
+const TOOL_CLOSE: &str = "[/TOOL_CALL]";
+
+/// Stateful filter that strips `[TOOL_CALL]...[/TOOL_CALL]` markup from
+/// streamed LLM chunks so the client never sees raw tool-call JSON.
+///
+/// Because tags can span chunk boundaries, we buffer text that *might* be
+/// the start of a tag and only emit it once we know it isn't.
+struct ToolCallFilter {
+    /// True while we are inside a `[TOOL_CALL]...[/TOOL_CALL]` block.
+    inside: bool,
+    /// Accumulates text that could be the beginning of a tag boundary.
+    buf: String,
+}
+
+impl ToolCallFilter {
+    fn new() -> Self {
+        Self { inside: false, buf: String::new() }
+    }
+
+    /// Feed a new chunk and return the text that should be shown to the user.
+    fn feed(&mut self, chunk: &str) -> String {
+        self.buf.push_str(chunk);
+        let mut output = String::new();
+
+        loop {
+            if self.inside {
+                // Looking for [/TOOL_CALL]
+                if let Some(pos) = self.buf.find(TOOL_CLOSE) {
+                    // Skip everything up to and including the close tag
+                    self.buf = self.buf[pos + TOOL_CLOSE.len()..].to_string();
+                    self.inside = false;
+                    continue;
+                }
+                // Close tag might be partially at the end — keep buffering
+                // Keep at most len("[/TOOL_CALL]")-1 chars in case of partial match
+                let keep = TOOL_CLOSE.len() - 1;
+                if self.buf.len() > keep {
+                    self.buf = self.buf[self.buf.len() - keep..].to_string();
+                }
+                break;
+            } else {
+                // Looking for [TOOL_CALL]
+                if let Some(pos) = self.buf.find(TOOL_OPEN) {
+                    // Emit everything before the tag
+                    output.push_str(&self.buf[..pos]);
+                    self.buf = self.buf[pos + TOOL_OPEN.len()..].to_string();
+                    self.inside = true;
+                    continue;
+                }
+                // Open tag might be partially at the end — keep those chars buffered
+                // e.g. the buffer ends with "[TOOL" which could be start of "[TOOL_CALL]"
+                let keep = TOOL_OPEN.len() - 1;
+                if self.buf.len() > keep {
+                    let safe = self.buf.len() - keep;
+                    output.push_str(&self.buf[..safe]);
+                    self.buf = self.buf[safe..].to_string();
+                }
+                break;
+            }
+        }
+
+        output
+    }
+
+    /// Flush any remaining buffered text (call when streaming is done).
+    fn flush(&mut self) -> String {
+        if self.inside {
+            // Unclosed tag — discard the buffered content
+            self.buf.clear();
+            String::new()
+        } else {
+            std::mem::take(&mut self.buf)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket handler — thin relay between client and session bus
 // ---------------------------------------------------------------------------
 
@@ -704,6 +785,7 @@ async fn invoke_llm(
     // are buffered in the bus message log for replay on reconnect.
     let mut partial_content = String::new();
     let mut interrupted_input: Option<String> = None;
+    let mut filter = ToolCallFilter::new();
 
     let mut chunk_count = 0usize;
     loop {
@@ -716,9 +798,12 @@ async fn invoke_llm(
                             tracing::info!("invoke_llm: chunk #{chunk_count} len={}", text.len());
                         }
                         partial_content.push_str(&text);
-                        bus.send(ServerMessage::AssistantText {
-                            text,
-                        }).await;
+                        let visible = filter.feed(&text);
+                        if !visible.is_empty() {
+                            bus.send(ServerMessage::AssistantText {
+                                text: visible,
+                            }).await;
+                        }
                     }
                     None => {
                         tracing::info!("invoke_llm: chunk channel closed after {chunk_count} chunks");
@@ -751,13 +836,22 @@ async fn invoke_llm(
                         // Finish draining chunks from the LLM
                         while let Some(text) = chunk_rx.recv().await {
                             partial_content.push_str(&text);
-                            bus.send(ServerMessage::AssistantText { text }).await;
+                            let visible = filter.feed(&text);
+                            if !visible.is_empty() {
+                                bus.send(ServerMessage::AssistantText { text: visible }).await;
+                            }
                         }
                         break;
                     }
                 }
             }
         }
+    }
+
+    // Flush any remaining buffered text from the filter
+    let remaining = filter.flush();
+    if !remaining.is_empty() {
+        bus.send(ServerMessage::AssistantText { text: remaining }).await;
     }
 
     tracing::info!("invoke_llm: sending AssistantTextDone, partial_content len={}", partial_content.len());
@@ -837,6 +931,59 @@ async fn invoke_llm(
     }
 }
 
+/// Extract individual command names from a shell string.
+///
+/// Splits on shell operators (`&&`, `||`, `;`, `|`) and extracts the base
+/// command name from each segment, skipping env-var assignments, `sudo`, `env`,
+/// and path prefixes. Returns deduplicated command names.
+///
+/// Examples:
+///   "cd /tmp && rm -rf foo"  → ["cd", "rm"]
+///   "FOO=1 sudo cargo build" → ["cargo"]
+///   "ls | grep foo | wc -l"  → ["ls", "grep", "wc"]
+fn extract_shell_commands(cmd_str: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // Split on shell operators: &&, ||, ;, |
+    let replaced = cmd_str
+        .replace("&&", "\x00")
+        .replace("||", "\x00")
+        .replace(';', "\x00")
+        .replace('|', "\x00");
+    let segments: Vec<&str> = replaced
+        .split('\x00')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            // Handle subshell: strip leading ( or $( 
+            s.trim_start_matches('(').trim_start_matches("$(").trim()
+        })
+        .collect();
+
+    for seg in segments {
+        let tokens: Vec<&str> = seg.split_whitespace().collect();
+        for token in &tokens {
+            // Skip env var assignments like FOO=bar
+            if token.contains('=') && !token.starts_with('-') {
+                continue;
+            }
+            // Skip sudo/env prefixes
+            if *token == "sudo" || *token == "env" || *token == "nohup" || *token == "time" || *token == "nice" {
+                continue;
+            }
+            // Extract basename from paths like /usr/bin/ls
+            let base = token.rsplit('/').next().unwrap_or(token);
+            if !base.is_empty() && seen.insert(base.to_string()) {
+                result.push(base.to_string());
+            }
+            break;
+        }
+    }
+
+    result
+}
+
 /// Pop the next tool call from the queue. For most tools, send a ToolRequest
 /// to the client for confirmation. For `user_prompt_options`, skip the
 /// confirmation step entirely and directly send the UserPrompt.
@@ -898,8 +1045,20 @@ async fn present_next_tool(
         return;
     }
 
+    // For run_command, extract individual command names from the shell string
+    let extracted_commands = if ptc.tool_call.name == "run_command" {
+        let cmd_str = ptc.tool_call.arguments["command"]
+            .as_str()
+            .unwrap_or("");
+        let cmds = extract_shell_commands(cmd_str);
+        if cmds.is_empty() { None } else { Some(cmds) }
+    } else {
+        None
+    };
+
     bus.send(ServerMessage::ToolRequest {
         tool_call: ptc.tool_call.clone(),
+        extracted_commands,
     }).await;
     *pending = Some(ptc);
 }
@@ -1195,5 +1354,108 @@ mod tests {
         let input = "x".repeat(8001);
         let result = truncate_tool_output(&input, 8000);
         assert!(result.contains("truncated"));
+    }
+
+    // -- ToolCallFilter tests ------------------------------------------------
+
+    #[test]
+    fn filter_no_tool_calls() {
+        let mut f = ToolCallFilter::new();
+        // Buffer keeps up to TOOL_OPEN.len()-1 = 10 chars to detect partial tags
+        let out = f.feed("Hello world");
+        assert_eq!(out, "H"); // 11 chars - 10 buffered = 1 emitted
+        assert_eq!(f.flush(), "ello world");
+    }
+
+    #[test]
+    fn filter_strips_single_tool_call() {
+        let mut f = ToolCallFilter::new();
+        let input = r#"Some text [TOOL_CALL]{"name":"run_command"}[/TOOL_CALL] more"#;
+        let mut out = f.feed(input);
+        out.push_str(&f.flush());
+        assert!(!out.contains("[TOOL_CALL]"));
+        assert!(!out.contains("run_command"));
+        assert!(out.contains("Some text"));
+        assert!(out.contains("more"));
+    }
+
+    #[test]
+    fn filter_strips_tool_call_across_chunks() {
+        let mut f = ToolCallFilter::new();
+        let mut out = String::new();
+        out.push_str(&f.feed("Hello [TOOL"));
+        out.push_str(&f.feed("_CALL]{\"name\":\"x\"}"));
+        out.push_str(&f.feed("[/TOOL_CALL] done"));
+        out.push_str(&f.flush());
+        assert!(out.contains("Hello"));
+        assert!(out.contains("done"));
+        assert!(!out.contains("TOOL_CALL"));
+        assert!(!out.contains("\"name\""));
+    }
+
+    #[test]
+    fn filter_multiple_tool_calls() {
+        let mut f = ToolCallFilter::new();
+        let input = "A [TOOL_CALL]{\"a\":1}[/TOOL_CALL] B [TOOL_CALL]{\"b\":2}[/TOOL_CALL] C";
+        let mut out = f.feed(input);
+        out.push_str(&f.flush());
+        assert!(out.contains("A"));
+        assert!(out.contains("B"));
+        assert!(out.contains("C"));
+        assert!(!out.contains("TOOL_CALL"));
+    }
+
+    #[test]
+    fn filter_text_only_no_brackets() {
+        let mut f = ToolCallFilter::new();
+        let mut out = String::new();
+        out.push_str(&f.feed("abc"));
+        out.push_str(&f.feed("def"));
+        out.push_str(&f.feed("ghi"));
+        out.push_str(&f.flush());
+        assert_eq!(out, "abcdefghi");
+    }
+
+    // -- extract_shell_commands tests ----------------------------------------
+
+    #[test]
+    fn extract_simple_command() {
+        assert_eq!(extract_shell_commands("cargo build"), vec!["cargo"]);
+    }
+
+    #[test]
+    fn extract_chained_commands() {
+        assert_eq!(extract_shell_commands("cd /tmp && rm -rf foo"), vec!["cd", "rm"]);
+    }
+
+    #[test]
+    fn extract_piped_commands() {
+        assert_eq!(extract_shell_commands("ls | grep foo | wc -l"), vec!["ls", "grep", "wc"]);
+    }
+
+    #[test]
+    fn extract_with_env_and_sudo() {
+        assert_eq!(extract_shell_commands("FOO=1 sudo cargo build"), vec!["cargo"]);
+    }
+
+    #[test]
+    fn extract_with_path_prefix() {
+        assert_eq!(extract_shell_commands("/usr/bin/ls -la"), vec!["ls"]);
+    }
+
+    #[test]
+    fn extract_semicolon_separated() {
+        assert_eq!(extract_shell_commands("echo hello; cat file.txt"), vec!["echo", "cat"]);
+    }
+
+    #[test]
+    fn extract_deduplicates() {
+        assert_eq!(extract_shell_commands("cd /a && cd /b && ls"), vec!["cd", "ls"]);
+    }
+
+    #[test]
+    fn extract_complex_mixed() {
+        let cmds = extract_shell_commands("cd . && rm -rf build; mkdir build && cd build | tee log");
+        assert_eq!(cmds, vec!["cd", "rm", "mkdir", "tee"]);
     }
 }

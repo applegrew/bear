@@ -105,7 +105,14 @@ pub enum ServerMessage {
     SlashCommands { commands: Vec<SlashCommandInfo> },
     AssistantText { text: String },
     AssistantTextDone,
-    ToolRequest { tool_call: ToolCall },
+    ToolRequest {
+        tool_call: ToolCall,
+        /// For `run_command` tool calls, the list of individual command names
+        /// extracted from the shell string (e.g. `["cd", "rm"]` for `cd . && rm .`).
+        /// Clients use this to check each command against their auto-approved set.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        extracted_commands: Option<Vec<String>>,
+    },
     ToolOutput { tool_call_id: String, output: String },
     ProcessStarted { info: ProcessInfo },
     ProcessOutput { pid: u32, text: String },

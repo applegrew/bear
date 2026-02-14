@@ -21,6 +21,7 @@ pub enum RenderCmd {
     ToolRequest {
         tool_call_id: String,
         base_command: String,
+        extracted_commands: Vec<String>,
         name: String,
         args: String,
     },
@@ -54,6 +55,7 @@ pub enum TermEvent {
     ToolConfirmResult {
         tool_call_id: String,
         base_command: String,
+        extracted_commands: Vec<String>,
         choice: ToolConfirmChoice,
     },
     UserPromptResult { prompt_id: String, selected: Vec<usize> },
@@ -91,10 +93,10 @@ pub fn spawn_terminal_thread(
                             return;
                         }
                         // Intercept ToolRequest: run inline picker, send result
-                        if let RenderCmd::ToolRequest { tool_call_id, base_command, name, args } = cmd {
+                        if let RenderCmd::ToolRequest { tool_call_id, base_command, extracted_commands, name, args } = cmd {
                             let choice = state.run_tool_confirm_picker(&name, &args);
                             let _ = rt.block_on(event_tx.send(
-                                TermEvent::ToolConfirmResult { tool_call_id, base_command, choice },
+                                TermEvent::ToolConfirmResult { tool_call_id, base_command, extracted_commands, choice },
                             ));
                             state.draw_prompt();
                             continue;
