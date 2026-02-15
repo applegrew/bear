@@ -418,6 +418,8 @@ async fn execute_patch_file(
         .unwrap_or("")
         .to_string();
 
+    tracing::debug!("patch_file: path={path:?}, diff length={}", diff.len());
+
     let full_path = match validate_tool_path(&path, &ptc.cwd) {
         Ok(p) => p,
         Err(e) => return e,
@@ -426,6 +428,8 @@ async fn execute_patch_file(
         Ok(c) => c,
         Err(err) => return format!("Error reading {full_path}: {err}"),
     };
+
+    tracing::debug!("patch_file: file has {} lines", content.lines().count());
 
     match apply_unified_diff(&content, &diff) {
         Ok(patched) => {
@@ -443,7 +447,11 @@ async fn execute_patch_file(
                 Err(err) => format!("Error writing {full_path}: {err}"),
             }
         }
-        Err(err) => format!("Patch failed: {err}"),
+        Err(err) => {
+            tracing::warn!("patch_file failed on {full_path}: {err}");
+            tracing::debug!("patch_file diff was:\n{diff}");
+            format!("Patch failed: {err}")
+        }
     }
 }
 
@@ -572,38 +580,44 @@ fn apply_unified_diff(original: &str, diff: &str) -> Result<String, String> {
         let search_end = (claimed_0 + 200).min(orig_lines.len());
         let need = old_lines_expected.len();
 
-        let mut best_pos: Option<usize> = None;
-        let mut best_distance: usize = usize::MAX;
+        // Helper: search for hunk position using a line comparator
+        let find_match = |cmp: &dyn Fn(&str, &str) -> bool| -> Option<usize> {
+            let scan_from = search_start;
+            let scan_to = if search_end >= need { search_end - need + 1 } else { scan_from };
+            let mut best_pos: Option<usize> = None;
+            let mut best_distance: usize = usize::MAX;
 
-        // Try each candidate starting position
-        let scan_from = search_start;
-        let scan_to = if search_end >= need { search_end - need + 1 } else { scan_from };
-
-        for pos in scan_from..=scan_to.min(orig_lines.len().saturating_sub(need)) {
-            let matches = old_lines_expected
-                .iter()
-                .enumerate()
-                .all(|(k, &expected)| {
-                    pos + k < orig_lines.len() && orig_lines[pos + k] == expected
-                });
-            if matches {
-                let distance = if pos >= claimed_0 {
-                    pos - claimed_0
-                } else {
-                    claimed_0 - pos
-                };
-                if distance < best_distance {
-                    best_distance = distance;
-                    best_pos = Some(pos);
-                }
-                // If exact match at claimed position, stop early
-                if distance == 0 {
-                    break;
+            for pos in scan_from..=scan_to.min(orig_lines.len().saturating_sub(need)) {
+                let matches = old_lines_expected
+                    .iter()
+                    .enumerate()
+                    .all(|(k, &expected)| {
+                        pos + k < orig_lines.len() && cmp(orig_lines[pos + k], expected)
+                    });
+                if matches {
+                    let distance = if pos >= claimed_0 {
+                        pos - claimed_0
+                    } else {
+                        claimed_0 - pos
+                    };
+                    if distance < best_distance {
+                        best_distance = distance;
+                        best_pos = Some(pos);
+                    }
+                    if distance == 0 {
+                        break;
+                    }
                 }
             }
-        }
+            best_pos
+        };
 
-        let match_pos = match best_pos {
+        // Pass 1: exact match
+        // Pass 2: trailing-whitespace-trimmed match (LLMs often strip trailing spaces)
+        let match_pos = find_match(&|a: &str, b: &str| a == b)
+            .or_else(|| find_match(&|a: &str, b: &str| a.trim_end() == b.trim_end()));
+
+        let match_pos = match match_pos {
             Some(p) => p,
             None => {
                 // Build a helpful error showing what we expected vs what's around the claimed position
@@ -636,23 +650,17 @@ fn apply_unified_diff(original: &str, diff: &str) -> Result<String, String> {
             orig_idx += 1;
         }
 
-        // Apply hunk lines
+        // Apply hunk lines — always use original file content for context
+        // lines to preserve exact whitespace (trailing spaces, tabs, etc.)
         for hl in &hunk.lines {
             match hl {
-                HunkLine::Context(s) => {
-                    // Validate context matches
-                    if orig_idx < orig_lines.len() && orig_lines[orig_idx] == s.as_str() {
-                        result_lines.push(s.clone());
-                        orig_idx += 1;
-                    } else {
-                        // Context mismatch — this shouldn't happen since we matched above,
-                        // but handle gracefully
-                        result_lines.push(s.clone());
-                        orig_idx += 1;
+                HunkLine::Context(_) => {
+                    if orig_idx < orig_lines.len() {
+                        result_lines.push(orig_lines[orig_idx].to_string());
                     }
+                    orig_idx += 1;
                 }
                 HunkLine::Remove(_) => {
-                    // Skip this line in original
                     orig_idx += 1;
                 }
                 HunkLine::Add(s) => {
@@ -1217,5 +1225,142 @@ Then the second:
         let diff = "--- a/file.txt\n+++ b/file.txt\n@@ -1,2 +1,2 @@\n hello\n-world\n+universe\n";
         let result = apply_unified_diff(original, diff).unwrap();
         assert_eq!(result, "hello\nuniverse\n");
+    }
+
+    #[test]
+    fn diff_off_by_few_lines() {
+        // LLM claims hunk starts at line 5, but the matching context is at line 8.
+        // Fuzzy matching should find it.
+        let original = "a\nb\nc\nd\ne\nf\ng\ntarget_line\nh\ni\n";
+        let diff = "@@ -5,3 +5,3 @@\n g\n-target_line\n+replaced_line\n h\n";
+        let result = apply_unified_diff(original, diff).unwrap();
+        assert_eq!(result, "a\nb\nc\nd\ne\nf\ng\nreplaced_line\nh\ni\n");
+    }
+
+    #[test]
+    fn diff_multi_hunk() {
+        let original = "a\nb\nc\nd\ne\nf\ng\nh\n";
+        let diff = "\
+@@ -1,3 +1,3 @@
+ a
+-b
++B
+ c
+@@ -6,3 +6,3 @@
+ f
+-g
++G
+ h
+";
+        let result = apply_unified_diff(original, diff).unwrap();
+        assert_eq!(result, "a\nB\nc\nd\ne\nf\nG\nh\n");
+    }
+
+    #[test]
+    fn diff_multi_hunk_off_by_one() {
+        // Second hunk line number is off by 1 (claims 7, actual match at 6)
+        let original = "a\nb\nc\nd\ne\nf\ng\nh\n";
+        let diff = "\
+@@ -1,3 +1,3 @@
+ a
+-b
++B
+ c
+@@ -7,3 +7,3 @@
+ f
+-g
++G
+ h
+";
+        let result = apply_unified_diff(original, diff).unwrap();
+        assert_eq!(result, "a\nB\nc\nd\ne\nf\nG\nh\n");
+    }
+
+    #[test]
+    fn diff_context_mismatch_returns_error() {
+        // Context lines don't match anything in the file
+        let original = "aaa\nbbb\nccc\n";
+        let diff = "@@ -1,3 +1,3 @@\n xxx\n-yyy\n+zzz\n ccc\n";
+        let result = apply_unified_diff(original, diff);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("could not find matching lines"));
+    }
+
+    #[test]
+    fn diff_no_hunks_returns_error() {
+        let original = "hello\n";
+        let diff = "just some random text with no @@ headers";
+        let result = apply_unified_diff(original, diff);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No hunks found"));
+    }
+
+    #[test]
+    fn diff_large_file_off_by_many() {
+        // Simulate a 100-line file where LLM is off by 10 lines
+        let mut lines: Vec<String> = (1..=100).map(|i| format!("line_{i}")).collect();
+        let original = lines.join("\n") + "\n";
+        // Target is at line 50, but LLM claims line 40
+        let diff = "@@ -40,3 +40,3 @@\n line_49\n-line_50\n+line_50_modified\n line_51\n";
+        let result = apply_unified_diff(&original, diff).unwrap();
+        lines[49] = "line_50_modified".to_string();
+        let expected = lines.join("\n") + "\n";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn diff_bare_empty_lines_in_context() {
+        // LLMs sometimes emit empty lines without the leading space
+        let original = "fn main() {\n    println!(\"hello\");\n\n    println!(\"world\");\n}\n";
+        let diff = "@@ -1,5 +1,5 @@\n fn main() {\n-    println!(\"hello\");\n+    println!(\"hi\");\n\n     println!(\"world\");\n }\n";
+        let result = apply_unified_diff(original, diff).unwrap();
+        assert_eq!(result, "fn main() {\n    println!(\"hi\");\n\n    println!(\"world\");\n}\n");
+    }
+
+    #[test]
+    fn diff_pure_insertion_hunk() {
+        let original = "line1\nline2\nline3\n";
+        let diff = "@@ -2,0 +3,1 @@\n+inserted\n";
+        let result = apply_unified_diff(original, diff).unwrap();
+        // Pure insertion at line 2 — should insert after line 2
+        assert!(result.contains("inserted"));
+    }
+
+    #[test]
+    fn diff_trailing_whitespace_tolerant() {
+        // LLM emits context lines without trailing whitespace that exists in the file.
+        // The fuzzy matcher should handle this via trailing-whitespace-trimmed fallback.
+        let original = "fn foo() {  \n    bar();\n}\n";
+        let diff = "@@ -1,3 +1,3 @@\n fn foo() {\n-    bar();\n+    baz();\n }\n";
+        let result = apply_unified_diff(original, diff).unwrap();
+        assert_eq!(result, "fn foo() {  \n    baz();\n}\n");
+    }
+
+    #[test]
+    fn diff_tab_vs_spaces_mismatch() {
+        // File uses tabs, LLM emits spaces in context
+        let original = "fn foo() {\n\tbar();\n\tbaz();\n}\n";
+        let diff = "@@ -1,4 +1,4 @@\n fn foo() {\n-    bar();\n+    qux();\n     baz();\n }\n";
+        // Context uses spaces but file has tabs — should fail
+        let result = apply_unified_diff(original, diff);
+        assert!(result.is_err(), "Should fail on tab/space mismatch, got: {:?}", result);
+    }
+
+    #[test]
+    fn diff_line_content_starts_with_minus() {
+        // A line in the file starts with '-', which could confuse the parser
+        let original = "header\n- item one\n- item two\nfooter\n";
+        let diff = "@@ -1,4 +1,4 @@\n header\n-- item one\n+- item ONE\n - item two\n footer\n";
+        let result = apply_unified_diff(original, diff).unwrap();
+        assert_eq!(result, "header\n- item ONE\n- item two\nfooter\n");
+    }
+
+    #[test]
+    fn diff_line_content_starts_with_plus() {
+        // A line in the file starts with '+', which could confuse the parser
+        let original = "header\n+ item one\n+ item two\nfooter\n";
+        let diff = "@@ -1,4 +1,4 @@\n header\n-+ item one\n++ item ONE\n + item two\n footer\n";
+        let result = apply_unified_diff(original, diff).unwrap();
+        assert_eq!(result, "header\n+ item ONE\n+ item two\nfooter\n");
     }
 }
