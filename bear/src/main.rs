@@ -49,7 +49,10 @@ async fn main() -> anyhow::Result<()> {
     let mut session_id = if let Some(id) = cli.session {
         id
     } else {
-        resolve_session(&http_client, &base_url, cli.new_session).await?
+        match resolve_session(&http_client, &base_url, cli.new_session).await? {
+            Some(id) => id,
+            None => return Ok(()), // user cancelled — exit
+        }
     };
 
     loop {
@@ -58,7 +61,10 @@ async fn main() -> anyhow::Result<()> {
             break;
         }
         // EndSession: go back to session selection
-        session_id = resolve_session(&http_client, &base_url, false).await?;
+        session_id = match resolve_session(&http_client, &base_url, false).await? {
+            Some(id) => id,
+            None => break, // user cancelled — exit
+        };
     }
 
     Ok(())
@@ -72,7 +78,7 @@ async fn resolve_session(
     http_client: &reqwest::Client,
     base_url: &Url,
     force_new: bool,
-) -> anyhow::Result<Uuid> {
+) -> anyhow::Result<Option<Uuid>> {
     let sessions_url = base_url.join("/sessions")?;
     let response = http_client
         .get(sessions_url)
@@ -82,7 +88,7 @@ async fn resolve_session(
     let list: SessionListResponse = response.json().await?;
 
     if list.sessions.is_empty() || force_new {
-        return create_session(http_client, base_url).await;
+        return create_session(http_client, base_url).await.map(Some);
     }
 
     // Build menu items: existing sessions + "New session" option
@@ -101,18 +107,16 @@ async fn resolve_session(
 
     match interactive_menu("Select a session:", &items, MenuMode::Single) {
         MenuResult::Single(idx) if idx < list.sessions.len() => {
-            Ok(list.sessions[idx].id)
+            Ok(Some(list.sessions[idx].id))
         }
         MenuResult::Single(_) => {
             // "New session" was selected
-            create_session(http_client, base_url).await
+            create_session(http_client, base_url).await.map(Some)
         }
         MenuResult::Cancelled => {
-            // Default: create new
-            println!("Cancelled; creating new session.");
-            create_session(http_client, base_url).await
+            Ok(None)
         }
-        _ => create_session(http_client, base_url).await,
+        _ => create_session(http_client, base_url).await.map(Some),
     }
 }
 
