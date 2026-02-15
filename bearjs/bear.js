@@ -807,7 +807,7 @@ export class BearClient {
   _redrawInput() {
     // Clear dropdown first, then redraw prompt line
     this._clearDropdown();
-    this.term.write('\x1b[2K\r');
+    this._clearWrappedInput();
     const p = this.inputBuf.startsWith('/') ? PROMPT_CMD : PROMPT;
     this.term.write(`${p}${this.inputBuf}`);
     // Move cursor to correct position
@@ -823,7 +823,26 @@ export class BearClient {
 
   _clearInputLine() {
     this._clearDropdown();
-    this.term.write('\x1b[2K\r');
+    this._clearWrappedInput();
+  }
+
+  _clearWrappedInput() {
+    // Calculate how many visual rows the prompt + input currently occupies
+    const promptLen = 6; // "bear> " / "cmd-> "
+    const totalChars = promptLen + this.inputBuf.length;
+    const cols = this.term.cols || 80;
+    const rows = Math.ceil(totalChars / cols) || 1;
+    // Move cursor up to the first row of the prompt (cursor may be on any wrapped row)
+    if (rows > 1) {
+      // Figure out which row the cursor is currently on
+      const cursorChars = promptLen + this.cursorPos;
+      const cursorRow = Math.floor(cursorChars / cols); // 0-indexed from prompt start
+      if (cursorRow > 0) {
+        this.term.write(`\x1b[${cursorRow}A`);
+      }
+    }
+    // Now clear from the first row downward
+    this.term.write('\r\x1b[J');
   }
 
   _clearDropdown() {
