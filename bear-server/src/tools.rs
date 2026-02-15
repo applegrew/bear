@@ -447,13 +447,29 @@ async fn execute_patch_file(
     }
 }
 
-/// Minimal unified diff applier. Parses `@@ -old_start,old_count +new_start,new_count @@` hunks.
+/// Unified diff applier with fuzzy hunk matching.
+///
+/// Parses `@@ -old_start,old_count +new_start,new_count @@` hunks.
+/// For each hunk, extracts the expected context/removal lines and searches
+/// for the best match in the original file near the claimed position.
+/// This tolerates LLM-generated diffs where line numbers are slightly off.
 fn apply_unified_diff(original: &str, diff: &str) -> Result<String, String> {
     let orig_lines: Vec<&str> = original.lines().collect();
-    let mut result_lines: Vec<String> = Vec::new();
-    let mut orig_idx: usize = 0;
-
     let diff_lines: Vec<&str> = diff.lines().collect();
+
+    // --- Parse hunks -----------------------------------------------------------
+    struct Hunk {
+        claimed_old_start: usize, // 1-indexed from @@ header
+        lines: Vec<HunkLine>,
+    }
+    #[derive(Clone)]
+    enum HunkLine {
+        Context(String),
+        Remove(String),
+        Add(String),
+    }
+
+    let mut hunks: Vec<Hunk> = Vec::new();
     let mut di = 0;
 
     // Skip --- and +++ header lines if present
@@ -473,47 +489,176 @@ fn apply_unified_diff(original: &str, diff: &str) -> Result<String, String> {
             continue;
         }
 
-        // Parse @@ -old_start,old_count +new_start,new_count @@
-        let hunk_header = line;
-        let parts: Vec<&str> = hunk_header.split_whitespace().collect();
+        let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 3 {
-            return Err(format!("Invalid hunk header: {hunk_header}"));
+            return Err(format!("Invalid hunk header: {line}"));
         }
 
         let old_range = parts[1].trim_start_matches('-');
-        let old_start: usize = old_range
+        let claimed_old_start: usize = old_range
             .split(',')
             .next()
             .and_then(|s| s.parse().ok())
             .unwrap_or(1);
 
-        // Copy lines before this hunk
-        let target = old_start.saturating_sub(1);
-        while orig_idx < target && orig_idx < orig_lines.len() {
-            result_lines.push(orig_lines[orig_idx].to_string());
-            orig_idx += 1;
-        }
-
         di += 1;
-        // Process hunk lines
+        let mut hunk_lines = Vec::new();
         while di < diff_lines.len() {
             let hline = diff_lines[di];
             if hline.starts_with("@@") {
                 break;
             }
             if hline.starts_with('-') {
-                // Remove line — skip it in original
-                orig_idx += 1;
+                hunk_lines.push(HunkLine::Remove(hline[1..].to_string()));
             } else if hline.starts_with('+') {
-                // Add line
-                result_lines.push(hline[1..].to_string());
+                hunk_lines.push(HunkLine::Add(hline[1..].to_string()));
             } else {
-                // Context line (starts with ' ' or is plain)
+                // Context line (starts with ' ' or is bare text)
                 let ctx = if hline.starts_with(' ') { &hline[1..] } else { hline };
-                result_lines.push(ctx.to_string());
-                orig_idx += 1;
+                hunk_lines.push(HunkLine::Context(ctx.to_string()));
             }
             di += 1;
+        }
+
+        hunks.push(Hunk {
+            claimed_old_start,
+            lines: hunk_lines,
+        });
+    }
+
+    if hunks.is_empty() {
+        return Err("No hunks found in diff".to_string());
+    }
+
+    // --- Apply hunks with fuzzy matching --------------------------------------
+
+    let mut result_lines: Vec<String> = Vec::new();
+    let mut orig_idx: usize = 0; // next unprocessed line in original (0-indexed)
+
+    for (hunk_num, hunk) in hunks.iter().enumerate() {
+        // Collect the "old" lines from this hunk (context + removal) in order.
+        // These are the lines we expect to find in the original file.
+        let old_lines_expected: Vec<&str> = hunk
+            .lines
+            .iter()
+            .filter_map(|hl| match hl {
+                HunkLine::Context(s) => Some(s.as_str()),
+                HunkLine::Remove(s) => Some(s.as_str()),
+                HunkLine::Add(_) => None,
+            })
+            .collect();
+
+        if old_lines_expected.is_empty() {
+            // Pure insertion hunk — use claimed position
+            let target = hunk.claimed_old_start.saturating_sub(1).max(orig_idx);
+            while orig_idx < target && orig_idx < orig_lines.len() {
+                result_lines.push(orig_lines[orig_idx].to_string());
+                orig_idx += 1;
+            }
+            for hl in &hunk.lines {
+                if let HunkLine::Add(s) = hl {
+                    result_lines.push(s.clone());
+                }
+            }
+            continue;
+        }
+
+        // Fuzzy search: find the best position for this hunk's old lines.
+        // Search within a window around the claimed position, starting from
+        // orig_idx (we never go backwards).
+        let claimed_0 = hunk.claimed_old_start.saturating_sub(1);
+        let search_start = orig_idx;
+        // Allow searching up to 200 lines beyond the claimed position
+        let search_end = (claimed_0 + 200).min(orig_lines.len());
+        let need = old_lines_expected.len();
+
+        let mut best_pos: Option<usize> = None;
+        let mut best_distance: usize = usize::MAX;
+
+        // Try each candidate starting position
+        let scan_from = search_start;
+        let scan_to = if search_end >= need { search_end - need + 1 } else { scan_from };
+
+        for pos in scan_from..=scan_to.min(orig_lines.len().saturating_sub(need)) {
+            let matches = old_lines_expected
+                .iter()
+                .enumerate()
+                .all(|(k, &expected)| {
+                    pos + k < orig_lines.len() && orig_lines[pos + k] == expected
+                });
+            if matches {
+                let distance = if pos >= claimed_0 {
+                    pos - claimed_0
+                } else {
+                    claimed_0 - pos
+                };
+                if distance < best_distance {
+                    best_distance = distance;
+                    best_pos = Some(pos);
+                }
+                // If exact match at claimed position, stop early
+                if distance == 0 {
+                    break;
+                }
+            }
+        }
+
+        let match_pos = match best_pos {
+            Some(p) => p,
+            None => {
+                // Build a helpful error showing what we expected vs what's around the claimed position
+                let ctx_start = claimed_0.min(orig_lines.len());
+                let ctx_end = (claimed_0 + need + 2).min(orig_lines.len());
+                let actual_ctx: Vec<String> = (ctx_start..ctx_end)
+                    .map(|i| format!("  {}: {}", i + 1, orig_lines[i]))
+                    .collect();
+                let expected_ctx: Vec<String> = old_lines_expected
+                    .iter()
+                    .enumerate()
+                    .take(5)
+                    .map(|(i, l)| format!("  {i}: {l}"))
+                    .collect();
+                return Err(format!(
+                    "Hunk {} failed: could not find matching lines near line {}.\n\
+                     Expected:\n{}\n\
+                     Actual file around that area:\n{}",
+                    hunk_num + 1,
+                    hunk.claimed_old_start,
+                    expected_ctx.join("\n"),
+                    actual_ctx.join("\n"),
+                ));
+            }
+        };
+
+        // Copy original lines before this hunk
+        while orig_idx < match_pos {
+            result_lines.push(orig_lines[orig_idx].to_string());
+            orig_idx += 1;
+        }
+
+        // Apply hunk lines
+        for hl in &hunk.lines {
+            match hl {
+                HunkLine::Context(s) => {
+                    // Validate context matches
+                    if orig_idx < orig_lines.len() && orig_lines[orig_idx] == s.as_str() {
+                        result_lines.push(s.clone());
+                        orig_idx += 1;
+                    } else {
+                        // Context mismatch — this shouldn't happen since we matched above,
+                        // but handle gracefully
+                        result_lines.push(s.clone());
+                        orig_idx += 1;
+                    }
+                }
+                HunkLine::Remove(_) => {
+                    // Skip this line in original
+                    orig_idx += 1;
+                }
+                HunkLine::Add(s) => {
+                    result_lines.push(s.clone());
+                }
+            }
         }
     }
 
