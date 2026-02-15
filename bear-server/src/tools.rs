@@ -462,6 +462,9 @@ async fn execute_patch_file(
 /// for the best match in the original file near the claimed position.
 /// This tolerates LLM-generated diffs where line numbers are slightly off.
 fn apply_unified_diff(original: &str, diff: &str) -> Result<String, String> {
+    // Normalize \r\n to \n in diff (LLMs sometimes produce \r\n in JSON strings)
+    let diff = diff.replace("\r\n", "\n");
+    let diff = diff.as_str();
     let orig_lines: Vec<&str> = original.lines().collect();
     let diff_lines: Vec<&str> = diff.lines().collect();
 
@@ -620,10 +623,43 @@ fn apply_unified_diff(original: &str, diff: &str) -> Result<String, String> {
         let match_pos = match match_pos {
             Some(p) => p,
             None => {
-                // Build a helpful error showing what we expected vs what's around the claimed position
+                // Find the first line that doesn't match to help diagnose
+                let mut mismatch_info = String::new();
+                if claimed_0 < orig_lines.len() && !old_lines_expected.is_empty() {
+                    for (k, &expected) in old_lines_expected.iter().enumerate().take(10) {
+                        if claimed_0 + k < orig_lines.len() {
+                            let actual = orig_lines[claimed_0 + k];
+                            if actual != expected {
+                                mismatch_info = format!(
+                                    "\nFirst mismatch at offset {k} (file line {}):\n  \
+                                     expected ({} bytes): {:?}\n  \
+                                     actual   ({} bytes): {:?}",
+                                    claimed_0 + k + 1,
+                                    expected.len(), expected,
+                                    actual.len(), actual,
+                                );
+                                break;
+                            }
+                        } else {
+                            mismatch_info = format!(
+                                "\nFile has only {} lines but hunk expects {} old lines",
+                                orig_lines.len(), need,
+                            );
+                            break;
+                        }
+                    }
+                    if mismatch_info.is_empty() && need > 10 {
+                        mismatch_info = format!(
+                            "\nFirst 10 lines match; mismatch is deeper in the hunk ({need} old lines total). \
+                             scan_start={search_start}, scan_end={search_end}, need={need}",
+                        );
+                    }
+                }
+
                 let ctx_start = claimed_0.min(orig_lines.len());
                 let ctx_end = (claimed_0 + need + 2).min(orig_lines.len());
                 let actual_ctx: Vec<String> = (ctx_start..ctx_end)
+                    .take(10)
                     .map(|i| format!("  {}: {}", i + 1, orig_lines[i]))
                     .collect();
                 let expected_ctx: Vec<String> = old_lines_expected
@@ -635,7 +671,7 @@ fn apply_unified_diff(original: &str, diff: &str) -> Result<String, String> {
                 return Err(format!(
                     "Hunk {} failed: could not find matching lines near line {}.\n\
                      Expected:\n{}\n\
-                     Actual file around that area:\n{}",
+                     Actual file around that area:\n{}{mismatch_info}",
                     hunk_num + 1,
                     hunk.claimed_old_start,
                     expected_ctx.join("\n"),
@@ -1344,6 +1380,121 @@ Then the second:
         // Context uses spaces but file has tabs — should fail
         let result = apply_unified_diff(original, diff);
         assert!(result.is_err(), "Should fail on tab/space mismatch, got: {:?}", result);
+    }
+
+    #[test]
+    fn diff_header_lines_not_at_start() {
+        // LLM emits some text before --- / +++ headers
+        let original = "aaa\nbbb\nccc\n";
+        let diff = "Here is the diff:\n--- a/file.txt\n+++ b/file.txt\n@@ -1,3 +1,3 @@\n aaa\n-bbb\n+BBB\n ccc\n";
+        let result = apply_unified_diff(original, diff);
+        // The "Here is the diff:" line is not --- or +++, so the initial skip loop
+        // breaks immediately. Then the main loop skips it (not @@). Should still work.
+        assert!(result.is_ok(), "Header not at start failed: {:?}", result.unwrap_err());
+        assert_eq!(result.unwrap(), "aaa\nBBB\nccc\n");
+    }
+
+    #[test]
+    fn diff_removal_line_starts_with_triple_dash() {
+        // What if the LLM's diff has a line being removed that starts with "---"?
+        // The initial skip loop would consume it as a header line!
+        let original = "first\n--- old separator ---\nlast\n";
+        let diff = "@@ -1,3 +1,3 @@\n first\n---- old separator ---\n+--- new separator ---\n last\n";
+        let result = apply_unified_diff(original, diff);
+        assert!(result.is_ok(), "Triple-dash removal failed: {:?}", result.unwrap_err());
+        assert_eq!(result.unwrap(), "first\n--- new separator ---\nlast\n");
+    }
+
+    #[test]
+    fn diff_large_hunk_exceeds_search_window() {
+        // Reproduce: 120-line file, hunk at line 1 with all lines as context/remove.
+        // The search_end is (claimed_0 + 200).min(orig_lines.len()) = 0 + 200 = 200,
+        // but orig_lines.len() = 120, so search_end = 120.
+        // need = number of old lines in hunk. If need > search_end, scan_to = scan_from.
+        // This tests that the scan range handles large hunks correctly.
+        let lines: Vec<String> = (1..=120).map(|i| format!("line_{i}")).collect();
+        let original = lines.join("\n") + "\n";
+
+        // Build a diff that replaces line_60 with line_60_new, with ALL other lines as context
+        let mut diff = String::from("@@ -1,120 +1,120 @@\n");
+        for i in 1..=120 {
+            if i == 60 {
+                diff.push_str(&format!("-line_{i}\n"));
+                diff.push_str("+line_60_new\n");
+            } else {
+                diff.push_str(&format!(" line_{i}\n"));
+            }
+        }
+
+        let result = apply_unified_diff(&original, &diff);
+        assert!(result.is_ok(), "Large hunk failed: {:?}", result.unwrap_err());
+        let patched = result.unwrap();
+        assert!(patched.contains("line_60_new"));
+        assert!(!patched.contains("\nline_60\n"));
+    }
+
+    #[test]
+    fn diff_full_file_replacement() {
+        // LLM replaces entire file content via a single hunk — all old lines are
+        // removed and all new lines are added. This is the pattern that failed
+        // in production: expected lines matched actual file but hunk still failed.
+        let original = "\
+use tao::{
+    dpi::LogicalSize,
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+    window::WindowBuilder,
+};
+use log::info;
+use browser::{html, css, renderer, js};
+use std::fs;
+use std::env;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
+    let args: Vec<String> = env::args().collect();
+    let url = args.get(1).map(|s| s.as_str()).unwrap_or(\"about:blank\");
+    info!(\"Loading {url}\");
+    Ok(())
+}
+";
+        let diff = "\
+@@ -1,18 +1,25 @@
+ use tao::{
+     dpi::LogicalSize,
+     event::{Event, WindowEvent},
+     event_loop::{ControlFlow, EventLoop},
+     window::WindowBuilder,
+ };
+-use log::info;
+-use browser::{html, css, renderer, js};
++use log::{info, debug};
++use browser::{html, css, renderer, js, layout};
+ use std::fs;
+ use std::env;
++use std::path::PathBuf;
+ 
+ fn main() -> Result<(), Box<dyn std::error::Error>> {
+     env_logger::init();
+     let args: Vec<String> = env::args().collect();
+     let url = args.get(1).map(|s| s.as_str()).unwrap_or(\"about:blank\");
+     info!(\"Loading {url}\");
++    debug!(\"Starting render\");
++    let doc = html::parse(\"<html></html>\");
++    let style = css::parse(\"\");
++    let tree = layout::build(&doc, &style);
++    renderer::paint(&tree);
++    debug!(\"Render complete\");
+     Ok(())
+ }
+";
+        let result = apply_unified_diff(original, diff);
+        assert!(result.is_ok(), "Full file replacement failed: {:?}", result.unwrap_err());
+        let patched = result.unwrap();
+        assert!(patched.contains("use log::{info, debug};"));
+        assert!(patched.contains("layout::build"));
+        assert!(patched.contains("debug!(\"Render complete\");"));
+        assert!(!patched.contains("use log::info;"));
     }
 
     #[test]
