@@ -24,4 +24,6 @@ uuid = { workspace = true }
 
 libc = { workspace = true }
 
+webrtc = { workspace = true }
+
 bear-core = { path = "../bear-core" }

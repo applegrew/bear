@@ -99,12 +99,6 @@ async fn resolve_session(
         description: String::new(),
     });
 
-    // Print some blank lines so the menu redraw doesn't overshoot
-    let total_lines = items.len() + 2;
-    for _ in 0..total_lines {
-        println!();
-    }
-
     match interactive_menu("Select a session:", &items, MenuMode::Single) {
         MenuResult::Single(idx) if idx < list.sessions.len() => {
             Ok(list.sessions[idx].id)

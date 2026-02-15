@@ -112,7 +112,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "Show help"),
 ];
 
-fn slash_command_infos() -> Vec<SlashCommandInfo> {
+pub fn slash_command_infos() -> Vec<SlashCommandInfo> {
     SLASH_COMMANDS
         .iter()
         .map(|(cmd, desc)| SlashCommandInfo {
@@ -137,7 +137,7 @@ struct PendingDepthPrompt {
 
 /// Ensure a session bus exists and a worker is running. Returns the client_tx
 /// sender for forwarding client messages to the worker.
-async fn ensure_worker_running(
+pub async fn ensure_worker_running(
     state: &ServerState,
     session_id: Uuid,
 ) -> mpsc::Sender<ClientMessage> {

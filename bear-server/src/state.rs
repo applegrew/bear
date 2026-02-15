@@ -197,6 +197,7 @@ pub struct ServerState {
     pub processes: Arc<RwLock<HashMap<u32, ManagedProcess>>>,
     pub config: AppConfig,
     pub http_client: reqwest::Client,
+    pub rtc_peers: crate::rtc::RtcPeers,
 }
 
 #[derive(Debug, Clone)]

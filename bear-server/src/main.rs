@@ -1,5 +1,6 @@
 mod llm;
 mod process;
+mod rtc;
 mod state;
 mod tools;
 mod ws;
@@ -8,7 +9,7 @@ use axum::{
     extract::{ws::WebSocketUpgrade, Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use bear_core::{
@@ -54,11 +55,15 @@ async fn main() -> anyhow::Result<()> {
             .timeout(std::time::Duration::from_secs(300))
             .build()
             .expect("failed to build HTTP client"),
+        rtc_peers: rtc::new_rtc_peers(),
     };
 
     let app = Router::new()
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/ws/:session_id", get(ws_handler))
+        .route("/rtc/:session_id/offer", post(rtc::rtc_offer))
+        .route("/rtc/:session_id/ice/:conn_id", post(rtc::rtc_add_ice))
+        .route("/rtc/:session_id/candidates/:conn_id", post(rtc::rtc_get_candidates))
         .with_state(state)
         .layer(CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any));
 

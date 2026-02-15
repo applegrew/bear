@@ -4,7 +4,12 @@
 
 const DEFAULT_HOST = '127.0.0.1:49321';
 const SERVER_URL = `http://${DEFAULT_HOST}`;
-const WS_BASE   = `ws://${DEFAULT_HOST}`;
+
+// STUN servers for NAT traversal
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+];
 
 // ANSI color helpers
 const C = {
@@ -75,7 +80,11 @@ export class BearClient {
   constructor(term, fitAddon) {
     this.term = term;
     this.fitAddon = fitAddon;
-    this.ws = null;
+    this.ws = null;          // kept for fallback compatibility
+    this.pc = null;           // RTCPeerConnection
+    this.dc = null;           // RTCDataChannel
+    this._connId = null;      // server-side connection ID for ICE exchange
+    this._icePollTimer = null;
     this.sessionId = null;
     this._audioCtx = null;
 
@@ -233,7 +242,7 @@ export class BearClient {
   }
 
   // -------------------------------------------------------------------------
-  // WebSocket connection
+  // WebRTC DataChannel connection (with HTTP signaling)
   // -------------------------------------------------------------------------
 
   _connectToSession(sid) {
@@ -244,29 +253,132 @@ export class BearClient {
     this.toolConfirmRendered = false;
     this.autoApproved.clear();
 
-    if (this.ws) { this.ws.close(); this.ws = null; }
+    this._cleanup();
 
-    this._writeln(`${C.gray}  Connecting…${C.reset}`);
+    this._writeln(`${C.gray}  Connecting via WebRTC…${C.reset}`);
 
-    this.ws = new WebSocket(WS_BASE + '/ws/' + sid);
+    this.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
 
-    this.ws.onopen = () => {
+    // Create the DataChannel before creating the offer
+    this.dc = this.pc.createDataChannel('bear', { ordered: true });
+
+    this.dc.onopen = () => {
       // prompt will be drawn after session_info message
     };
 
-    this.ws.onclose = () => {
+    this.dc.onclose = () => {
       this._writeln(`${C.gray}  Disconnected.${C.reset}`);
+      this._stopIcePoll();
     };
 
-    this.ws.onerror = () => {
-      this._writeln(`${C.red}  WebSocket error. Is bear-server running?${C.reset}`);
+    this.dc.onerror = (e) => {
+      this._writeln(`${C.red}  DataChannel error: ${e.error?.message || 'unknown'}${C.reset}`);
     };
 
-    this.ws.onmessage = (event) => {
+    this.dc.onmessage = (event) => {
       let msg;
       try { msg = JSON.parse(event.data); } catch { return; }
       this._handleServerMessage(msg);
     };
+
+    // Gather ICE candidates and send them to the server
+    this.pc.onicecandidate = (event) => {
+      if (event.candidate && this._connId) {
+        fetch(`${SERVER_URL}/rtc/${sid}/ice/${this._connId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            candidate: event.candidate.candidate,
+            sdp_mid: event.candidate.sdpMid,
+            sdp_mline_index: event.candidate.sdpMLineIndex,
+          }),
+        }).catch(() => {});
+      }
+    };
+
+    this.pc.onconnectionstatechange = () => {
+      if (this.pc.connectionState === 'failed' || this.pc.connectionState === 'disconnected') {
+        this._writeln(`${C.red}  Connection lost.${C.reset}`);
+        this._stopIcePoll();
+      }
+    };
+
+    // Start the SDP offer/answer exchange
+    this._doSignaling(sid);
+  }
+
+  async _doSignaling(sid) {
+    try {
+      const offer = await this.pc.createOffer();
+      await this.pc.setLocalDescription(offer);
+
+      const res = await fetch(`${SERVER_URL}/rtc/${sid}/offer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sdp: offer.sdp }),
+      });
+
+      if (!res.ok) {
+        this._writeln(`${C.red}  Signaling failed: ${res.status}${C.reset}`);
+        return;
+      }
+
+      const data = await res.json();
+      this._connId = data.conn_id;
+
+      await this.pc.setRemoteDescription(
+        new RTCSessionDescription({ type: 'answer', sdp: data.sdp })
+      );
+
+      // Start polling for server ICE candidates
+      this._startIcePoll(sid);
+    } catch (e) {
+      this._writeln(`${C.red}  Signaling error: ${e.message}${C.reset}`);
+    }
+  }
+
+  _startIcePoll(sid) {
+    this._stopIcePoll();
+    this._icePollTimer = setInterval(async () => {
+      if (!this._connId) return;
+      try {
+        const res = await fetch(`${SERVER_URL}/rtc/${sid}/candidates/${this._connId}`, {
+          method: 'POST',
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        for (const c of data.candidates || []) {
+          await this.pc.addIceCandidate(new RTCIceCandidate({
+            candidate: c.candidate,
+            sdpMid: c.sdp_mid || null,
+            sdpMLineIndex: c.sdp_mline_index ?? null,
+          }));
+        }
+      } catch { /* ignore */ }
+    }, 200);
+
+    // Stop polling after 30 seconds (ICE gathering should be done by then)
+    setTimeout(() => this._stopIcePoll(), 30000);
+  }
+
+  _stopIcePoll() {
+    if (this._icePollTimer) {
+      clearInterval(this._icePollTimer);
+      this._icePollTimer = null;
+    }
+  }
+
+  _cleanup() {
+    this._stopIcePoll();
+    if (this.dc) { try { this.dc.close(); } catch {} this.dc = null; }
+    if (this.pc) { try { this.pc.close(); } catch {} this.pc = null; }
+    if (this.ws) { this.ws.close(); this.ws = null; }
+    this._connId = null;
+  }
+
+  _isConnected() {
+    return (this.dc && this.dc.readyState === 'open') ||
+           (this.ws && this.ws.readyState === WebSocket.OPEN);
   }
 
   // -------------------------------------------------------------------------
@@ -901,11 +1013,11 @@ export class BearClient {
     }
 
     if (text === '/end') {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      if (this._isConnected()) {
         this._sendJson({ type: 'session_end' });
       }
       this._writeln(`${C.gray}  Session ended.${C.reset}`);
-      if (this.ws) { this.ws.close(); this.ws = null; }
+      this._cleanup();
       this.term.writeln('');
       this._showSessionPicker();
       return;
@@ -913,13 +1025,13 @@ export class BearClient {
 
     if (text === '/exit') {
       this._writeln(`${C.gray}  Disconnecting. Session preserved.${C.reset}`);
-      if (this.ws) { this.ws.close(); this.ws = null; }
+      this._cleanup();
       this.term.writeln('');
       this._showSessionPicker();
       return;
     }
 
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+    if (!this._isConnected()) {
       this._writeln(`${C.red}  Not connected. Use /exit to pick a session.${C.reset}`);
       this._drawPrompt();
       return;
@@ -1220,12 +1332,15 @@ export class BearClient {
   }
 
   // -------------------------------------------------------------------------
-  // WebSocket helpers
+  // Transport helpers
   // -------------------------------------------------------------------------
 
   _sendJson(obj) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(obj));
+    const payload = JSON.stringify(obj);
+    if (this.dc && this.dc.readyState === 'open') {
+      this.dc.send(payload);
+    } else if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(payload);
     }
   }
 }

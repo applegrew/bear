@@ -45,4 +45,4 @@ BEAR_OLLAMA_MODEL=llama3.1 BEAR_OLLAMA_URL=http://127.0.0.1:11434 cargo run -p b
 
 ## Browser client
 
-See [web/README.md](web/README.md) for wasm build and browser demo instructions.
+Open `html/index.html` in a browser to use the xterm.js-based terminal client (`bearjs/bear.js`). It connects to `bear-server` via WebRTC DataChannels with HTTP signaling, enabling NAT traversal.
