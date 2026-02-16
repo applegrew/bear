@@ -26,4 +26,8 @@ libc = { workspace = true }
 
 webrtc = { workspace = true }
 
+urlencoding = { workspace = true }
+
+lsp-types = { workspace = true }
+
 bear-core = { path = "../bear-core" }

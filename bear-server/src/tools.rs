@@ -169,6 +169,14 @@ pub async fn execute_tool(
         "list_files" => execute_list_files(ptc).await,
         "search_text" => execute_search_text(ptc).await,
         "undo" => execute_undo(state, session_id, ptc).await,
+        "todo_write" => execute_todo_write(state, session_id, ptc).await,
+        "todo_read" => execute_todo_read(state, session_id).await,
+        "web_fetch" => execute_web_fetch(state, ptc).await,
+        "web_search" => execute_web_search(state, ptc).await,
+        "lsp_diagnostics" => execute_lsp_diagnostics(state, session_id, ptc).await,
+        "lsp_hover" => execute_lsp_hover(state, session_id, ptc).await,
+        "lsp_references" => execute_lsp_references(state, session_id, ptc).await,
+        "lsp_symbols" => execute_lsp_symbols(state, session_id, ptc).await,
         other => format!("Unknown tool: {other}"),
     }
 }
@@ -1109,6 +1117,504 @@ async fn execute_undo(
         }
     }
     output.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// todo_write / todo_read
+// ---------------------------------------------------------------------------
+
+async fn execute_todo_write(
+    state: &ServerState,
+    session_id: Uuid,
+    ptc: &PendingToolCall,
+) -> String {
+    let items = match ptc.tool_call.arguments["items"].as_array() {
+        Some(arr) => arr,
+        None => return "Error: todo_write requires an 'items' array.".to_string(),
+    };
+
+    let mut todo_list = Vec::new();
+    for item in items {
+        let id = item["id"].as_str().unwrap_or("").to_string();
+        let content = item["content"].as_str().unwrap_or("").to_string();
+        let status = item["status"].as_str().unwrap_or("pending").to_string();
+        let priority = item["priority"].as_str().unwrap_or("medium").to_string();
+        if content.is_empty() {
+            continue;
+        }
+        todo_list.push(crate::state::TodoItem { id, content, status, priority });
+    }
+
+    let count = todo_list.len();
+    {
+        let mut sessions = state.sessions.write().await;
+        if let Some(session) = sessions.get_mut(&session_id) {
+            session.todo_list = todo_list;
+        }
+    }
+    format!("Todo list updated ({count} items).")
+}
+
+async fn execute_todo_read(
+    state: &ServerState,
+    session_id: Uuid,
+) -> String {
+    let sessions = state.sessions.read().await;
+    let Some(session) = sessions.get(&session_id) else {
+        return "Error: session not found".to_string();
+    };
+    if session.todo_list.is_empty() {
+        return "Todo list is empty.".to_string();
+    }
+    let mut lines = Vec::new();
+    for item in &session.todo_list {
+        let status_icon = match item.status.as_str() {
+            "completed" => "✓",
+            "in_progress" => "→",
+            _ => "○",
+        };
+        let priority_tag = match item.priority.as_str() {
+            "high" => " [HIGH]",
+            "low" => " [LOW]",
+            _ => "",
+        };
+        lines.push(format!("{status_icon} [{}] {}{priority_tag}", item.id, item.content));
+    }
+    lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// web_fetch / web_search
+// ---------------------------------------------------------------------------
+
+async fn execute_web_fetch(
+    state: &ServerState,
+    ptc: &PendingToolCall,
+) -> String {
+    let url = match ptc.tool_call.arguments["url"].as_str() {
+        Some(u) if !u.is_empty() => u.to_string(),
+        _ => return "Error: web_fetch requires a 'url' argument.".to_string(),
+    };
+    let max_chars = ptc.tool_call.arguments["max_chars"]
+        .as_u64()
+        .unwrap_or(10_000) as usize;
+
+    // Validate URL scheme
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return "Error: URL must start with http:// or https://".to_string();
+    }
+
+    let response = match state.http_client
+        .get(&url)
+        .header("User-Agent", "Bear/1.0 (AI coding assistant)")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(err) => return format!("Error fetching {url}: {err}"),
+    };
+
+    let status = response.status();
+    if !status.is_success() {
+        return format!("Error: HTTP {status} for {url}");
+    }
+
+    let body = match response.text().await {
+        Ok(t) => t,
+        Err(err) => return format!("Error reading response body: {err}"),
+    };
+
+    // Strip HTML tags to extract text content
+    let text = strip_html_tags(&body);
+
+    // Collapse whitespace runs
+    let text = collapse_whitespace(&text);
+
+    if text.len() > max_chars {
+        format!("{}\n\n[... truncated at {max_chars} chars, total {} chars]", &text[..max_chars], text.len())
+    } else {
+        text
+    }
+}
+
+/// Simple HTML tag stripper — removes tags, decodes common entities, collapses whitespace.
+fn strip_html_tags(html: &str) -> String {
+    let mut result = String::with_capacity(html.len());
+    let mut in_tag = false;
+    let mut in_script = false;
+    let mut in_style = false;
+
+    let lower = html.to_lowercase();
+    let chars: Vec<char> = html.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        if !in_tag && i + 7 < len && &lower[i..i+7] == "<script" {
+            in_script = true;
+            in_tag = true;
+            i += 1;
+            continue;
+        }
+        if in_script && i + 9 <= len && &lower[i..i+9] == "</script>" {
+            in_script = false;
+            i += 9;
+            continue;
+        }
+        if !in_tag && i + 6 < len && &lower[i..i+6] == "<style" {
+            in_style = true;
+            in_tag = true;
+            i += 1;
+            continue;
+        }
+        if in_style && i + 8 <= len && &lower[i..i+8] == "</style>" {
+            in_style = false;
+            i += 8;
+            continue;
+        }
+        if in_script || in_style {
+            i += 1;
+            continue;
+        }
+        if chars[i] == '<' {
+            in_tag = true;
+            // Add newline for block elements
+            if i + 2 < len {
+                let next2 = &lower[i..lower.len().min(i+5)];
+                if next2.starts_with("<br") || next2.starts_with("<p ")
+                    || next2.starts_with("<p>") || next2.starts_with("<div")
+                    || next2.starts_with("<li") || next2.starts_with("<h1")
+                    || next2.starts_with("<h2") || next2.starts_with("<h3")
+                    || next2.starts_with("<tr")
+                {
+                    result.push('\n');
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if chars[i] == '>' {
+            in_tag = false;
+            i += 1;
+            continue;
+        }
+        if !in_tag {
+            // Decode common HTML entities
+            if chars[i] == '&' {
+                if i + 4 <= len && &html[i..i+4] == "&lt;" {
+                    result.push('<');
+                    i += 4;
+                    continue;
+                }
+                if i + 4 <= len && &html[i..i+4] == "&gt;" {
+                    result.push('>');
+                    i += 4;
+                    continue;
+                }
+                if i + 5 <= len && &html[i..i+5] == "&amp;" {
+                    result.push('&');
+                    i += 5;
+                    continue;
+                }
+                if i + 6 <= len && &html[i..i+6] == "&quot;" {
+                    result.push('"');
+                    i += 6;
+                    continue;
+                }
+                if i + 6 <= len && &html[i..i+6] == "&nbsp;" {
+                    result.push(' ');
+                    i += 6;
+                    continue;
+                }
+                if i + 5 <= len && &html[i..i+5] == "&#39;" {
+                    result.push('\'');
+                    i += 5;
+                    continue;
+                }
+            }
+            result.push(chars[i]);
+        }
+        i += 1;
+    }
+    result
+}
+
+/// Collapse runs of whitespace into single spaces/newlines.
+fn collapse_whitespace(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut prev_was_newline = false;
+    let mut prev_was_space = false;
+
+    for ch in text.chars() {
+        if ch == '\n' {
+            if !prev_was_newline {
+                result.push('\n');
+            }
+            prev_was_newline = true;
+            prev_was_space = false;
+        } else if ch.is_whitespace() {
+            if !prev_was_space && !prev_was_newline {
+                result.push(' ');
+            }
+            prev_was_space = true;
+        } else {
+            prev_was_newline = false;
+            prev_was_space = false;
+            result.push(ch);
+        }
+    }
+    result.trim().to_string()
+}
+
+async fn execute_web_search(
+    state: &ServerState,
+    ptc: &PendingToolCall,
+) -> String {
+    let query = match ptc.tool_call.arguments["query"].as_str() {
+        Some(q) if !q.is_empty() => q.to_string(),
+        _ => return "Error: web_search requires a 'query' argument.".to_string(),
+    };
+    let max_results = ptc.tool_call.arguments["max_results"]
+        .as_u64()
+        .unwrap_or(5) as usize;
+
+    // Use DuckDuckGo HTML search (no API key needed)
+    let encoded_query = urlencoding::encode(&query);
+    let url = format!("https://html.duckduckgo.com/html/?q={encoded_query}");
+
+    let response = match state.http_client
+        .get(&url)
+        .header("User-Agent", "Bear/1.0 (AI coding assistant)")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(err) => return format!("Error searching: {err}"),
+    };
+
+    let body = match response.text().await {
+        Ok(t) => t,
+        Err(err) => return format!("Error reading search response: {err}"),
+    };
+
+    // Parse DuckDuckGo HTML results
+    parse_ddg_results(&body, max_results)
+}
+
+/// Parse DuckDuckGo HTML search results page.
+/// Results are in <a class="result__a"> for title/URL and <a class="result__snippet"> for snippet.
+fn parse_ddg_results(html: &str, max_results: usize) -> String {
+    let mut results = Vec::new();
+
+    // Find result blocks: <div class="result results_links results_links_deep web-result ">
+    // Each result has: <a class="result__a" href="...">title</a>
+    //                  <a class="result__snippet">snippet</a>
+    let mut pos = 0;
+    while results.len() < max_results {
+        // Find next result link
+        let marker = "class=\"result__a\"";
+        let Some(marker_pos) = html[pos..].find(marker) else { break };
+        let abs_pos = pos + marker_pos;
+
+        // Find href
+        let search_back_start = if abs_pos > 200 { abs_pos - 200 } else { 0 };
+        let href = extract_href(&html[search_back_start..abs_pos + marker.len() + 200]);
+
+        // Find title (text between > and </a>)
+        let after_marker = abs_pos + marker.len();
+        let title_start = html[after_marker..].find('>').map(|p| after_marker + p + 1);
+        let title_end = title_start.and_then(|s| html[s..].find("</a>").map(|p| s + p));
+        let title = match (title_start, title_end) {
+            (Some(s), Some(e)) => strip_html_tags(&html[s..e]).trim().to_string(),
+            _ => String::new(),
+        };
+
+        pos = title_end.unwrap_or(after_marker + 1);
+
+        // Find snippet
+        let snippet_marker = "class=\"result__snippet\"";
+        let snippet = if let Some(sp) = html[pos..].find(snippet_marker) {
+            let sp_abs = pos + sp + snippet_marker.len();
+            let sn_start = html[sp_abs..].find('>').map(|p| sp_abs + p + 1);
+            let sn_end = sn_start.and_then(|s| html[s..].find("</a>").or_else(|| html[s..].find("</span>")).map(|p| s + p));
+            match (sn_start, sn_end) {
+                (Some(s), Some(e)) => strip_html_tags(&html[s..e]).trim().to_string(),
+                _ => String::new(),
+            }
+        } else {
+            String::new()
+        };
+
+        if !title.is_empty() || !href.is_empty() {
+            results.push(format!(
+                "{}. {}\n   {}\n   {}",
+                results.len() + 1,
+                if title.is_empty() { "(no title)" } else { &title },
+                if href.is_empty() { "(no url)" } else { &href },
+                if snippet.is_empty() { "(no snippet)" } else { &snippet },
+            ));
+        }
+    }
+
+    if results.is_empty() {
+        "No search results found.".to_string()
+    } else {
+        results.join("\n\n")
+    }
+}
+
+/// Extract href value from an HTML tag fragment.
+fn extract_href(fragment: &str) -> String {
+    if let Some(href_pos) = fragment.find("href=\"") {
+        let start = href_pos + 6;
+        if let Some(end) = fragment[start..].find('"') {
+            let raw = &fragment[start..start + end];
+            // DuckDuckGo wraps URLs in a redirect: //duckduckgo.com/l/?uddg=<encoded_url>&...
+            if let Some(uddg_pos) = raw.find("uddg=") {
+                let url_start = uddg_pos + 5;
+                let url_end = raw[url_start..].find('&').unwrap_or(raw.len() - url_start);
+                let encoded = &raw[url_start..url_start + url_end];
+                return urlencoding::decode(encoded).unwrap_or_else(|_| encoded.into()).to_string();
+            }
+            return raw.to_string();
+        }
+    }
+    String::new()
+}
+
+// ---------------------------------------------------------------------------
+// LSP tools
+// ---------------------------------------------------------------------------
+
+/// Helper to get session cwd for LSP workspace root.
+async fn get_session_cwd(state: &ServerState, session_id: Uuid) -> Result<String, String> {
+    let sessions = state.sessions.read().await;
+    sessions
+        .get(&session_id)
+        .map(|s| s.info.cwd.clone())
+        .ok_or_else(|| "Session not found".to_string())
+}
+
+async fn execute_lsp_diagnostics(
+    state: &ServerState,
+    session_id: Uuid,
+    ptc: &PendingToolCall,
+) -> String {
+    let path = ptc.tool_call.arguments["path"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    if path.is_empty() {
+        return "Error: lsp_diagnostics requires a 'path' argument.".to_string();
+    }
+    let full_path = match validate_tool_path(&path, &ptc.cwd) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let cwd = match get_session_cwd(state, session_id).await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    match state.lsp_manager.diagnostics(&full_path, &cwd).await {
+        Ok(result) => result,
+        Err(e) => format!("LSP error: {e}"),
+    }
+}
+
+async fn execute_lsp_hover(
+    state: &ServerState,
+    session_id: Uuid,
+    ptc: &PendingToolCall,
+) -> String {
+    let path = ptc.tool_call.arguments["path"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let line = ptc.tool_call.arguments["line"]
+        .as_u64()
+        .unwrap_or(0) as u32;
+    let character = ptc.tool_call.arguments["character"]
+        .as_u64()
+        .unwrap_or(0) as u32;
+    if path.is_empty() {
+        return "Error: lsp_hover requires a 'path' argument.".to_string();
+    }
+    let full_path = match validate_tool_path(&path, &ptc.cwd) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let cwd = match get_session_cwd(state, session_id).await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    // LSP uses 0-indexed lines, but users think in 1-indexed. Accept both:
+    // if line > 0, assume 1-indexed and subtract 1.
+    let lsp_line = if line > 0 { line - 1 } else { 0 };
+    let lsp_char = if character > 0 { character - 1 } else { 0 };
+    match state.lsp_manager.hover(&full_path, lsp_line, lsp_char, &cwd).await {
+        Ok(result) => result,
+        Err(e) => format!("LSP error: {e}"),
+    }
+}
+
+async fn execute_lsp_references(
+    state: &ServerState,
+    session_id: Uuid,
+    ptc: &PendingToolCall,
+) -> String {
+    let path = ptc.tool_call.arguments["path"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let line = ptc.tool_call.arguments["line"]
+        .as_u64()
+        .unwrap_or(0) as u32;
+    let character = ptc.tool_call.arguments["character"]
+        .as_u64()
+        .unwrap_or(0) as u32;
+    if path.is_empty() {
+        return "Error: lsp_references requires a 'path' argument.".to_string();
+    }
+    let full_path = match validate_tool_path(&path, &ptc.cwd) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let cwd = match get_session_cwd(state, session_id).await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let lsp_line = if line > 0 { line - 1 } else { 0 };
+    let lsp_char = if character > 0 { character - 1 } else { 0 };
+    match state.lsp_manager.references(&full_path, lsp_line, lsp_char, &cwd).await {
+        Ok(result) => result,
+        Err(e) => format!("LSP error: {e}"),
+    }
+}
+
+async fn execute_lsp_symbols(
+    state: &ServerState,
+    session_id: Uuid,
+    ptc: &PendingToolCall,
+) -> String {
+    let path = ptc.tool_call.arguments["path"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    if path.is_empty() {
+        return "Error: lsp_symbols requires a 'path' argument.".to_string();
+    }
+    let full_path = match validate_tool_path(&path, &ptc.cwd) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let cwd = match get_session_cwd(state, session_id).await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    match state.lsp_manager.symbols(&full_path, &cwd).await {
+        Ok(result) => result,
+        Err(e) => format!("LSP error: {e}"),
+    }
 }
 
 // ---------------------------------------------------------------------------

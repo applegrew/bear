@@ -1,4 +1,5 @@
 mod llm;
+mod lsp;
 mod process;
 mod rtc;
 mod state;
@@ -56,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
             .build()
             .expect("failed to build HTTP client"),
         rtc_peers: rtc::new_rtc_peers(),
+        lsp_manager: Arc::new(lsp::LspManager::new()),
     };
 
     let app = Router::new()
@@ -135,6 +137,7 @@ async fn create_session(
             content: SYSTEM_PROMPT.to_string(),
         }],
         undo_stack: Vec::new(),
+        todo_list: Vec::new(),
     };
 
     let info = session.info.clone();

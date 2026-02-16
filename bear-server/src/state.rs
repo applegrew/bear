@@ -67,6 +67,46 @@ Set the session working directory (affects future run_command/tool paths).
 Arguments: {"path": "string"}
 Use when the user needs to change the session root. Allow `cd` via run_command within the current working directory hierarchy, but if the user tries to go outside it, respond with an error instructing them to use session_workdir.
 
+### 11. todo_write
+Write/replace the session todo list. Use to track your plan and progress on complex tasks.
+Arguments: {"items": [{"id": "string", "content": "string", "status": "pending|in_progress|completed", "priority": "high|medium|low"}, ...]}
+Replaces the entire todo list. Auto-approved (no user confirmation needed).
+
+### 12. todo_read
+Read the current session todo list.
+Arguments: {}
+Auto-approved (no user confirmation needed).
+
+### 13. web_fetch
+Fetch a URL and return its text content (HTML tags stripped).
+Arguments: {"url": "string", "max_chars?": number}
+Default max_chars=10000. Use for reading documentation, APIs, web pages.
+
+### 14. web_search
+Search the web and return results.
+Arguments: {"query": "string", "max_results?": number}
+Default max_results=5. Returns title, URL, and snippet for each result.
+
+### 15. lsp_diagnostics
+Get compiler errors and warnings for a file (requires language server).
+Arguments: {"path": "string"}
+Auto-approved (no user confirmation needed). Lazily spawns the appropriate language server.
+
+### 16. lsp_hover
+Get type information and documentation for a symbol at a position.
+Arguments: {"path": "string", "line": number, "character": number}
+Line and character are 1-indexed. Auto-approved.
+
+### 17. lsp_references
+Find all references to a symbol at a position.
+Arguments: {"path": "string", "line": number, "character": number}
+Line and character are 1-indexed. Auto-approved.
+
+### 18. lsp_symbols
+Get a structured outline of a file (functions, structs, classes with line ranges).
+Arguments: {"path": "string"}
+Auto-approved. Use to understand file structure without reading the entire file.
+
 ## Workflow Guidelines
 
 1. **Explore first.** Before making changes, use list_files and search_text to understand the codebase structure and find relevant code. Do not guess file paths or contents.
@@ -88,6 +128,12 @@ Use when the user needs to change the session root. Allow `cd` via run_command w
 9. **Plan complex changes.** For very complex changes, create a plan and clarify unclear parts with the user. Once the user approves the plan then only go ahead with the plan's implementation.
 
 10. **Break complex changes into smaller steps.** For very complex changes, break it down into smaller steps and proactively run tests and builds to verify your changes.
+
+11. **Track your work.** For complex multi-step tasks, use todo_write to create a plan and update item statuses as you complete them. Use todo_read to review your progress.
+
+12. **Use web tools when needed.** Use web_search to find documentation, APIs, or solutions. Use web_fetch to read specific web pages. Prefer authoritative sources.
+
+13. **Use LSP tools for code intelligence.** After editing code, use lsp_diagnostics to check for errors before running a full build. Use lsp_symbols to understand file structure without reading the entire file. Use lsp_hover to inspect types and lsp_references to find usages.
 "#;
 
 // ---------------------------------------------------------------------------
@@ -100,11 +146,20 @@ pub struct UndoEntry {
     pub previous_content: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TodoItem {
+    pub id: String,
+    pub content: String,
+    pub status: String,   // "pending", "in_progress", "completed"
+    pub priority: String, // "high", "medium", "low"
+}
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub info: bear_core::SessionInfo,
     pub history: Vec<OllamaMessage>,
     pub undo_stack: Vec<UndoEntry>,
+    pub todo_list: Vec<TodoItem>,
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +253,7 @@ pub struct ServerState {
     pub config: AppConfig,
     pub http_client: reqwest::Client,
     pub rtc_peers: crate::rtc::RtcPeers,
+    pub lsp_manager: Arc<crate::lsp::LspManager>,
 }
 
 #[derive(Debug, Clone)]

@@ -1045,6 +1045,27 @@ async fn present_next_tool(
         return;
     }
 
+    // Auto-execute read-only / non-destructive tools without user confirmation
+    const AUTO_APPROVED_TOOLS: &[&str] = &[
+        "todo_write", "todo_read", "web_fetch", "web_search",
+        "lsp_diagnostics", "lsp_hover", "lsp_references", "lsp_symbols",
+    ];
+    if AUTO_APPROVED_TOOLS.contains(&ptc.tool_call.name.as_str()) {
+        let output = execute_tool(state, session_id, bus, &ptc).await;
+        bus.send(ServerMessage::ToolOutput {
+            tool_call_id: ptc.tool_call.id.clone(),
+            output: output.clone(),
+        }).await;
+        append_tool_result(state, session_id, &output).await;
+        *tool_depth += 1;
+        if !tool_queue.is_empty() {
+            Box::pin(present_next_tool(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
+        } else {
+            invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+        }
+        return;
+    }
+
     // For run_command, extract individual command names from the shell string
     let extracted_commands = if ptc.tool_call.name == "run_command" {
         let cmd_str = ptc.tool_call.arguments["command"]
