@@ -297,7 +297,7 @@ impl AppConfig {
             ollama_model: std::env::var("BEAR_OLLAMA_MODEL")
                 .unwrap_or_else(|_| "llama3.1".to_string()),
             max_tool_depth: env_or("BEAR_MAX_TOOL_DEPTH", 100),
-            max_tool_output_chars: env_or("BEAR_MAX_TOOL_OUTPUT_CHARS", 8000),
+            max_tool_output_chars: env_or("BEAR_MAX_TOOL_OUTPUT_CHARS", 32_000),
             context_budget: env_or("BEAR_CONTEXT_BUDGET", 16_000),
             keep_recent: env_or("BEAR_KEEP_RECENT", 20),
         }

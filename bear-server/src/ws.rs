@@ -1592,7 +1592,7 @@ async fn present_next_tool(
                 tool_call_id: ptc.tool_call.id.clone(),
                 output: output.clone(),
             }).await;
-            append_tool_result(state, session_id, &output).await;
+            append_tool_result(state, session_id, &ptc.tool_call.name, &output).await;
             *tool_depth += 1;
             if !tool_queue.is_empty() {
                 Box::pin(present_next_tool(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
@@ -1630,7 +1630,7 @@ async fn present_next_tool(
             tool_call_id: ptc.tool_call.id.clone(),
             output: output.clone(),
         }).await;
-        append_tool_result(state, session_id, &output).await;
+        append_tool_result(state, session_id, &ptc.tool_call.name, &output).await;
         *tool_depth += 1;
         if !tool_queue.is_empty() {
             Box::pin(present_next_tool(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
@@ -1694,7 +1694,7 @@ async fn handle_tool_confirm(
             tool_call_id: ptc.tool_call.id.clone(),
             output: output.clone(),
         }).await;
-        append_tool_result(state, session_id, &output).await;
+        append_tool_result(state, session_id, &ptc.tool_call.name, &output).await;
         // If rejected, skip remaining queued tools and re-invoke LLM
         tool_queue.clear();
         *tool_depth += 1;
@@ -1707,7 +1707,7 @@ async fn handle_tool_confirm(
         tool_call_id: ptc.tool_call.id.clone(),
         output: output.clone(),
     }).await;
-    append_tool_result(state, session_id, &output).await;
+    append_tool_result(state, session_id, &ptc.tool_call.name, &output).await;
     *tool_depth += 1;
 
     // If more tool calls queued from the same LLM response, present the next one
@@ -1772,7 +1772,7 @@ async fn handle_prompt_response(
         tool_call_id: pp.tool_call.tool_call.id.clone(),
         output: output.clone(),
     }).await;
-    append_tool_result(state, session_id, &output).await;
+    append_tool_result(state, session_id, &pp.tool_call.tool_call.name, &output).await;
     *tool_depth += 1;
 
     // Continue the agentic loop
@@ -1894,8 +1894,14 @@ fn truncate_tool_output(output: &str, max_chars: usize) -> String {
     )
 }
 
-async fn append_tool_result(state: &ServerState, session_id: Uuid, output: &str) {
-    let truncated = truncate_tool_output(output, state.config.max_tool_output_chars);
+async fn append_tool_result(state: &ServerState, session_id: Uuid, tool_name: &str, output: &str) {
+    // read_file gets a 4x higher limit — truncating a file the user explicitly
+    // asked to read defeats the purpose and confuses the LLM.
+    let limit = match tool_name {
+        "read_file" => state.config.max_tool_output_chars * 4,
+        _ => state.config.max_tool_output_chars,
+    };
+    let truncated = truncate_tool_output(output, limit);
     let mut sessions = state.sessions.write().await;
     if let Some(session) = sessions.get_mut(&session_id) {
         session.history.push(OllamaMessage {
