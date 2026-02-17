@@ -123,6 +123,13 @@ async fn create_session(
                 .unwrap_or_else(|| ".".to_string())
         });
 
+    // Build system prompt, optionally enriched with README.md from the working directory
+    let mut system_content = SYSTEM_PROMPT.to_string();
+    if let Some(readme) = read_readme_from_dir(&cwd) {
+        system_content.push_str("\n\n## Project README\n\nThe working directory contains the following README.md:\n\n");
+        system_content.push_str(&readme);
+    }
+
     let session = Session {
         info: bear_core::SessionInfo {
             id: Uuid::new_v4(),
@@ -134,7 +141,7 @@ async fn create_session(
         },
         history: vec![OllamaMessage {
             role: "system".to_string(),
-            content: SYSTEM_PROMPT.to_string(),
+            content: system_content,
         }],
         undo_stack: Vec::new(),
         todo_list: Vec::new(),
@@ -146,6 +153,47 @@ async fn create_session(
     state.sessions.write().await.insert(info.id, session);
 
     (StatusCode::CREATED, Json(CreateSessionResponse { session: info }))
+}
+
+// ---------------------------------------------------------------------------
+// README.md injection
+// ---------------------------------------------------------------------------
+
+const README_MAX_CHARS: usize = 4000;
+
+/// Try to read a README.md (case-insensitive) from the given directory.
+/// If the content exceeds `README_MAX_CHARS`, it is truncated with a note.
+fn read_readme_from_dir(dir: &str) -> Option<String> {
+    let dir_path = std::path::Path::new(dir);
+    // Try common casing variants
+    let candidates = ["README.md", "readme.md", "Readme.md", "README.MD"];
+    let mut content = None;
+    for name in &candidates {
+        let path = dir_path.join(name);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            content = Some(text);
+            break;
+        }
+    }
+    let text = content?;
+    if text.is_empty() {
+        return None;
+    }
+    if text.len() <= README_MAX_CHARS {
+        Some(text)
+    } else {
+        // Truncate at a line boundary near the limit
+        let truncated = match text[..README_MAX_CHARS].rfind('\n') {
+            Some(pos) => &text[..pos],
+            None => &text[..README_MAX_CHARS],
+        };
+        Some(format!(
+            "{}\n\n[… README truncated at {} chars out of {} total …]",
+            truncated,
+            truncated.len(),
+            text.len(),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
