@@ -685,6 +685,48 @@ impl LspManager {
         Ok(format!("{} references found:\n{}", locs.len(), lines.join("\n")))
     }
 
+    /// Find the line range of a named symbol in a file.
+    /// Returns (start_line_0indexed, end_line_0indexed) or an error message.
+    pub async fn find_symbol_range(
+        &self,
+        file_path: &str,
+        symbol_name: &str,
+        workspace_root: &str,
+    ) -> Result<(u32, u32), String> {
+        let client = self.get_client(file_path, workspace_root).await?;
+        client.ensure_file_open(file_path).await?;
+
+        let response = client.document_symbols(file_path).await?;
+        match response {
+            DocumentSymbolResponse::Nested(symbols) => {
+                if let Some((start, end)) = find_in_nested(&symbols, symbol_name) {
+                    Ok((start, end))
+                } else {
+                    let available = list_nested_names(&symbols, 0);
+                    Err(format!(
+                        "Symbol '{}' not found in {}.\nAvailable symbols:\n{}",
+                        symbol_name, file_path, available
+                    ))
+                }
+            }
+            DocumentSymbolResponse::Flat(symbols) => {
+                for sym in &symbols {
+                    if sym.name == symbol_name {
+                        return Ok((
+                            sym.location.range.start.line,
+                            sym.location.range.end.line,
+                        ));
+                    }
+                }
+                let available: Vec<String> = symbols.iter().map(|s| s.name.clone()).collect();
+                Err(format!(
+                    "Symbol '{}' not found in {}.\nAvailable symbols: {}",
+                    symbol_name, file_path, available.join(", ")
+                ))
+            }
+        }
+    }
+
     /// Get document symbols (outline) for a file.
     pub async fn symbols(
         &self,
@@ -731,6 +773,37 @@ fn markup_content_to_string(mc: lsp_types::MarkedString) -> String {
             format!("```{}\n{}\n```", ls.language, ls.value)
         }
     }
+}
+
+/// Recursively search nested document symbols for a name, return (start_line, end_line).
+fn find_in_nested(symbols: &[DocumentSymbol], name: &str) -> Option<(u32, u32)> {
+    for sym in symbols {
+        if sym.name == name {
+            return Some((sym.range.start.line, sym.range.end.line));
+        }
+        if let Some(children) = &sym.children {
+            if let Some(found) = find_in_nested(children, name) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// List all symbol names from nested symbols for error messages.
+fn list_nested_names(symbols: &[DocumentSymbol], depth: usize) -> String {
+    let mut out = Vec::new();
+    for sym in symbols {
+        let indent = "  ".repeat(depth);
+        let kind = symbol_kind_str(sym.kind);
+        let start = sym.range.start.line + 1;
+        let end = sym.range.end.line + 1;
+        out.push(format!("{indent}{kind} {} (lines {start}-{end})", sym.name));
+        if let Some(children) = &sym.children {
+            out.push(list_nested_names(children, depth + 1));
+        }
+    }
+    out.join("\n")
 }
 
 fn format_nested_symbols(symbols: &[DocumentSymbol], depth: usize, out: &mut Vec<String>) {

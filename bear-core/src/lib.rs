@@ -95,7 +95,7 @@ pub struct TaskItem {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     Input { text: String },
-    ToolConfirm { tool_call_id: String, approved: bool },
+    ToolConfirm { tool_call_id: String, approved: bool, #[serde(default)] always: bool },
     UserPromptResponse { prompt_id: String, selected: Vec<usize> },
     ProcessInput { pid: u32, text: String },
     ProcessKill { pid: u32 },
@@ -104,8 +104,6 @@ pub enum ClientMessage {
     SessionWorkdir { path: String },
     SessionEnd,
     Interrupt,
-    /// Client tells the server that one or more commands have been auto-approved.
-    AutoApprove { commands: Vec<String> },
     /// User approves or rejects a proposed task plan.
     TaskPlanResponse { plan_id: String, approved: bool },
     Ping,
@@ -142,11 +140,14 @@ pub enum ServerMessage {
         multi: bool,
     },
     SessionRenamed { name: String },
-    /// Sent on connect to synchronise client-side state (input history,
-    /// auto-approved commands) so that any client can resume seamlessly.
+    /// Sent on connect to synchronise client-side state (input history)
+    /// so that any client can resume seamlessly.
     ClientState {
         input_history: Vec<String>,
-        auto_approved: Vec<String>,
+    },
+    /// Server auto-approved a tool call — display-only, no client response needed.
+    ToolAutoApproved {
+        tool_call: ToolCall,
     },
     /// A proposed task plan for the user to approve before execution.
     TaskPlan {

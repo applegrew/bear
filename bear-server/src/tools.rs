@@ -177,6 +177,8 @@ pub async fn execute_tool(
         "lsp_hover" => execute_lsp_hover(state, session_id, ptc).await,
         "lsp_references" => execute_lsp_references(state, session_id, ptc).await,
         "lsp_symbols" => execute_lsp_symbols(state, session_id, ptc).await,
+        "read_symbol" => execute_read_symbol(state, session_id, ptc).await,
+        "patch_symbol" => execute_patch_symbol(state, session_id, ptc).await,
         other => format!("Unknown tool: {other}"),
     }
 }
@@ -1614,6 +1616,175 @@ async fn execute_lsp_symbols(
     match state.lsp_manager.symbols(&full_path, &cwd).await {
         Ok(result) => result,
         Err(e) => format!("LSP error: {e}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// read_symbol — read just one symbol (function, struct, etc.) from a file
+// ---------------------------------------------------------------------------
+
+async fn execute_read_symbol(
+    state: &ServerState,
+    session_id: Uuid,
+    ptc: &PendingToolCall,
+) -> String {
+    let path = ptc.tool_call.arguments["path"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let symbol = ptc.tool_call.arguments["symbol"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    if path.is_empty() || symbol.is_empty() {
+        return "Error: read_symbol requires 'path' and 'symbol' arguments.".to_string();
+    }
+    let full_path = match validate_tool_path(&path, &ptc.cwd) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let cwd = match get_session_cwd(state, session_id).await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+
+    // Use LSP to find the symbol's line range
+    let (start_line, end_line) = match state
+        .lsp_manager
+        .find_symbol_range(&full_path, &symbol, &cwd)
+        .await
+    {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+
+    // Read the file and extract the relevant lines
+    let content = match tokio::fs::read_to_string(&full_path).await {
+        Ok(c) => c,
+        Err(err) => return format!("Error reading {full_path}: {err}"),
+    };
+
+    let lines: Vec<&str> = content.lines().collect();
+    let start = start_line as usize;
+    let end = (end_line as usize + 1).min(lines.len());
+
+    if start >= lines.len() {
+        return format!("Error: symbol range {start_line}-{end_line} is out of bounds (file has {} lines)", lines.len());
+    }
+
+    // Include a few lines of context before the symbol for imports/attributes
+    let context_before = 2;
+    let effective_start = start.saturating_sub(context_before);
+
+    let mut result = format!("// {full_path} lines {}-{}\n", effective_start + 1, end);
+    for (i, line) in lines[effective_start..end].iter().enumerate() {
+        let line_num = effective_start + i + 1;
+        result.push_str(&format!("{line_num:>5} | {line}\n"));
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// patch_symbol — replace the body of a symbol with new content
+// ---------------------------------------------------------------------------
+
+async fn execute_patch_symbol(
+    state: &ServerState,
+    session_id: Uuid,
+    ptc: &PendingToolCall,
+) -> String {
+    let path = ptc.tool_call.arguments["path"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let symbol = ptc.tool_call.arguments["symbol"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let new_content = ptc.tool_call.arguments["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    if path.is_empty() || symbol.is_empty() {
+        return "Error: patch_symbol requires 'path', 'symbol', and 'content' arguments.".to_string();
+    }
+    if new_content.is_empty() {
+        return "Error: patch_symbol 'content' must not be empty.".to_string();
+    }
+    let full_path = match validate_tool_path(&path, &ptc.cwd) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let cwd = match get_session_cwd(state, session_id).await {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+
+    // Use LSP to find the symbol's line range
+    let (start_line, end_line) = match state
+        .lsp_manager
+        .find_symbol_range(&full_path, &symbol, &cwd)
+        .await
+    {
+        Ok(range) => range,
+        Err(e) => return e,
+    };
+
+    // Read the file
+    let content = match tokio::fs::read_to_string(&full_path).await {
+        Ok(c) => c,
+        Err(err) => return format!("Error reading {full_path}: {err}"),
+    };
+
+    let lines: Vec<&str> = content.lines().collect();
+    let start = start_line as usize;
+    let end = (end_line as usize + 1).min(lines.len());
+
+    if start >= lines.len() {
+        return format!("Error: symbol range {start_line}-{end_line} is out of bounds (file has {} lines)", lines.len());
+    }
+
+    // Save undo state
+    push_undo(state, session_id, &full_path).await;
+
+    // Build the new file content
+    let mut new_file = String::new();
+    // Lines before the symbol
+    for line in &lines[..start] {
+        new_file.push_str(line);
+        new_file.push('\n');
+    }
+    // New symbol content
+    new_file.push_str(&new_content);
+    if !new_content.ends_with('\n') {
+        new_file.push('\n');
+    }
+    // Lines after the symbol
+    for line in &lines[end..] {
+        new_file.push_str(line);
+        new_file.push('\n');
+    }
+    // Preserve original trailing newline behavior
+    if !content.ends_with('\n') && new_file.ends_with('\n') {
+        new_file.pop();
+    }
+
+    match tokio::fs::write(&full_path, &new_file).await {
+        Ok(()) => {
+            let new_lines = new_content.lines().count();
+            let old_lines = end - start;
+            let diff = generate_unified_diff(&content, &new_file, &path, 3);
+            let mut msg = format!(
+                "Patched symbol '{}' in {} (replaced {} lines with {} lines)",
+                symbol, full_path, old_lines, new_lines
+            );
+            if !diff.is_empty() {
+                msg.push_str("\n\n");
+                msg.push_str(&diff);
+            }
+            msg
+        }
+        Err(err) => format!("Error writing {full_path}: {err}"),
     }
 }
 

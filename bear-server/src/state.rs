@@ -107,13 +107,23 @@ Get a structured outline of a file (functions, structs, classes with line ranges
 Arguments: {"path": "string"}
 Auto-approved. Use to understand file structure without reading the entire file.
 
+### 19. read_symbol
+Read just one symbol (function, struct, impl block, class, etc.) from a file using LSP.
+Arguments: {"path": "string", "symbol": "string"}
+Auto-approved. Returns the symbol's source code with line numbers. Much more efficient than read_file for large files — prefer this when you only need one function or type definition. Use lsp_symbols first to discover available symbol names.
+
+### 20. patch_symbol
+Replace an entire symbol (function, struct, etc.) with new content using LSP to locate it.
+Arguments: {"path": "string", "symbol": "string", "content": "string"}
+The content should be the complete new source for the symbol (including signature, body, etc.). The old symbol is replaced entirely. Supports undo. Use when rewriting a function/struct — avoids the need for precise old_text matching in edit_file.
+
 ## Workflow Guidelines
 
 1. **Explore first.** Before making changes, use list_files and search_text to understand the codebase structure and find relevant code. Do not guess file paths or contents.
 
-2. **Read before write.** Always read_file before using edit_file or patch_file so you see the current state. Never edit a file you haven't read in this conversation.
+2. **Read before write.** Always read the code before editing. Use read_symbol to read individual functions/structs instead of read_file when you only need a specific symbol. Never edit a file you haven't read in this conversation.
 
-3. **Prefer surgical edits.** Use edit_file for small, targeted changes. Use patch_file for multi-hunk modifications. Use write_file only for creating new files or when the entire file content must change.
+3. **Prefer surgical edits.** Use edit_file for small, targeted changes. Use patch_symbol to rewrite an entire function or struct. Use patch_file for multi-hunk modifications. Use write_file only for creating new files or when the entire file content must change.
 
 4. **Verify your changes.** After editing code, run the appropriate verification command (e.g. `cargo build`, `npm test`, `python -m pytest`). Fix any errors before moving on.
 
@@ -133,7 +143,7 @@ Auto-approved. Use to understand file structure without reading the entire file.
 
 12. **Use web tools when needed.** Use web_search to find documentation, APIs, or solutions. Use web_fetch to read specific web pages. Prefer authoritative sources.
 
-13. **Use LSP tools for code intelligence.** After editing code, use lsp_diagnostics to check for errors before running a full build. Use lsp_symbols to understand file structure without reading the entire file. Use lsp_hover to inspect types and lsp_references to find usages.
+13. **Use LSP tools for code intelligence.** After editing code, use lsp_diagnostics to check for errors before running a full build. Use lsp_symbols to understand file structure without reading the entire file. Use lsp_hover to inspect types and lsp_references to find usages. Use read_symbol to read specific functions instead of entire files.
 "#;
 
 /// System prompt for read-only subagents. Only includes exploration tools.
@@ -181,6 +191,11 @@ Arguments: {"path": "string", "line": number, "character": number}
 ### 9. lsp_symbols
 Get a structured outline of a file.
 Arguments: {"path": "string"}
+
+### 10. read_symbol
+Read just one symbol (function, struct, impl block, class, etc.) from a file using LSP.
+Arguments: {"path": "string", "symbol": "string"}
+Much more efficient than read_file for large files. Use lsp_symbols first to discover symbol names.
 
 ## Guidelines
 

@@ -255,7 +255,6 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
         if let Some(session) = sessions.get(&session_id) {
             let _ = ws_send(&mut socket, &ServerMessage::ClientState {
                 input_history: session.input_history.clone(),
-                auto_approved: session.auto_approved.iter().cloned().collect(),
             }).await;
         }
     }
@@ -416,14 +415,14 @@ async fn session_worker(
                     text,
                 ).await;
             }
-            ClientMessage::ToolConfirm { tool_call_id, approved } => {
+            ClientMessage::ToolConfirm { tool_call_id, approved, always } => {
                 handle_tool_confirm(
                     &state, session_id, &bus, &mut client_rx,
                     &mut pending, &mut pending_prompt,
                     &mut pending_depth_prompt,
                     &mut tool_queue, &mut tool_depth,
                     &mut depth_limit, &mut bulk_increment,
-                    &tool_call_id, approved,
+                    &tool_call_id, approved, always,
                 ).await;
             }
             ClientMessage::UserPromptResponse { prompt_id, selected } => {
@@ -526,14 +525,6 @@ async fn session_worker(
                 // Remove the bus too
                 state.buses.write().await.remove(&session_id);
                 break;
-            }
-            ClientMessage::AutoApprove { commands } => {
-                let mut sessions = state.sessions.write().await;
-                if let Some(session) = sessions.get_mut(&session_id) {
-                    for cmd in commands {
-                        session.auto_approved.insert(cmd);
-                    }
-                }
             }
             ClientMessage::Interrupt => {
                 // Abort all active subagents on interrupt
@@ -675,9 +666,19 @@ async fn handle_slash_command(
             return true;
         }
         "/allowed" => {
-            bus.send(ServerMessage::Notice {
-                text: "Auto-approved commands are tracked per client. Use /allowed in the client UI.".to_string(),
-            }).await;
+            let sessions = state.sessions.read().await;
+            let text = if let Some(session) = sessions.get(&session_id) {
+                if session.auto_approved.is_empty() {
+                    "No auto-approved commands.".to_string()
+                } else {
+                    let mut cmds: Vec<&String> = session.auto_approved.iter().collect();
+                    cmds.sort();
+                    format!("Auto-approved: {}", cmds.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))
+                }
+            } else {
+                "Session not found.".to_string()
+            };
+            bus.send(ServerMessage::Notice { text }).await;
             return true;
         }
         "/help" => {
@@ -919,7 +920,7 @@ const SUBAGENT_ALLOWED_TOOLS: &[&str] = &[
     "read_file", "list_files", "search_text",
     "web_fetch", "web_search",
     "lsp_diagnostics", "lsp_hover", "lsp_references", "lsp_symbols",
-    "todo_read",
+    "read_symbol", "todo_read",
 ];
 
 /// Execute an approved task plan: run read-only tasks as parallel subagents,
@@ -1558,6 +1559,18 @@ fn extract_shell_commands(cmd_str: &str) -> Vec<String> {
     result
 }
 
+/// Map internal tool names to their user-facing display names.
+/// `read_symbol` → `read_file`, `patch_symbol` → `patch_file`.
+/// This ensures auto-approve, tool cards, and "Always approve" all treat
+/// these as the same tool from the user's perspective.
+fn tool_display_name(name: &str) -> &str {
+    match name {
+        "read_symbol" => "read_file",
+        "patch_symbol" => "patch_file",
+        _ => name,
+    }
+}
+
 /// Pop the next tool call from the queue. For most tools, send a ToolRequest
 /// to the client for confirmation. For `user_prompt_options`, skip the
 /// confirmation step entirely and directly send the UserPrompt.
@@ -1640,6 +1653,48 @@ async fn present_next_tool(
         return;
     }
 
+    // Check the session's auto-approved set (server-side).
+    // For run_command, check each extracted sub-command; for other tools,
+    // check the display name (e.g. read_symbol → read_file).
+    let session_auto_approved = {
+        let sessions = state.sessions.read().await;
+        sessions.get(&session_id)
+            .map(|s| s.auto_approved.clone())
+            .unwrap_or_default()
+    };
+
+    let is_auto_approved = if ptc.tool_call.name == "run_command" {
+        let cmd_str = ptc.tool_call.arguments["command"].as_str().unwrap_or("");
+        let cmds = extract_shell_commands(cmd_str);
+        !cmds.is_empty() && cmds.iter().all(|c| session_auto_approved.contains(c))
+    } else {
+        let display = tool_display_name(&ptc.tool_call.name);
+        session_auto_approved.contains(display)
+    };
+
+    if is_auto_approved {
+        // Send display-only notification to clients
+        let mut display_tc = ptc.tool_call.clone();
+        display_tc.name = tool_display_name(&ptc.tool_call.name).to_string();
+        bus.send(ServerMessage::ToolAutoApproved {
+            tool_call: display_tc,
+        }).await;
+
+        let output = execute_tool(state, session_id, bus, &ptc).await;
+        bus.send(ServerMessage::ToolOutput {
+            tool_call_id: ptc.tool_call.id.clone(),
+            output: output.clone(),
+        }).await;
+        append_tool_result(state, session_id, &ptc.tool_call.name, &output).await;
+        *tool_depth += 1;
+        if !tool_queue.is_empty() {
+            Box::pin(present_next_tool(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
+        } else {
+            invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+        }
+        return;
+    }
+
     // For run_command, extract individual command names from the shell string
     let extracted_commands = if ptc.tool_call.name == "run_command" {
         let cmd_str = ptc.tool_call.arguments["command"]
@@ -1651,8 +1706,12 @@ async fn present_next_tool(
         None
     };
 
+    // Send the tool request with the display name so the client sees
+    // read_symbol as read_file, patch_symbol as patch_file, etc.
+    let mut display_tc = ptc.tool_call.clone();
+    display_tc.name = tool_display_name(&ptc.tool_call.name).to_string();
     bus.send(ServerMessage::ToolRequest {
-        tool_call: ptc.tool_call.clone(),
+        tool_call: display_tc,
         extracted_commands,
     }).await;
     *pending = Some(ptc);
@@ -1676,6 +1735,7 @@ async fn handle_tool_confirm(
     bulk_increment: &mut usize,
     tool_call_id: &str,
     approved: bool,
+    always: bool,
 ) {
     let ptc = match pending.take() {
         Some(p) if p.tool_call.id == tool_call_id => p,
@@ -1687,6 +1747,31 @@ async fn handle_tool_confirm(
             return;
         }
     };
+
+    // "Always approve" — add the display name (or extracted commands for
+    // run_command) to the session's server-side auto-approved set.
+    if always && approved {
+        let display = tool_display_name(&ptc.tool_call.name).to_string();
+        let cmds: Vec<String> = if ptc.tool_call.name == "run_command" {
+            let cmd_str = ptc.tool_call.arguments["command"].as_str().unwrap_or("");
+            let extracted = extract_shell_commands(cmd_str);
+            if extracted.is_empty() { vec![display] } else { extracted }
+        } else {
+            vec![display]
+        };
+        let label = cmds.join("', '");
+        {
+            let mut sessions = state.sessions.write().await;
+            if let Some(session) = sessions.get_mut(&session_id) {
+                for cmd in &cmds {
+                    session.auto_approved.insert(cmd.clone());
+                }
+            }
+        }
+        bus.send(ServerMessage::Notice {
+            text: format!("'{}' will be auto-approved for this session.", label),
+        }).await;
+    }
 
     if !approved {
         let output = "Tool call rejected by user.".to_string();
@@ -1898,7 +1983,7 @@ async fn append_tool_result(state: &ServerState, session_id: Uuid, tool_name: &s
     // read_file gets a 4x higher limit — truncating a file the user explicitly
     // asked to read defeats the purpose and confuses the LLM.
     let limit = match tool_name {
-        "read_file" => state.config.max_tool_output_chars * 4,
+        "read_file" | "read_symbol" => state.config.max_tool_output_chars * 4,
         _ => state.config.max_tool_output_chars,
     };
     let truncated = truncate_tool_output(output, limit);

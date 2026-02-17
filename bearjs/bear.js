@@ -134,7 +134,6 @@ export class BearClient {
     this.toolConfirmCall = null;
     this.toolConfirmIdx = 0;
     this.toolConfirmRendered = false;
-    this.autoApproved = new Set();
     this._lastExtractedCommands = [];
 
     // Session picker state
@@ -471,7 +470,6 @@ export class BearClient {
     this.toolConfirmCall = null;
     this.toolConfirmIdx = 0;
     this.toolConfirmRendered = false;
-    this.autoApproved.clear();
 
     this._cleanup();
 
@@ -655,41 +653,21 @@ export class BearClient {
         const cmds = msg.extracted_commands || [this._extractBaseCommand(tc)];
         this._lastExtractedCommands = cmds;
 
-        const allApproved = cmds.length > 0 && cmds.every(c => this.autoApproved.has(c));
-
-        if (allApproved) {
-          const descLines = formatToolDescription(tc.name, tc.arguments || {});
-          this._pushLine(`${C.gray}  ┌─ ⚡ ${tc.name} ─ (auto-approved)${C.reset}`);
-          for (const line of descLines) {
-            this._pushLine(`${C.gray}  │  ${line}${C.reset}`);
-          }
-          this._pushLine(`${C.gray}  └─${C.reset}`);
-          this._sendJson({ type: 'tool_confirm', tool_call_id: tc.id, approved: true });
-          this._fullRepaint();
-        } else {
-          // Show tool card
-          const descLines = formatToolDescription(tc.name, tc.arguments || {});
-          this._pushLine(`${C.gray}  ┌─ ${C.magenta}⚡ ${tc.name}${C.gray} ─${C.reset}`);
-          for (const line of descLines) {
-            this._pushLine(`${C.gray}  │  ${C.white}${line}${C.reset}`);
-          }
-          if (tc.name === 'run_command' && cmds.length > 0) {
-            const unapproved = cmds.filter(c => !this.autoApproved.has(c));
-            if (unapproved.length > 0) {
-              const cmdList = unapproved.map(c => `'${c}'`).join(' and ');
-              this._pushLine(`${C.gray}  │  ${C.yellow}Requires approval for ${cmdList}${C.reset}`);
-            }
-          }
-          this._pushLine(`${C.gray}  └─${C.reset}`);
-
-          // Enter picker mode
-          this.toolConfirmCall = tc;
-          this.toolConfirmIdx = 0;
-          this.toolConfirmRendered = false;
-          this.inToolConfirm = true;
-          this._playAlert();
-          this._renderToolConfirm();
+        // Show tool card
+        const descLines = formatToolDescription(tc.name, tc.arguments || {});
+        this._pushLine(`${C.gray}  ┌─ ${C.magenta}⚡ ${tc.name}${C.gray} ─${C.reset}`);
+        for (const line of descLines) {
+          this._pushLine(`${C.gray}  │  ${C.white}${line}${C.reset}`);
         }
+        this._pushLine(`${C.gray}  └─${C.reset}`);
+
+        // Enter picker mode
+        this.toolConfirmCall = tc;
+        this.toolConfirmIdx = 0;
+        this.toolConfirmRendered = false;
+        this.inToolConfirm = true;
+        this._playAlert();
+        this._renderToolConfirm();
         break;
       }
 
@@ -735,17 +713,25 @@ export class BearClient {
         break;
 
       case 'client_state':
-        // Sync input history and auto-approved commands from server
         if (Array.isArray(msg.input_history)) {
           this.history = msg.input_history;
           this.historyIdx = -1;
         }
-        if (Array.isArray(msg.auto_approved)) {
-          for (const cmd of msg.auto_approved) {
-            this.autoApproved.add(cmd);
-          }
-        }
         break;
+
+      case 'tool_auto_approved': {
+        const tc = msg.tool_call;
+        this._lastToolName = tc.name;
+        this._lastToolArgs = tc.arguments || {};
+        const descLines = formatToolDescription(tc.name, tc.arguments || {});
+        this._pushLine(`${C.gray}  ┌─ ⚡ ${tc.name} ─ (auto-approved)${C.reset}`);
+        for (const line of descLines) {
+          this._pushLine(`${C.gray}  │  ${line}${C.reset}`);
+        }
+        this._pushLine(`${C.gray}  └─${C.reset}`);
+        this._fullRepaint();
+        break;
+      }
 
       case 'notice':
         this._pushLine(`${C.yellow}[notice] ${msg.text}${C.reset}`);
@@ -1115,21 +1101,15 @@ export class BearClient {
     const removeCount = 4; // 3 options + hint
     for (let i = 0; i < removeCount; i++) this._outputLines.pop();
 
-    if (idx === 2) {
-      for (const cmd of cmds) this.autoApproved.add(cmd);
-      const label = cmds.map(c => `'${c}'`).join(', ');
-      this._pushLine(`${C.yellow}  ${label} will be auto-approved for this session.${C.reset}`);
-      // Notify server so other clients get the same auto-approved set
-      this._sendJson({ type: 'auto_approve', commands: cmds });
-    }
+    const always = idx === 2;
 
     const verdict = approved
-      ? `${C.green}  ✓ Approved${C.reset}`
+      ? (always ? `${C.yellow}  ✓ Always approved${C.reset}` : `${C.green}  ✓ Approved${C.reset}`)
       : `${C.red}  ✗ Denied${C.reset}`;
     this._pushLine(verdict);
     this._pushLine('');
 
-    this._sendJson({ type: 'tool_confirm', tool_call_id: tc.id, approved });
+    this._sendJson({ type: 'tool_confirm', tool_call_id: tc.id, approved, always });
     this._fullRepaint();
   }
 
@@ -1264,15 +1244,7 @@ export class BearClient {
       return;
     }
 
-    if (text === '/allowed') {
-      if (this.autoApproved.size === 0) {
-        this._pushLine(`${C.gray}  No auto-approved commands.${C.reset}`);
-      } else {
-        this._pushLine(`${C.white}  Auto-approved: ${[...this.autoApproved].sort().join(', ')}${C.reset}`);
-      }
-      this._fullRepaint();
-      return;
-    }
+    // /allowed is handled server-side as a slash command
 
     if (text === '/end') {
       if (this._isConnected()) this._sendJson({ type: 'session_end' });

@@ -20,8 +20,6 @@ pub enum RenderCmd {
     Error(String),
     ToolRequest {
         tool_call_id: String,
-        base_command: String,
-        extracted_commands: Vec<String>,
         name: String,
         args: String,
     },
@@ -36,7 +34,7 @@ pub enum RenderCmd {
         multi: bool,
     },
     SessionRenamed(String),
-    ClientState { input_history: Vec<String>, auto_approved: Vec<String> },
+    ClientState { input_history: Vec<String> },
     TaskPlan {
         plan_id: String,
         tasks: Vec<(String, String, bool)>, // (id, description, needs_write)
@@ -72,13 +70,10 @@ pub enum TermEvent {
     UserLine(String),
     ToolConfirmResult {
         tool_call_id: String,
-        base_command: String,
-        extracted_commands: Vec<String>,
         choice: ToolConfirmChoice,
     },
     UserPromptResult { prompt_id: String, selected: Vec<usize> },
     TaskPlanResult { plan_id: String, approved: bool },
-    AutoApprove { commands: Vec<String> },
     Interrupt,
     Quit,
 }
@@ -123,10 +118,10 @@ pub fn spawn_terminal_thread(
                             state.cleanup();
                             return;
                         }
-                        if let RenderCmd::ToolRequest { tool_call_id, base_command, extracted_commands, name, args } = cmd {
+                        if let RenderCmd::ToolRequest { tool_call_id, name, args, .. } = cmd {
                             let choice = state.run_tool_confirm_picker(&name, &args);
                             let _ = rt.block_on(event_tx.send(
-                                TermEvent::ToolConfirmResult { tool_call_id, base_command, extracted_commands, choice },
+                                TermEvent::ToolConfirmResult { tool_call_id, choice },
                             ));
                             state.full_repaint();
                             continue;
@@ -312,6 +307,16 @@ pub fn format_tool_description(name: &str, args: &serde_json::Value) -> Vec<Stri
         "patch_file" => {
             let path = args["path"].as_str().unwrap_or("(unknown)");
             vec![format!("Patching: {path}")]
+        }
+        "read_symbol" => {
+            let path = args["path"].as_str().unwrap_or("(unknown)");
+            let symbol = args["symbol"].as_str().unwrap_or("(unknown)");
+            vec![format!("Reading symbol: {symbol} in {path}")]
+        }
+        "patch_symbol" => {
+            let path = args["path"].as_str().unwrap_or("(unknown)");
+            let symbol = args["symbol"].as_str().unwrap_or("(unknown)");
+            vec![format!("Patching symbol: {symbol} in {path}")]
         }
         "list_files" => {
             let path = args["path"].as_str().unwrap_or(".");
@@ -1082,7 +1087,7 @@ impl TermState {
                 self.session_name = name;
                 self.full_repaint();
             }
-            RenderCmd::ClientState { input_history, auto_approved: _ } => {
+            RenderCmd::ClientState { input_history } => {
                 // Replace local history with server-side shared history
                 self.history = input_history;
                 self.history_idx = None;
