@@ -734,6 +734,19 @@ export class BearClient {
         this._fullRepaint();
         break;
 
+      case 'client_state':
+        // Sync input history and auto-approved commands from server
+        if (Array.isArray(msg.input_history)) {
+          this.history = msg.input_history;
+          this.historyIdx = -1;
+        }
+        if (Array.isArray(msg.auto_approved)) {
+          for (const cmd of msg.auto_approved) {
+            this.autoApproved.add(cmd);
+          }
+        }
+        break;
+
       case 'notice':
         this._pushLine(`${C.yellow}[notice] ${msg.text}${C.reset}`);
         this._fullRepaint();
@@ -1051,6 +1064,8 @@ export class BearClient {
       for (const cmd of cmds) this.autoApproved.add(cmd);
       const label = cmds.map(c => `'${c}'`).join(', ');
       this._pushLine(`${C.yellow}  ${label} will be auto-approved for this session.${C.reset}`);
+      // Notify server so other clients get the same auto-approved set
+      this._sendJson({ type: 'auto_approve', commands: cmds });
     }
 
     const verdict = approved

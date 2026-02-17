@@ -138,6 +138,8 @@ async fn create_session(
         }],
         undo_stack: Vec::new(),
         todo_list: Vec::new(),
+        input_history: Vec::new(),
+        auto_approved: std::collections::HashSet::new(),
     };
 
     let info = session.info.clone();

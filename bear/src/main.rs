@@ -188,7 +188,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
         match event {
             LoopEvent::FromServer(msg) => {
                 if let Some(auto_confirm) = dispatch_server_msg(
-                    &msg, &render_tx, &auto_approved, &mut last_tool, &mut slash_commands,
+                    &msg, &render_tx, &mut auto_approved, &mut last_tool, &mut slash_commands,
                 ) {
                     // Auto-approved tool call — send confirmation immediately
                     let payload = serde_json::to_string(&ClientMessage::ToolConfirm {
@@ -202,12 +202,15 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                 let approved = choice != ToolConfirmChoice::Deny;
                 if choice == ToolConfirmChoice::Always {
                     // Add all extracted commands to auto-approved set
+                    let cmds_to_approve: Vec<String>;
                     if extracted_commands.is_empty() {
                         auto_approved.insert(base_command.clone());
+                        cmds_to_approve = vec![base_command.clone()];
                         let _ = render_tx.send(RenderCmd::Notice(
                             format!("'{}' will be auto-approved for this session.", base_command),
                         ));
                     } else {
+                        cmds_to_approve = extracted_commands.clone();
                         for cmd in &extracted_commands {
                             auto_approved.insert(cmd.clone());
                         }
@@ -216,6 +219,11 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                             format!("'{}' will be auto-approved for this session.", label),
                         ));
                     }
+                    // Notify server so other clients get the same auto-approved set
+                    let ap_payload = serde_json::to_string(&ClientMessage::AutoApprove {
+                        commands: cmds_to_approve,
+                    })?;
+                    ws_write.send(Message::Text(ap_payload)).await?;
                 }
                 let payload = serde_json::to_string(&ClientMessage::ToolConfirm {
                     tool_call_id,
@@ -375,6 +383,13 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                 )?;
                 ws_write.send(Message::Text(payload)).await?;
             }
+            LoopEvent::FromTerm(TermEvent::AutoApprove { commands }) => {
+                for cmd in &commands {
+                    auto_approved.insert(cmd.clone());
+                }
+                let payload = serde_json::to_string(&ClientMessage::AutoApprove { commands })?;
+                ws_write.send(Message::Text(payload)).await?;
+            }
             LoopEvent::FromTerm(TermEvent::Quit) => {
                 let _ = render_tx.send(RenderCmd::Quit);
                 drop(render_tx);
@@ -421,7 +436,7 @@ fn extract_base_command(tool_call: &ToolCall) -> String {
 fn dispatch_server_msg(
     msg: &ServerMessage,
     render_tx: &std_mpsc::Sender<RenderCmd>,
-    auto_approved: &HashSet<String>,
+    auto_approved: &mut HashSet<String>,
     last_tool: &mut (String, serde_json::Value),
     slash_commands: &mut Vec<(String, String)>,
 ) -> Option<String> {
@@ -538,6 +553,17 @@ fn dispatch_server_msg(
         }
         ServerMessage::Thinking => {
             let _ = render_tx.send(RenderCmd::Thinking);
+        }
+        ServerMessage::ClientState { input_history, auto_approved: server_approved } => {
+            // Sync auto-approved commands from server
+            for cmd in server_approved {
+                auto_approved.insert(cmd.clone());
+            }
+            // Send input history + auto_approved to terminal thread
+            let _ = render_tx.send(RenderCmd::ClientState {
+                input_history: input_history.clone(),
+                auto_approved: server_approved.clone(),
+            });
         }
         ServerMessage::Pong => {}
     }

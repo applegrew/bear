@@ -298,6 +298,18 @@ async fn handle_data_channel(
     // Send initial messages
     let _ = dc_send_msg(&dc, &ServerMessage::SessionInfo { session: info.clone() }).await;
     let _ = dc_send_msg(&dc, &ServerMessage::SlashCommands { commands: slash_command_infos() }).await;
+
+    // Send shared client state (input history + auto-approved commands)
+    {
+        let sessions = state.sessions.read().await;
+        if let Some(session) = sessions.get(&session_id) {
+            let _ = dc_send_msg(&dc, &ServerMessage::ClientState {
+                input_history: session.input_history.clone(),
+                auto_approved: session.auto_approved.iter().cloned().collect(),
+            }).await;
+        }
+    }
+
     let _ = dc_send_msg(&dc, &ServerMessage::Notice {
         text: format!(
             "Session persists after clients disconnect. Working directory is {}.",

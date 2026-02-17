@@ -91,6 +91,8 @@ pub enum ClientMessage {
     SessionWorkdir { path: String },
     SessionEnd,
     Interrupt,
+    /// Client tells the server that one or more commands have been auto-approved.
+    AutoApprove { commands: Vec<String> },
     Ping,
 }
 
@@ -125,6 +127,12 @@ pub enum ServerMessage {
         multi: bool,
     },
     SessionRenamed { name: String },
+    /// Sent on connect to synchronise client-side state (input history,
+    /// auto-approved commands) so that any client can resume seamlessly.
+    ClientState {
+        input_history: Vec<String>,
+        auto_approved: Vec<String>,
+    },
     Notice { text: String },
     Error { text: String },
     Thinking,

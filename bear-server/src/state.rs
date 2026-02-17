@@ -160,6 +160,10 @@ pub struct Session {
     pub history: Vec<OllamaMessage>,
     pub undo_stack: Vec<UndoEntry>,
     pub todo_list: Vec<TodoItem>,
+    /// User input history (shared across all clients connected to this session).
+    pub input_history: Vec<String>,
+    /// Commands auto-approved by any client (shared across all clients).
+    pub auto_approved: std::collections::HashSet<String>,
 }
 
 // ---------------------------------------------------------------------------

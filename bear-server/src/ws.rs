@@ -183,6 +183,18 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
     let _ = ws_send(&mut socket, &ServerMessage::SlashCommands {
         commands: slash_command_infos(),
     }).await;
+
+    // Send shared client state (input history + auto-approved commands)
+    {
+        let sessions = state.sessions.read().await;
+        if let Some(session) = sessions.get(&session_id) {
+            let _ = ws_send(&mut socket, &ServerMessage::ClientState {
+                input_history: session.input_history.clone(),
+                auto_approved: session.auto_approved.iter().cloned().collect(),
+            }).await;
+        }
+    }
+
     let _ = ws_send(&mut socket, &ServerMessage::Notice {
         text: format!(
             "Session persists after clients disconnect. Working directory is {}.",
@@ -308,6 +320,15 @@ async fn session_worker(
     while let Some(client_msg) = client_rx.recv().await {
         match client_msg {
             ClientMessage::Input { text } => {
+                // Record input to shared history
+                {
+                    let mut sessions = state.sessions.write().await;
+                    if let Some(session) = sessions.get_mut(&session_id) {
+                        if session.input_history.last().map(|s| s.as_str()) != Some(&text) {
+                            session.input_history.push(text.clone());
+                        }
+                    }
+                }
                 tool_depth = 0;
                 depth_limit = state.config.max_tool_depth;
                 bulk_increment = 50;
@@ -402,6 +423,14 @@ async fn session_worker(
                 // Remove the bus too
                 state.buses.write().await.remove(&session_id);
                 break;
+            }
+            ClientMessage::AutoApprove { commands } => {
+                let mut sessions = state.sessions.write().await;
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    for cmd in commands {
+                        session.auto_approved.insert(cmd);
+                    }
+                }
             }
             ClientMessage::Interrupt => {
                 // No-op outside of streaming — handled inside invoke_llm

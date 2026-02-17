@@ -36,6 +36,7 @@ pub enum RenderCmd {
         multi: bool,
     },
     SessionRenamed(String),
+    ClientState { input_history: Vec<String>, auto_approved: Vec<String> },
     Thinking,
     Quit,
 }
@@ -60,6 +61,7 @@ pub enum TermEvent {
         choice: ToolConfirmChoice,
     },
     UserPromptResult { prompt_id: String, selected: Vec<usize> },
+    AutoApprove { commands: Vec<String> },
     Interrupt,
     Quit,
 }
@@ -1043,6 +1045,12 @@ impl TermState {
             RenderCmd::SessionRenamed(name) => {
                 self.session_name = name;
                 self.full_repaint();
+            }
+            RenderCmd::ClientState { input_history, auto_approved: _ } => {
+                // Replace local history with server-side shared history
+                self.history = input_history;
+                self.history_idx = None;
+                // auto_approved is handled in main.rs
             }
             RenderCmd::Thinking => {
                 self.streaming = true;
