@@ -124,7 +124,6 @@ pub enum ServerMessage {
         tool_call: ToolCall,
         /// For `run_command` tool calls, the list of individual command names
         /// extracted from the shell string (e.g. `["cd", "rm"]` for `cd . && rm .`).
-        /// Clients use this to check each command against their auto-approved set.
         #[serde(skip_serializing_if = "Option::is_none")]
         extracted_commands: Option<Vec<String>>,
     },
@@ -171,6 +170,17 @@ pub enum ServerMessage {
         status: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+    },
+    /// A pending tool confirmation was resolved (approved/denied) by another
+    /// client. Clients showing a picker for this tool_call_id should dismiss it.
+    ToolResolved {
+        tool_call_id: String,
+        approved: bool,
+    },
+    /// A pending user prompt was resolved by another client.
+    /// Clients showing a picker for this prompt_id should dismiss it.
+    PromptResolved {
+        prompt_id: String,
     },
     Notice { text: String },
     Error { text: String },

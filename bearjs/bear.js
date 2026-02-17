@@ -733,6 +733,41 @@ export class BearClient {
         break;
       }
 
+      case 'tool_resolved':
+        // Another client resolved the tool confirmation — dismiss our picker
+        if (this.inToolConfirm && this.toolConfirmCall && this.toolConfirmCall.id === msg.tool_call_id) {
+          this.inToolConfirm = false;
+          this.toolConfirmCall = null;
+          // Remove picker lines (3 options + hint)
+          for (let i = 0; i < 4; i++) this._outputLines.pop();
+          const label = msg.approved
+            ? `${C.green}  ✓ Approved (by another client)${C.reset}`
+            : `${C.red}  ✗ Denied (by another client)${C.reset}`;
+          this._pushLine(label);
+          this._pushLine('');
+          this._fullRepaint();
+        }
+        break;
+
+      case 'prompt_resolved': {
+        // Another client resolved a user prompt or task plan — dismiss our picker.
+        // Task plan prompts use `__taskplan__<plan_id>` as the userPromptId.
+        const matchesPrompt = this.inUserPrompt && (
+          this.userPromptId === msg.prompt_id ||
+          this.userPromptId === `__taskplan__${msg.prompt_id}`
+        );
+        if (matchesPrompt) {
+          this.inUserPrompt = false;
+          // Remove prompt picker lines
+          const removeCount = this.userPromptOptions.length + 1; // options + hint
+          for (let i = 0; i < removeCount; i++) this._outputLines.pop();
+          this._pushLine(`${C.gray}  (resolved by another client)${C.reset}`);
+          this._pushLine('');
+          this._fullRepaint();
+        }
+        break;
+      }
+
       case 'notice':
         this._pushLine(`${C.yellow}[notice] ${msg.text}${C.reset}`);
         this._fullRepaint();

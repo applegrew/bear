@@ -435,6 +435,7 @@ async fn session_worker(
                             &mut tool_queue, &mut tool_depth,
                             &mut depth_limit, &mut bulk_increment,
                             &budget,
+                            &prompt_id,
                             selected,
                         ).await;
                     } else {
@@ -454,6 +455,10 @@ async fn session_worker(
             ClientMessage::TaskPlanResponse { plan_id, approved } => {
                 if let Some(plan) = pending_task_plan.take() {
                     if plan.plan_id == plan_id {
+                        // Broadcast resolution so all other clients dismiss their pickers.
+                        bus.send(ServerMessage::PromptResolved {
+                            prompt_id: plan_id.clone(),
+                        }).await;
                         if approved {
                             bus.send(ServerMessage::Notice {
                                 text: "Task plan approved. Starting execution…".to_string(),
@@ -1741,12 +1746,17 @@ async fn handle_tool_confirm(
         Some(p) if p.tool_call.id == tool_call_id => p,
         other => {
             *pending = other;
-            bus.send(ServerMessage::Error {
-                text: "no matching pending tool call".to_string(),
-            }).await;
+            // Silently ignore stale confirms (e.g. from a second client
+            // responding after the first already resolved the prompt).
             return;
         }
     };
+
+    // Broadcast resolution so all other clients dismiss their pickers.
+    bus.send(ServerMessage::ToolResolved {
+        tool_call_id: tool_call_id.to_string(),
+        approved,
+    }).await;
 
     // "Always approve" — add the display name (or extracted commands for
     // run_command) to the session's server-side auto-approved set.
@@ -1827,12 +1837,15 @@ async fn handle_prompt_response(
         Some(p) if p.prompt_id == prompt_id => p,
         other => {
             *pending_prompt = other;
-            bus.send(ServerMessage::Error {
-                text: "no matching pending prompt".to_string(),
-            }).await;
+            // Silently ignore stale prompt responses.
             return;
         }
     };
+
+    // Broadcast resolution so all other clients dismiss their pickers.
+    bus.send(ServerMessage::PromptResolved {
+        prompt_id: prompt_id.to_string(),
+    }).await;
 
     // Build the tool output from the user's selection
     let selected_labels: Vec<String> = selected
@@ -1885,8 +1898,14 @@ async fn handle_depth_prompt_response(
     depth_limit: &mut usize,
     bulk_increment: &mut usize,
     budget: &ToolBudget,
+    prompt_id: &str,
     selected: Vec<usize>,
 ) {
+    // Broadcast resolution so all other clients dismiss their pickers.
+    bus.send(ServerMessage::PromptResolved {
+        prompt_id: prompt_id.to_string(),
+    }).await;
+
     let choice = selected.first().copied().unwrap_or(2); // default to "No"
 
     match choice {

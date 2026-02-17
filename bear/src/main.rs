@@ -495,6 +495,17 @@ fn dispatch_server_msg(
                 detail: detail.clone(),
             });
         }
+        ServerMessage::ToolResolved { tool_call_id, approved } => {
+            let _ = render_tx.send(RenderCmd::ToolResolved {
+                tool_call_id: tool_call_id.clone(),
+                approved: *approved,
+            });
+        }
+        ServerMessage::PromptResolved { prompt_id } => {
+            let _ = render_tx.send(RenderCmd::PromptResolved {
+                prompt_id: prompt_id.clone(),
+            });
+        }
         ServerMessage::Pong => {}
     }
 }

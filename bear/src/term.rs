@@ -23,6 +23,10 @@ pub enum RenderCmd {
         name: String,
         args: String,
     },
+    /// Another client resolved this tool confirmation — dismiss picker.
+    ToolResolved { tool_call_id: String, approved: bool },
+    /// Another client resolved this prompt — dismiss picker.
+    PromptResolved { prompt_id: String },
     ToolOutput { tool_name: String, tool_args: serde_json::Value, output: String },
     ProcessEvent(String),
     SessionInfo(String, String),
@@ -112,55 +116,70 @@ pub fn spawn_terminal_thread(
         loop {
             // Drain render commands
             loop {
-                match render_rx.try_recv() {
-                    Ok(cmd) => {
-                        if matches!(cmd, RenderCmd::Quit) {
+                // Process any deferred commands from a previous blocking picker first
+                let next_cmd = if !state.deferred_cmds.is_empty() {
+                    Some(state.deferred_cmds.remove(0))
+                } else {
+                    match render_rx.try_recv() {
+                        Ok(cmd) => Some(cmd),
+                        Err(std_mpsc::TryRecvError::Empty) => None,
+                        Err(std_mpsc::TryRecvError::Disconnected) => {
                             state.cleanup();
                             return;
                         }
-                        if let RenderCmd::ToolRequest { tool_call_id, name, args, .. } = cmd {
-                            let choice = state.run_tool_confirm_picker(&name, &args);
-                            let _ = rt.block_on(event_tx.send(
-                                TermEvent::ToolConfirmResult { tool_call_id, choice },
-                            ));
-                            state.full_repaint();
-                            continue;
-                        }
-                        if let RenderCmd::UserPrompt { prompt_id, question, options, multi } = cmd {
-                            let selected = state.run_inline_menu(&question, &options, multi);
-                            let _ = rt.block_on(event_tx.send(
-                                TermEvent::UserPromptResult { prompt_id, selected },
-                            ));
-                            state.full_repaint();
-                            continue;
-                        }
-                        if let RenderCmd::TaskPlan { plan_id, tasks } = cmd {
-                            // Render the plan
-                            state.push_line("");
-                            state.push_line(&format!("  {} Proposed task plan:", a_cyan("📋")));
-                            for (id, desc, needs_write) in &tasks {
-                                let tag = if *needs_write { a_yellow("[write]") } else { a_green("[read]") };
-                                state.push_line(&format!("    {} {} {}", a_gray(&format!("{}.", id)), tag, desc));
-                            }
-                            state.push_line("");
-                            // Use the existing inline menu for approval
-                            let options = vec!["Approve".to_string(), "Reject".to_string()];
-                            let selected = state.run_inline_menu("Execute this plan?", &options, false);
-                            let approved = selected.first().copied() == Some(0);
-                            let _ = rt.block_on(event_tx.send(
-                                TermEvent::TaskPlanResult { plan_id, approved },
-                            ));
-                            state.full_repaint();
-                            continue;
-                        }
-                        state.handle_render(cmd);
                     }
-                    Err(std_mpsc::TryRecvError::Empty) => break,
-                    Err(std_mpsc::TryRecvError::Disconnected) => {
-                        state.cleanup();
-                        return;
-                    }
+                };
+
+                let Some(cmd) = next_cmd else { break };
+
+                if matches!(cmd, RenderCmd::Quit) {
+                    state.cleanup();
+                    return;
                 }
+                if let RenderCmd::ToolRequest { tool_call_id, name, args, .. } = cmd {
+                    if let Some(choice) = state.run_tool_confirm_picker(&render_rx, &tool_call_id, &name, &args) {
+                        let _ = rt.block_on(event_tx.send(
+                            TermEvent::ToolConfirmResult { tool_call_id, choice },
+                        ));
+                    }
+                    // else: resolved by another client, no event to send
+                    state.full_repaint();
+                    continue;
+                }
+                if let RenderCmd::UserPrompt { prompt_id, question, options, multi } = cmd {
+                    if let Some(selected) = state.run_inline_menu(&render_rx, Some(&prompt_id), &question, &options, multi) {
+                        let _ = rt.block_on(event_tx.send(
+                            TermEvent::UserPromptResult { prompt_id, selected },
+                        ));
+                    }
+                    state.full_repaint();
+                    continue;
+                }
+                if let RenderCmd::TaskPlan { plan_id, tasks } = cmd {
+                    // Render the plan
+                    state.push_line("");
+                    state.push_line(&format!("  {} Proposed task plan:", a_cyan("📋")));
+                    for (id, desc, needs_write) in &tasks {
+                        let tag = if *needs_write { a_yellow("[write]") } else { a_green("[read]") };
+                        state.push_line(&format!("    {} {} {}", a_gray(&format!("{}.", id)), tag, desc));
+                    }
+                    state.push_line("");
+                    // Use the existing inline menu for approval
+                    let options = vec!["Approve".to_string(), "Reject".to_string()];
+                    if let Some(selected) = state.run_inline_menu(&render_rx, None, "Execute this plan?", &options, false) {
+                        let approved = selected.first().copied() == Some(0);
+                        let _ = rt.block_on(event_tx.send(
+                            TermEvent::TaskPlanResult { plan_id, approved },
+                        ));
+                    }
+                    state.full_repaint();
+                    continue;
+                }
+                // Ignore stale resolution messages that arrive outside of a picker
+                if matches!(cmd, RenderCmd::ToolResolved { .. } | RenderCmd::PromptResolved { .. }) {
+                    continue;
+                }
+                state.handle_render(cmd);
             }
 
             // Advance spinner
@@ -281,6 +300,9 @@ struct TermState {
     dropdown_idx: Option<usize>,
     last_dropdown_count: usize,
     slash_commands: Vec<(String, String)>,
+
+    /// Commands received during a blocking picker that need to be processed later.
+    deferred_cmds: Vec<RenderCmd>,
 }
 
 /// Format a tool call into human-readable description lines for the card UI.
@@ -457,6 +479,7 @@ impl TermState {
             dropdown_idx: None,
             last_dropdown_count: 0,
             slash_commands: Vec::new(),
+            deferred_cmds: Vec::new(),
         })
     }
 
@@ -870,7 +893,13 @@ impl TermState {
     // Tool confirm picker (blocking, renders directly)
     // -----------------------------------------------------------------------
 
-    fn run_tool_confirm_picker(&mut self, name: &str, args: &str) -> ToolConfirmChoice {
+    fn run_tool_confirm_picker(
+        &mut self,
+        render_rx: &std_mpsc::Receiver<RenderCmd>,
+        tool_call_id: &str,
+        name: &str,
+        args: &str,
+    ) -> Option<ToolConfirmChoice> {
         // Show tool card in output buffer
         let args_val: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
         let desc = format_tool_description(name, &args_val);
@@ -902,6 +931,21 @@ impl TermState {
         let _ = io::stdout().flush();
 
         loop {
+            // Check if another client already resolved this tool confirmation
+            if let Ok(cmd) = render_rx.try_recv() {
+                if let RenderCmd::ToolResolved { tool_call_id: resolved_id, approved } = &cmd {
+                    if resolved_id == tool_call_id {
+                        self.output_lines.truncate(picker_start);
+                        let label = if *approved { a_green("Approved (by another client)") } else { a_red("Denied (by another client)") };
+                        self.push_line(&format!("  {} {}", a_yellow("❯"), label));
+                        self.push_line("");
+                        return None; // resolved externally
+                    }
+                }
+                // Queue other commands for later processing
+                self.deferred_cmds.push(cmd);
+            }
+
             if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
                 if let Ok(Event::Key(key)) = event::read() {
                     match key.code {
@@ -917,11 +961,11 @@ impl TermState {
                             let chosen_label = choices[idx];
                             self.push_line(&format!("  {} {}", a_yellow("❯"), colors[idx](chosen_label)));
                             self.push_line("");
-                            return match idx {
+                            return Some(match idx {
                                 0 => ToolConfirmChoice::Approve,
                                 1 => ToolConfirmChoice::Deny,
                                 _ => ToolConfirmChoice::Always,
-                            };
+                            });
                         }
                         _ => continue,
                     }
@@ -945,7 +989,14 @@ impl TermState {
     // User prompt (blocking inline menu)
     // -----------------------------------------------------------------------
 
-    fn run_inline_menu(&mut self, question: &str, options: &[String], multi: bool) -> Vec<usize> {
+    fn run_inline_menu(
+        &mut self,
+        render_rx: &std_mpsc::Receiver<RenderCmd>,
+        prompt_id: Option<&str>,
+        question: &str,
+        options: &[String],
+        multi: bool,
+    ) -> Option<Vec<usize>> {
         self.push_line(&format!("  {}", a_cyan(question)));
         self.push_line("");
 
@@ -981,6 +1032,22 @@ impl TermState {
         let _ = io::stdout().flush();
 
         loop {
+            // Check if another client already resolved this prompt
+            if let Ok(cmd) = render_rx.try_recv() {
+                if let Some(pid) = prompt_id {
+                    if let RenderCmd::PromptResolved { prompt_id: resolved_id } = &cmd {
+                        if resolved_id == pid {
+                            self.output_lines.truncate(menu_start);
+                            self.push_line(&format!("  {}", a_gray("(resolved by another client)")));
+                            self.push_line("");
+                            return None;
+                        }
+                    }
+                }
+                // Queue other commands for later processing
+                self.deferred_cmds.push(cmd);
+            }
+
             if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
                 if let Ok(Event::Key(key)) = event::read() {
                     match key.code {
@@ -997,11 +1064,11 @@ impl TermState {
                                     }
                                 }
                                 self.push_line("");
-                                return sel;
+                                return Some(sel);
                             } else {
                                 self.push_line(&format!("  {} {}", a_yellow("❯"), a_white(&options[idx])));
                                 self.push_line("");
-                                return vec![idx];
+                                return Some(vec![idx]);
                             }
                         }
                         _ => continue,
@@ -1138,6 +1205,8 @@ impl TermState {
                 self.full_repaint();
             }
             RenderCmd::UserPrompt { .. } => {}
+            RenderCmd::ToolResolved { .. } => {}
+            RenderCmd::PromptResolved { .. } => {}
             RenderCmd::Quit => {}
         }
     }
