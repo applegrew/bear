@@ -1,13 +1,15 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
-use bear_core::{ClientMessage, ProcessInfo, ServerMessage, SlashCommandInfo, ToolCall};
+use bear_core::{ClientMessage, ProcessInfo, ServerMessage, SlashCommandInfo, TaskItem, ToolCall};
 use futures::{SinkExt, StreamExt};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use uuid::Uuid;
 
-use crate::llm::{call_ollama_streaming, compact_history_if_needed, reflective_thinking, OllamaMessage};
+use crate::llm::{call_ollama_streaming, compact_history_if_needed, plan_task, reflective_thinking, OllamaMessage};
 use crate::process::{cleanup_session_processes, handle_process_kill, handle_process_input};
 use crate::state::{BusSender, PendingToolCall, SessionBus, ServerState};
 use crate::tools::{execute_tool, parse_tool_calls};
@@ -106,6 +108,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/send", "Send stdin to a process (usage: /send <pid> <text>)"),
     ("/session name", "Name the current session (usage: /session name <n>)"),
     ("/session workdir", "Set session working directory (usage: /session workdir <path>)"),
+    ("/session max_subagents", "Set max concurrent subagents (usage: /session max_subagents <count>)"),
     ("/allowed", "Show auto-approved commands"),
     ("/exit", "Disconnect, keep session alive"),
     ("/end", "End session, pick another"),
@@ -133,6 +136,68 @@ struct PendingPrompt {
 /// Tracks a tool-depth continuation prompt waiting for the user's choice.
 struct PendingDepthPrompt {
     prompt_id: String,
+}
+
+/// Tracks a task plan waiting for user approval.
+struct PendingTaskPlan {
+    plan_id: String,
+    tasks: Vec<TaskItem>,
+}
+
+/// Shared tool-call budget across the main agent and all subagents.
+/// All agents check this before making a tool call and pause if exhausted.
+#[derive(Clone)]
+struct ToolBudget {
+    /// Total tool calls made so far (main + all subagents).
+    depth: Arc<AtomicUsize>,
+    /// Current depth limit — bumped when user approves continuation.
+    limit: Arc<AtomicUsize>,
+    /// Set to true when the user says "No" or presses Esc.
+    terminated: Arc<AtomicBool>,
+    /// Notified when the user responds to the depth-limit prompt.
+    resume: Arc<Notify>,
+    /// Set to true when a depth-limit prompt has been sent (prevents duplicates).
+    prompt_sent: Arc<AtomicBool>,
+}
+
+impl ToolBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            depth: Arc::new(AtomicUsize::new(0)),
+            limit: Arc::new(AtomicUsize::new(limit)),
+            terminated: Arc::new(AtomicBool::new(false)),
+            resume: Arc::new(Notify::new()),
+            prompt_sent: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn reset(&self, limit: usize) {
+        self.depth.store(0, Ordering::SeqCst);
+        self.limit.store(limit, Ordering::SeqCst);
+        self.terminated.store(false, Ordering::SeqCst);
+        self.prompt_sent.store(false, Ordering::SeqCst);
+    }
+
+    /// Increment the depth counter. Returns the new value.
+    fn increment(&self) -> usize {
+        self.depth.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn current_depth(&self) -> usize {
+        self.depth.load(Ordering::SeqCst)
+    }
+
+    fn current_limit(&self) -> usize {
+        self.limit.load(Ordering::SeqCst)
+    }
+
+    fn is_terminated(&self) -> bool {
+        self.terminated.load(Ordering::SeqCst)
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.current_depth() >= self.current_limit()
+    }
 }
 
 /// Ensure a session bus exists and a worker is running. Returns the client_tx
@@ -314,8 +379,12 @@ async fn session_worker(
     let mut tool_depth: usize = 0;
     let mut pending_prompt: Option<PendingPrompt> = None;
     let mut pending_depth_prompt: Option<PendingDepthPrompt> = None;
+    let mut pending_task_plan: Option<PendingTaskPlan> = None;
     let mut depth_limit: usize = state.config.max_tool_depth;
     let mut bulk_increment: usize = 50;
+    let budget = ToolBudget::new(state.config.max_tool_depth);
+    // Active subagent JoinHandles — aborted on interrupt.
+    let mut subagent_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     while let Some(client_msg) = client_rx.recv().await {
         match client_msg {
@@ -329,15 +398,21 @@ async fn session_worker(
                         }
                     }
                 }
+                // Abort any active subagents
+                abort_subagents(&mut subagent_handles, &budget, &bus).await;
                 tool_depth = 0;
                 depth_limit = state.config.max_tool_depth;
                 bulk_increment = 50;
+                budget.reset(state.config.max_tool_depth);
+                pending_task_plan = None;
                 handle_user_input(
                     &state, session_id, &bus, &mut client_rx,
                     &mut pending, &mut pending_prompt,
                     &mut pending_depth_prompt,
+                    &mut pending_task_plan,
                     &mut tool_queue, &mut tool_depth,
                     &mut depth_limit, &mut bulk_increment,
+                    &budget, &mut subagent_handles,
                     text,
                 ).await;
             }
@@ -360,6 +435,7 @@ async fn session_worker(
                             &mut pending_depth_prompt,
                             &mut tool_queue, &mut tool_depth,
                             &mut depth_limit, &mut bulk_increment,
+                            &budget,
                             selected,
                         ).await;
                     } else {
@@ -374,6 +450,32 @@ async fn session_worker(
                         &mut depth_limit, &mut bulk_increment,
                         &prompt_id, selected,
                     ).await;
+                }
+            }
+            ClientMessage::TaskPlanResponse { plan_id, approved } => {
+                if let Some(plan) = pending_task_plan.take() {
+                    if plan.plan_id == plan_id {
+                        if approved {
+                            bus.send(ServerMessage::Notice {
+                                text: "Task plan approved. Starting execution…".to_string(),
+                            }).await;
+                            execute_task_plan(
+                                &state, session_id, &bus, &mut client_rx,
+                                &mut pending, &mut pending_prompt,
+                                &mut pending_depth_prompt,
+                                &mut tool_queue, &mut tool_depth,
+                                &mut depth_limit, &mut bulk_increment,
+                                &budget, &mut subagent_handles,
+                                &plan.plan_id, &plan.tasks,
+                            ).await;
+                        } else {
+                            bus.send(ServerMessage::Notice {
+                                text: "Task plan rejected.".to_string(),
+                            }).await;
+                        }
+                    } else {
+                        pending_task_plan = Some(plan);
+                    }
                 }
             }
             ClientMessage::ProcessList => {
@@ -412,6 +514,7 @@ async fn session_worker(
                 handle_session_workdir_cmd(&state, session_id, &bus, &path).await;
             }
             ClientMessage::SessionEnd => {
+                abort_subagents(&mut subagent_handles, &budget, &bus).await;
                 cleanup_session_processes(&state, session_id).await;
                 {
                     let mut sessions = state.sessions.write().await;
@@ -433,7 +536,8 @@ async fn session_worker(
                 }
             }
             ClientMessage::Interrupt => {
-                // No-op outside of streaming — handled inside invoke_llm
+                // Abort all active subagents on interrupt
+                abort_subagents(&mut subagent_handles, &budget, &bus).await;
             }
             ClientMessage::Ping => {
                 // Handled directly in handle_socket, should not reach here
@@ -442,6 +546,22 @@ async fn session_worker(
     }
 
     tracing::info!("session worker exiting for {session_id}");
+}
+
+/// Abort all active subagent tasks and notify them to terminate.
+async fn abort_subagents(
+    handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    budget: &ToolBudget,
+    _bus: &BusSender,
+) {
+    if handles.is_empty() {
+        return;
+    }
+    budget.terminated.store(true, Ordering::SeqCst);
+    budget.resume.notify_waiters();
+    for handle in handles.drain(..) {
+        handle.abort();
+    }
 }
 
 /// Handle /session workdir command (extracted to avoid duplication)
@@ -640,8 +760,29 @@ async fn handle_slash_command(
             return true;
         }
 
+        if let Some(count_str) = rest.strip_prefix("max_subagents ") {
+            let count_str = count_str.trim();
+            match count_str.parse::<usize>() {
+                Ok(n) if n >= 1 => {
+                    let mut sessions = state.sessions.write().await;
+                    if let Some(session) = sessions.get_mut(&session_id) {
+                        session.max_subagents = n;
+                    }
+                    bus.send(ServerMessage::Notice {
+                        text: format!("Max concurrent subagents set to {n}."),
+                    }).await;
+                }
+                _ => {
+                    bus.send(ServerMessage::Error {
+                        text: "Usage: /session max_subagents <count> (must be >= 1)".to_string(),
+                    }).await;
+                }
+            }
+            return true;
+        }
+
         bus.send(ServerMessage::Error {
-            text: "Usage: /session name <session name> OR /session workdir <path>".to_string(),
+            text: "Usage: /session name <n> | /session workdir <path> | /session max_subagents <count>".to_string(),
         }).await;
         return true;
     }
@@ -660,10 +801,13 @@ async fn handle_user_input(
     pending: &mut Option<PendingToolCall>,
     pending_prompt: &mut Option<PendingPrompt>,
     pending_depth_prompt: &mut Option<PendingDepthPrompt>,
+    pending_task_plan: &mut Option<PendingTaskPlan>,
     tool_queue: &mut VecDeque<PendingToolCall>,
     tool_depth: &mut usize,
     depth_limit: &mut usize,
     bulk_increment: &mut usize,
+    _budget: &ToolBudget,
+    _subagent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
     text: String,
 ) {
     if handle_slash_command(state, session_id, bus, &text).await {
@@ -687,7 +831,408 @@ async fn handle_user_input(
         session.history.push(user_msg);
     }
 
+    // --- Task planning: classify the request ---
+    let (history, cwd) = {
+        let sessions = state.sessions.read().await;
+        let Some(session) = sessions.get(&session_id) else {
+            bus.send(ServerMessage::Error { text: "session not found".to_string() }).await;
+            return;
+        };
+        (session.history.clone(), session.info.cwd.clone())
+    };
+    let session_context = format!("Session context:\n- Working directory: {cwd}");
+
+    match plan_task(&state.http_client, &state.config, &history, &session_context).await {
+        Ok(plan_json) => {
+            tracing::info!("planner response: {}", &plan_json[..plan_json.len().min(500)]);
+            if let Some(plan) = parse_task_plan(&plan_json) {
+                if plan.plan_type == "complex_task" && !plan.tasks.is_empty() {
+                    // Send plan to client for approval
+                    let plan_id = format!("plan_{}", Uuid::new_v4());
+                    bus.send(ServerMessage::TaskPlan {
+                        plan_id: plan_id.clone(),
+                        tasks: plan.tasks.clone(),
+                    }).await;
+                    *pending_task_plan = Some(PendingTaskPlan {
+                        plan_id,
+                        tasks: plan.tasks,
+                    });
+                    return;
+                }
+                // question or simple_task — proceed directly
+            }
+            // If parsing failed or not complex, fall through to normal invoke_llm
+        }
+        Err(err) => {
+            tracing::warn!("planner call failed, proceeding without plan: {err}");
+            // Fall through to normal invoke_llm
+        }
+    }
+
     invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+}
+
+/// Parsed result from the planner LLM call.
+struct ParsedPlan {
+    plan_type: String,
+    tasks: Vec<TaskItem>,
+}
+
+/// Parse the planner's JSON response into a structured plan.
+fn parse_task_plan(json_str: &str) -> Option<ParsedPlan> {
+    // The LLM might wrap JSON in markdown code fences — strip them
+    let trimmed = json_str.trim();
+    let clean = if trimmed.starts_with("```") {
+        let inner = trimmed
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+        inner
+    } else {
+        trimmed
+    };
+
+    let val: serde_json::Value = serde_json::from_str(clean).ok()?;
+    let plan_type = val["type"].as_str()?.to_string();
+    let tasks_arr = val["plan"].as_array()?;
+
+    let mut tasks = Vec::new();
+    for item in tasks_arr {
+        let id = item["id"].as_str().unwrap_or("").to_string();
+        let description = item["description"].as_str().unwrap_or("").to_string();
+        let needs_write = item["needs_write"].as_bool().unwrap_or(true);
+        if !description.is_empty() {
+            tasks.push(TaskItem { id, description, needs_write });
+        }
+    }
+
+    Some(ParsedPlan { plan_type, tasks })
+}
+
+// ---------------------------------------------------------------------------
+// Task plan execution
+// ---------------------------------------------------------------------------
+
+/// Read-only tools that subagents are allowed to use.
+const SUBAGENT_ALLOWED_TOOLS: &[&str] = &[
+    "read_file", "list_files", "search_text",
+    "web_fetch", "web_search",
+    "lsp_diagnostics", "lsp_hover", "lsp_references", "lsp_symbols",
+    "todo_read",
+];
+
+/// Execute an approved task plan: run read-only tasks as parallel subagents,
+/// write tasks sequentially via the main agent.
+async fn execute_task_plan(
+    state: &ServerState,
+    session_id: Uuid,
+    bus: &BusSender,
+    client_rx: &mut mpsc::Receiver<ClientMessage>,
+    pending: &mut Option<PendingToolCall>,
+    pending_prompt: &mut Option<PendingPrompt>,
+    pending_depth_prompt: &mut Option<PendingDepthPrompt>,
+    tool_queue: &mut VecDeque<PendingToolCall>,
+    tool_depth: &mut usize,
+    depth_limit: &mut usize,
+    bulk_increment: &mut usize,
+    budget: &ToolBudget,
+    subagent_handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    plan_id: &str,
+    tasks: &[TaskItem],
+) {
+    let max_subagents = {
+        let sessions = state.sessions.read().await;
+        sessions.get(&session_id).map(|s| s.max_subagents).unwrap_or(3)
+    };
+
+    // Collect read-only tasks and write tasks
+    let mut read_tasks: Vec<&TaskItem> = Vec::new();
+    let mut write_tasks: Vec<&TaskItem> = Vec::new();
+    for task in tasks {
+        if task.needs_write {
+            write_tasks.push(task);
+        } else {
+            read_tasks.push(task);
+        }
+    }
+
+    // --- Phase 1: Run read-only tasks as subagents (batched by max_subagents) ---
+    if !read_tasks.is_empty() {
+        for chunk in read_tasks.chunks(max_subagents) {
+            if budget.is_terminated() {
+                break;
+            }
+
+            let mut join_handles = Vec::new();
+            let (result_tx, mut result_rx) = mpsc::channel::<(String, String)>(chunk.len() + 1);
+
+            for task in chunk {
+                bus.send(ServerMessage::TaskProgress {
+                    plan_id: plan_id.to_string(),
+                    task_id: task.id.clone(),
+                    status: "in_progress".to_string(),
+                    detail: None,
+                }).await;
+
+                let subagent_id = format!("sa_{}", Uuid::new_v4());
+                bus.send(ServerMessage::SubagentUpdate {
+                    subagent_id: subagent_id.clone(),
+                    description: task.description.clone(),
+                    status: "running".to_string(),
+                    detail: None,
+                }).await;
+
+                let handle = tokio::spawn(run_subagent(
+                    state.clone(),
+                    session_id,
+                    bus.clone(),
+                    budget.clone(),
+                    subagent_id.clone(),
+                    task.id.clone(),
+                    task.description.clone(),
+                    result_tx.clone(),
+                ));
+                join_handles.push(handle);
+            }
+            // Move real handles into subagent_handles so session_worker can abort them
+            subagent_handles.append(&mut join_handles);
+            drop(result_tx); // drop our copy so result_rx closes when all subagents finish
+
+            // Wait for all subagents in this batch to complete
+            let mut results: Vec<(String, String)> = Vec::new();
+            while let Some((task_id, summary)) = result_rx.recv().await {
+                results.push((task_id, summary));
+            }
+
+            // Mark completed tasks
+            for (task_id, _summary) in &results {
+                bus.send(ServerMessage::TaskProgress {
+                    plan_id: plan_id.to_string(),
+                    task_id: task_id.clone(),
+                    status: "completed".to_string(),
+                    detail: None,
+                }).await;
+            }
+
+            // Inject subagent results into session history as context
+            if !results.is_empty() {
+                let mut context = String::from("[Subagent research results]\n\n");
+                for (task_id, summary) in &results {
+                    context.push_str(&format!("### Task {task_id}\n{summary}\n\n"));
+                }
+                let mut sessions = state.sessions.write().await;
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    session.history.push(OllamaMessage {
+                        role: "user".to_string(),
+                        content: context,
+                    });
+                }
+            }
+
+            subagent_handles.clear();
+        }
+    }
+
+    // --- Phase 2: Run write tasks sequentially via the main agent ---
+    for task in &write_tasks {
+        if budget.is_terminated() {
+            bus.send(ServerMessage::TaskProgress {
+                plan_id: plan_id.to_string(),
+                task_id: task.id.clone(),
+                status: "failed".to_string(),
+                detail: Some("Terminated by user".to_string()),
+            }).await;
+            continue;
+        }
+
+        bus.send(ServerMessage::TaskProgress {
+            plan_id: plan_id.to_string(),
+            task_id: task.id.clone(),
+            status: "in_progress".to_string(),
+            detail: None,
+        }).await;
+
+        // Inject the task description as a user message so the LLM knows what to do
+        {
+            let mut sessions = state.sessions.write().await;
+            if let Some(session) = sessions.get_mut(&session_id) {
+                session.history.push(OllamaMessage {
+                    role: "user".to_string(),
+                    content: format!("[Task {}] {}", task.id, task.description),
+                });
+            }
+        }
+
+        // Run the main agent loop for this task
+        invoke_llm(
+            state, session_id, bus, client_rx,
+            pending, pending_prompt, pending_depth_prompt,
+            tool_queue, tool_depth, depth_limit, bulk_increment,
+        ).await;
+
+        bus.send(ServerMessage::TaskProgress {
+            plan_id: plan_id.to_string(),
+            task_id: task.id.clone(),
+            status: "completed".to_string(),
+            detail: None,
+        }).await;
+    }
+}
+
+/// Run a single read-only subagent: its own LLM loop with restricted tools.
+/// Sends SubagentUpdate messages as it works, and sends the final summary
+/// through `result_tx`.
+async fn run_subagent(
+    state: ServerState,
+    session_id: Uuid,
+    bus: BusSender,
+    budget: ToolBudget,
+    subagent_id: String,
+    task_id: String,
+    task_description: String,
+    result_tx: mpsc::Sender<(String, String)>,
+) {
+    use crate::state::SUBAGENT_SYSTEM_PROMPT;
+
+    let cwd = {
+        let sessions = state.sessions.read().await;
+        sessions.get(&session_id).map(|s| s.info.cwd.clone()).unwrap_or_default()
+    };
+
+    let session_context = format!("Session context:\n- Working directory: {cwd}");
+    let system_content = format!("{SUBAGENT_SYSTEM_PROMPT}\n\n{session_context}");
+
+    let mut history = vec![
+        OllamaMessage {
+            role: "system".to_string(),
+            content: system_content,
+        },
+        OllamaMessage {
+            role: "user".to_string(),
+            content: format!("Your task: {task_description}\n\nExplore the codebase and provide a detailed summary of your findings."),
+        },
+    ];
+
+    let mut full_response = String::new();
+
+    // Subagent LLM loop — up to budget exhaustion
+    for _iteration in 0..50 {
+        if budget.is_terminated() {
+            break;
+        }
+
+        // Check budget before making LLM call
+        if budget.is_exhausted() {
+            // Wait for user to approve continuation
+            budget.resume.notified().await;
+            if budget.is_terminated() {
+                break;
+            }
+        }
+
+        // Non-streaming LLM call for subagent (simpler than streaming)
+        let reply = match crate::llm::call_ollama_non_streaming(
+            &state.http_client, &state.config, &history,
+        ).await {
+            Ok(r) => r,
+            Err(err) => {
+                tracing::warn!("subagent {subagent_id} LLM call failed: {err}");
+                break;
+            }
+        };
+
+        full_response = reply.content.clone();
+        history.push(reply.clone());
+
+        // Parse tool calls from the response
+        let tool_calls = parse_tool_calls(&reply.content);
+        if tool_calls.is_empty() {
+            // No more tool calls — subagent is done
+            break;
+        }
+
+        // Execute each tool call (auto-approved, read-only only)
+        for tc in tool_calls {
+            if budget.is_terminated() {
+                break;
+            }
+
+            // Check budget before each tool call
+            if budget.is_exhausted() {
+                // Signal that we need a depth prompt (only one agent does this)
+                if !budget.prompt_sent.swap(true, Ordering::SeqCst) {
+                    let prompt_id = format!("depth_{}", Uuid::new_v4());
+                    let options = vec![
+                        "Yes".to_string(),
+                        format!("Yes, for next {}", 50),
+                        "No".to_string(),
+                    ];
+                    bus.send(ServerMessage::UserPrompt {
+                        prompt_id: prompt_id.clone(),
+                        question: format!(
+                            "Tool depth limit reached ({} consecutive calls). Continue?",
+                            budget.current_depth(),
+                        ),
+                        options,
+                        multi: false,
+                    }).await;
+                }
+                // Wait for user response
+                budget.resume.notified().await;
+                if budget.is_terminated() {
+                    break;
+                }
+            }
+
+            // Only allow read-only tools
+            if !SUBAGENT_ALLOWED_TOOLS.contains(&tc.name.as_str()) {
+                let output = format!("Error: subagents cannot use tool '{}'. Only read-only tools are allowed.", tc.name);
+                history.push(OllamaMessage {
+                    role: "user".to_string(),
+                    content: format!("[Tool output]:\n{output}"),
+                });
+                continue;
+            }
+
+            bus.send(ServerMessage::SubagentUpdate {
+                subagent_id: subagent_id.clone(),
+                description: task_description.clone(),
+                status: "running".to_string(),
+                detail: Some(format!("{} {}", tc.name, tc.arguments.get("path").and_then(|v| v.as_str()).or_else(|| tc.arguments.get("pattern").and_then(|v| v.as_str())).unwrap_or(""))),
+            }).await;
+
+            let tool_call = ToolCall {
+                id: format!("tc_{}", Uuid::new_v4()),
+                name: tc.name,
+                arguments: tc.arguments,
+            };
+            let ptc = PendingToolCall {
+                tool_call,
+                cwd: cwd.clone(),
+            };
+            let output = execute_tool(&state, session_id, &bus, &ptc).await;
+            budget.increment();
+
+            // Truncate and add to history
+            let truncated = truncate_tool_output(&output, state.config.max_tool_output_chars);
+            history.push(OllamaMessage {
+                role: "user".to_string(),
+                content: format!("[Tool output]:\n{truncated}"),
+            });
+        }
+    }
+
+    // Send completion update
+    bus.send(ServerMessage::SubagentUpdate {
+        subagent_id: subagent_id.clone(),
+        description: task_description,
+        status: if budget.is_terminated() { "failed".to_string() } else { "completed".to_string() },
+        detail: None,
+    }).await;
+
+    // Send result back to parent
+    let _ = result_tx.send((task_id, full_response)).await;
 }
 
 /// Call the LLM with current history, send assistant text, and queue all
@@ -1254,14 +1799,19 @@ async fn handle_depth_prompt_response(
     tool_depth: &mut usize,
     depth_limit: &mut usize,
     bulk_increment: &mut usize,
+    budget: &ToolBudget,
     selected: Vec<usize>,
 ) {
     let choice = selected.first().copied().unwrap_or(2); // default to "No"
 
     match choice {
         0 => {
-            // "Yes" — continue, pause again after 25 more calls
+            // "Yes" — continue, pause again after max_tool_depth more calls
             *depth_limit += state.config.max_tool_depth;
+            budget.limit.store(*depth_limit, Ordering::SeqCst);
+            budget.prompt_sent.store(false, Ordering::SeqCst);
+            // Wake all paused subagents
+            budget.resume.notify_waiters();
             bus.send(ServerMessage::Notice {
                 text: format!("Continuing. Will pause again after {} total calls.", *depth_limit),
             }).await;
@@ -1270,6 +1820,10 @@ async fn handle_depth_prompt_response(
         1 => {
             // "Yes, for next N" — continue, pause after N more calls, increment N
             *depth_limit += *bulk_increment;
+            budget.limit.store(*depth_limit, Ordering::SeqCst);
+            budget.prompt_sent.store(false, Ordering::SeqCst);
+            // Wake all paused subagents
+            budget.resume.notify_waiters();
             bus.send(ServerMessage::Notice {
                 text: format!("Continuing. Will pause again after {} total calls.", *depth_limit),
             }).await;
@@ -1277,7 +1831,9 @@ async fn handle_depth_prompt_response(
             invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
         }
         _ => {
-            // "No" — stop
+            // "No" — stop all agents
+            budget.terminated.store(true, Ordering::SeqCst);
+            budget.resume.notify_waiters();
             bus.send(ServerMessage::Notice {
                 text: "Stopped. Send a new message to continue.".to_string(),
             }).await;

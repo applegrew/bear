@@ -780,6 +780,54 @@ export class BearClient {
         this._renderUserPrompt();
         break;
 
+      case 'task_plan': {
+        // Show proposed task plan and enter confirmation mode
+        this._pushLine('');
+        this._pushLine(`${C.bold}${C.cyan}  📋 Proposed task plan:${C.reset}`);
+        for (const task of msg.tasks) {
+          const tag = task.needs_write
+            ? `${C.yellow}[write]${C.reset}`
+            : `${C.green}[read]${C.reset}`;
+          this._pushLine(`${C.gray}    ${task.id}. ${tag} ${C.white}${task.description}${C.reset}`);
+        }
+        this._pushLine('');
+        // Reuse user prompt picker for approval
+        this.inUserPrompt = true;
+        this.userPromptId = `__taskplan__${msg.plan_id}`;
+        this.userPromptOptions = ['Approve', 'Reject'];
+        this.userPromptMulti = false;
+        this.userPromptIdx = 0;
+        this.userPromptSelected = [false, false];
+        this.userPromptRendered = false;
+        this._pushLine(`${C.bold}${C.cyan}  Execute this plan?${C.reset}`);
+        this._pushLine('');
+        this._playAlert();
+        this._renderUserPrompt();
+        break;
+      }
+
+      case 'task_progress': {
+        const icons = { pending: '○', in_progress: '→', completed: '✓', failed: '✗' };
+        const colors = { pending: C.gray, in_progress: C.yellow, completed: C.green, failed: C.red };
+        const icon = icons[msg.status] || '·';
+        const color = colors[msg.status] || C.gray;
+        const detail = msg.detail ? ` — ${msg.detail}` : '';
+        this._pushLine(`  ${color}${icon} Task ${msg.task_id}${C.reset}${C.gray}${detail}${C.reset}`);
+        this._fullRepaint();
+        break;
+      }
+
+      case 'subagent_update': {
+        const icons = { running: '🔍', completed: '✓', failed: '✗' };
+        const colors = { running: C.cyan, completed: C.green, failed: C.red };
+        const icon = icons[msg.status] || '·';
+        const color = colors[msg.status] || C.gray;
+        const detail = msg.detail ? ` → ${msg.detail}` : '';
+        this._pushLine(`  ${icon} ${color}${msg.description}${C.reset}${C.gray}${detail}${C.reset}`);
+        this._fullRepaint();
+        break;
+      }
+
       case 'pong':
         break;
     }
@@ -1005,7 +1053,14 @@ export class BearClient {
     }
     this._pushLine('');
 
-    this._sendJson({ type: 'user_prompt_response', prompt_id: this.userPromptId, selected });
+    // Check if this is a task plan confirmation (reused prompt picker)
+    if (this.userPromptId && this.userPromptId.startsWith('__taskplan__')) {
+      const planId = this.userPromptId.replace('__taskplan__', '');
+      const approved = selected[0] === 0; // 0 = Approve, 1 = Reject
+      this._sendJson({ type: 'task_plan_response', plan_id: planId, approved });
+    } else {
+      this._sendJson({ type: 'user_prompt_response', prompt_id: this.userPromptId, selected });
+    }
     this._fullRepaint();
   }
 

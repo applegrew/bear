@@ -147,6 +147,7 @@ async fn create_session(
         todo_list: Vec::new(),
         input_history: Vec::new(),
         auto_approved: std::collections::HashSet::new(),
+        max_subagents: 3,
     };
 
     let info = session.info.clone();

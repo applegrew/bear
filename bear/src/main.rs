@@ -383,6 +383,12 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                 )?;
                 ws_write.send(Message::Text(payload)).await?;
             }
+            LoopEvent::FromTerm(TermEvent::TaskPlanResult { plan_id, approved }) => {
+                let payload = serde_json::to_string(
+                    &ClientMessage::TaskPlanResponse { plan_id, approved },
+                )?;
+                ws_write.send(Message::Text(payload)).await?;
+            }
             LoopEvent::FromTerm(TermEvent::AutoApprove { commands }) => {
                 for cmd in &commands {
                     auto_approved.insert(cmd.clone());
@@ -563,6 +569,31 @@ fn dispatch_server_msg(
             let _ = render_tx.send(RenderCmd::ClientState {
                 input_history: input_history.clone(),
                 auto_approved: server_approved.clone(),
+            });
+        }
+        ServerMessage::TaskPlan { plan_id, tasks } => {
+            let task_tuples: Vec<(String, String, bool)> = tasks.iter()
+                .map(|t| (t.id.clone(), t.description.clone(), t.needs_write))
+                .collect();
+            let _ = render_tx.send(RenderCmd::TaskPlan {
+                plan_id: plan_id.clone(),
+                tasks: task_tuples,
+            });
+        }
+        ServerMessage::TaskProgress { plan_id, task_id, status, detail } => {
+            let _ = render_tx.send(RenderCmd::TaskProgress {
+                plan_id: plan_id.clone(),
+                task_id: task_id.clone(),
+                status: status.clone(),
+                detail: detail.clone(),
+            });
+        }
+        ServerMessage::SubagentUpdate { subagent_id, description, status, detail } => {
+            let _ = render_tx.send(RenderCmd::SubagentUpdate {
+                subagent_id: subagent_id.clone(),
+                description: description.clone(),
+                status: status.clone(),
+                detail: detail.clone(),
             });
         }
         ServerMessage::Pong => {}

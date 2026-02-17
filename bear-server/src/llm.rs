@@ -74,6 +74,15 @@ async fn call_ollama(
     Ok(body.message)
 }
 
+/// Public non-streaming Ollama call for use by subagents and other callers.
+pub async fn call_ollama_non_streaming(
+    http_client: &reqwest::Client,
+    config: &AppConfig,
+    messages: &[OllamaMessage],
+) -> anyhow::Result<OllamaMessage> {
+    call_ollama(http_client, config, messages).await
+}
+
 // ---------------------------------------------------------------------------
 // Context compaction
 // ---------------------------------------------------------------------------
@@ -220,6 +229,56 @@ pub async fn reflective_thinking(
         reflective_messages.extend_from_slice(&messages[1..]);
     }
     call_ollama(http_client, config, &reflective_messages).await
+}
+
+// ---------------------------------------------------------------------------
+// Task Planning
+// ---------------------------------------------------------------------------
+
+const PLANNER_PROMPT: &str = r#"You are a task planner for an AI coding assistant called Bear. Given the user's message and conversation history, classify the request and optionally break it into sub-tasks.
+
+You MUST respond with ONLY a JSON object (no markdown, no explanation) in this exact format:
+
+{
+  "type": "question" | "simple_task" | "complex_task",
+  "plan": [
+    { "id": "1", "description": "...", "needs_write": true },
+    { "id": "2", "description": "...", "needs_write": false }
+  ]
+}
+
+Rules:
+- "question": The user is asking a question, seeking information, or wants an explanation. No tools needed. Plan should be empty [].
+- "simple_task": A straightforward task that can be done in a few tool calls (e.g. read a file, run a command, make a small edit). Plan should be empty [].
+- "complex_task": A multi-step task requiring several different actions (e.g. refactor code across files, implement a feature, debug a complex issue). Break it into 2-8 sub-tasks.
+
+For each sub-task:
+- "needs_write": true if the sub-task modifies files, runs commands, or changes state. false if it only reads/searches/explores.
+- Keep descriptions concise but specific.
+- Order tasks logically (exploration first, then modifications).
+
+Examples of "question": "what does this function do?", "explain the architecture", "how should I approach X?"
+Examples of "simple_task": "read src/main.rs", "run cargo build", "fix the typo on line 5"
+Examples of "complex_task": "implement user authentication", "refactor the database layer to use connection pooling", "add tests for all API endpoints""#;
+
+/// Classify a user prompt and optionally produce a task plan.
+/// Returns a JSON string with the classification and plan.
+pub async fn plan_task(
+    http_client: &reqwest::Client,
+    config: &AppConfig,
+    messages: &[OllamaMessage],
+    session_context: &str,
+) -> anyhow::Result<String> {
+    let mut planner_messages = vec![OllamaMessage {
+        role: "system".to_string(),
+        content: format!("{PLANNER_PROMPT}\n\n{session_context}"),
+    }];
+    // Include conversation history (skip original system prompt)
+    if messages.len() > 1 {
+        planner_messages.extend_from_slice(&messages[1..]);
+    }
+    let reply = call_ollama(http_client, config, &planner_messages).await?;
+    Ok(reply.content)
 }
 
 // ---------------------------------------------------------------------------

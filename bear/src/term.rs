@@ -37,6 +37,22 @@ pub enum RenderCmd {
     },
     SessionRenamed(String),
     ClientState { input_history: Vec<String>, auto_approved: Vec<String> },
+    TaskPlan {
+        plan_id: String,
+        tasks: Vec<(String, String, bool)>, // (id, description, needs_write)
+    },
+    TaskProgress {
+        plan_id: String,
+        task_id: String,
+        status: String,
+        detail: Option<String>,
+    },
+    SubagentUpdate {
+        subagent_id: String,
+        description: String,
+        status: String,
+        detail: Option<String>,
+    },
     Thinking,
     Quit,
 }
@@ -61,6 +77,7 @@ pub enum TermEvent {
         choice: ToolConfirmChoice,
     },
     UserPromptResult { prompt_id: String, selected: Vec<usize> },
+    TaskPlanResult { plan_id: String, approved: bool },
     AutoApprove { commands: Vec<String> },
     Interrupt,
     Quit,
@@ -118,6 +135,25 @@ pub fn spawn_terminal_thread(
                             let selected = state.run_inline_menu(&question, &options, multi);
                             let _ = rt.block_on(event_tx.send(
                                 TermEvent::UserPromptResult { prompt_id, selected },
+                            ));
+                            state.full_repaint();
+                            continue;
+                        }
+                        if let RenderCmd::TaskPlan { plan_id, tasks } = cmd {
+                            // Render the plan
+                            state.push_line("");
+                            state.push_line(&format!("  {} Proposed task plan:", a_cyan("📋")));
+                            for (id, desc, needs_write) in &tasks {
+                                let tag = if *needs_write { a_yellow("[write]") } else { a_green("[read]") };
+                                state.push_line(&format!("    {} {} {}", a_gray(&format!("{}.", id)), tag, desc));
+                            }
+                            state.push_line("");
+                            // Use the existing inline menu for approval
+                            let options = vec!["Approve".to_string(), "Reject".to_string()];
+                            let selected = state.run_inline_menu("Execute this plan?", &options, false);
+                            let approved = selected.first().copied() == Some(0);
+                            let _ = rt.block_on(event_tx.send(
+                                TermEvent::TaskPlanResult { plan_id, approved },
                             ));
                             state.full_repaint();
                             continue;
@@ -1051,6 +1087,43 @@ impl TermState {
                 self.history = input_history;
                 self.history_idx = None;
                 // auto_approved is handled in main.rs
+            }
+            RenderCmd::TaskPlan { .. } => {
+                // Handled in the render loop via run_inline_menu
+            }
+            RenderCmd::TaskProgress { plan_id: _, task_id, status, detail } => {
+                let icon = match status.as_str() {
+                    "in_progress" => "→",
+                    "completed" => "✓",
+                    "failed" => "✗",
+                    _ => "○",
+                };
+                let color_fn: fn(&str) -> String = match status.as_str() {
+                    "in_progress" => a_yellow,
+                    "completed" => a_green,
+                    "failed" => a_red,
+                    _ => a_gray,
+                };
+                let detail_str = detail.map(|d| format!(" — {d}")).unwrap_or_default();
+                self.push_line(&format!("  {} {}", color_fn(&format!("{icon} Task {task_id}")), a_gray(&detail_str)));
+                self.full_repaint();
+            }
+            RenderCmd::SubagentUpdate { subagent_id: _, description, status, detail } => {
+                let icon = match status.as_str() {
+                    "running" => "🔍",
+                    "completed" => "✓",
+                    "failed" => "✗",
+                    _ => "·",
+                };
+                let detail_str = detail.map(|d| format!(" → {d}")).unwrap_or_default();
+                let color_fn: fn(&str) -> String = match status.as_str() {
+                    "running" => a_cyan,
+                    "completed" => a_green,
+                    "failed" => a_red,
+                    _ => a_gray,
+                };
+                self.push_line(&format!("  {} {}{}", icon, color_fn(&description), a_gray(&detail_str)));
+                self.full_repaint();
             }
             RenderCmd::Thinking => {
                 self.streaming = true;

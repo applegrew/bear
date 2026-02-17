@@ -75,6 +75,19 @@ pub struct SlashCommandInfo {
 }
 
 // ---------------------------------------------------------------------------
+// Task planning
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskItem {
+    pub id: String,
+    pub description: String,
+    /// Whether this sub-task requires write access (file writes, commands, etc.).
+    /// Read-only tasks are candidates for subagent execution.
+    pub needs_write: bool,
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket protocol: client → server
 // ---------------------------------------------------------------------------
 
@@ -93,6 +106,8 @@ pub enum ClientMessage {
     Interrupt,
     /// Client tells the server that one or more commands have been auto-approved.
     AutoApprove { commands: Vec<String> },
+    /// User approves or rejects a proposed task plan.
+    TaskPlanResponse { plan_id: String, approved: bool },
     Ping,
 }
 
@@ -132,6 +147,29 @@ pub enum ServerMessage {
     ClientState {
         input_history: Vec<String>,
         auto_approved: Vec<String>,
+    },
+    /// A proposed task plan for the user to approve before execution.
+    TaskPlan {
+        plan_id: String,
+        tasks: Vec<TaskItem>,
+    },
+    /// Progress update for a task within an approved plan.
+    TaskProgress {
+        plan_id: String,
+        task_id: String,
+        /// One of: "pending", "in_progress", "completed", "failed"
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+    /// Status update for a read-only subagent.
+    SubagentUpdate {
+        subagent_id: String,
+        description: String,
+        /// One of: "running", "completed", "failed"
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     Notice { text: String },
     Error { text: String },

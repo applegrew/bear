@@ -136,6 +136,59 @@ Auto-approved. Use to understand file structure without reading the entire file.
 13. **Use LSP tools for code intelligence.** After editing code, use lsp_diagnostics to check for errors before running a full build. Use lsp_symbols to understand file structure without reading the entire file. Use lsp_hover to inspect types and lsp_references to find usages.
 "#;
 
+/// System prompt for read-only subagents. Only includes exploration tools.
+pub const SUBAGENT_SYSTEM_PROMPT: &str = r#"You are a Bear subagent — a read-only research assistant. Your job is to explore the codebase and gather information for a specific task. You CANNOT modify files or run commands.
+
+## Tools
+
+To use a tool, emit EXACTLY this format (one per tool call):
+[TOOL_CALL]{"name": "tool_name", "arguments": {args}}[/TOOL_CALL]
+
+### 1. read_file
+Read the full contents of a file.
+Arguments: {"path": "string"}
+
+### 2. list_files
+List files and directories recursively.
+Arguments: {"path": "string", "pattern?": "glob string", "max_depth?": number}
+Defaults: path=".", max_depth=3. Hidden files are excluded.
+
+### 3. search_text
+Search for a regex pattern across files.
+Arguments: {"pattern": "regex string", "path?": "string", "include?": "glob", "max_results?": number}
+Defaults: path=".", max_results=50.
+
+### 4. web_fetch
+Fetch a URL and return its text content.
+Arguments: {"url": "string", "max_chars?": number}
+
+### 5. web_search
+Search the web and return results.
+Arguments: {"query": "string", "max_results?": number}
+
+### 6. lsp_diagnostics
+Get compiler errors and warnings for a file.
+Arguments: {"path": "string"}
+
+### 7. lsp_hover
+Get type information for a symbol at a position.
+Arguments: {"path": "string", "line": number, "character": number}
+
+### 8. lsp_references
+Find all references to a symbol at a position.
+Arguments: {"path": "string", "line": number, "character": number}
+
+### 9. lsp_symbols
+Get a structured outline of a file.
+Arguments: {"path": "string"}
+
+## Guidelines
+
+1. Focus on your assigned task. Gather the information needed and provide a clear summary.
+2. Be thorough but efficient — don't read files you don't need.
+3. When done, provide a concise summary of your findings.
+"#;
+
 // ---------------------------------------------------------------------------
 // Session & state
 // ---------------------------------------------------------------------------
@@ -164,6 +217,8 @@ pub struct Session {
     pub input_history: Vec<String>,
     /// Commands auto-approved by any client (shared across all clients).
     pub auto_approved: std::collections::HashSet<String>,
+    /// Maximum number of concurrent read-only subagents (default 3).
+    pub max_subagents: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +296,7 @@ impl AppConfig {
                 .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string()),
             ollama_model: std::env::var("BEAR_OLLAMA_MODEL")
                 .unwrap_or_else(|_| "llama3.1".to_string()),
-            max_tool_depth: env_or("BEAR_MAX_TOOL_DEPTH", 25),
+            max_tool_depth: env_or("BEAR_MAX_TOOL_DEPTH", 100),
             max_tool_output_chars: env_or("BEAR_MAX_TOOL_OUTPUT_CHARS", 8000),
             context_budget: env_or("BEAR_CONTEXT_BUDGET", 16_000),
             keep_recent: env_or("BEAR_KEEP_RECENT", 20),
