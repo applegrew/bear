@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Bear Browser Client — xterm.js powered terminal connecting to bear-server
+// Bear Browser Client — OpenCode-style TUI powered by xterm.js
 // ---------------------------------------------------------------------------
 
 const DEFAULT_HOST = '127.0.0.1:49321';
@@ -11,7 +11,7 @@ const ICE_SERVERS = [
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
 
-// ANSI color helpers
+// ANSI color helpers (Tokyo Night palette)
 const C = {
   reset:   '\x1b[0m',
   bold:    '\x1b[1m',
@@ -25,17 +25,26 @@ const C = {
   cyan:    '\x1b[38;5;80m',
   gray:    '\x1b[38;5;102m',
   white:   '\x1b[38;5;252m',
+  bgGray:  '\x1b[48;5;236m',
 };
 
-const PROMPT = `${C.bold}${C.blue}bear> ${C.reset}`;
-const PROMPT_CMD = `${C.bold}${C.yellow}cmd-> ${C.reset}`;
+// Box drawing
+const BOX = { tl: '┌', tr: '┐', bl: '└', br: '┘', h: '─', v: '│' };
+
+// Spinner frames
+const SPINNER = ['·····', '●····', '·●···', '··●··', '···●·', '····●', '·····'];
+
+// Layout
+const INPUT_BOX_H = 3; // top border + input + bottom border
+const STATUS_BAR_H = 1;
+const BOTTOM_H = INPUT_BOX_H + STATUS_BAR_H;
 
 function matchingSlashCommands(input, commands) {
   if (!input.startsWith('/')) return [];
   const typed = input.trimEnd();
-  const matches = commands
-    .filter(s => s.cmd.startsWith(typed) || typed.startsWith(s.cmd));
-  return matches.slice(0, 5);
+  return commands
+    .filter(s => s.cmd.startsWith(typed) || typed.startsWith(s.cmd))
+    .slice(0, 5);
 }
 
 /** Format a tool call into human-readable description lines for the card UI. */
@@ -60,7 +69,6 @@ function formatToolDescription(name, args) {
     case 'undo':
       return [`Undo ${args.steps || 1} step(s)`];
     default: {
-      // Fallback: key=value pairs
       if (args && typeof args === 'object') {
         return Object.entries(args).map(([k, v]) => {
           const s = typeof v === 'string' ? v : JSON.stringify(v);
@@ -80,10 +88,10 @@ export class BearClient {
   constructor(term, fitAddon) {
     this.term = term;
     this.fitAddon = fitAddon;
-    this.ws = null;          // kept for fallback compatibility
-    this.pc = null;           // RTCPeerConnection
-    this.dc = null;           // RTCDataChannel
-    this._connId = null;      // server-side connection ID for ICE exchange
+    this.ws = null;
+    this.pc = null;
+    this.dc = null;
+    this._connId = null;
     this._icePollTimer = null;
     this.sessionId = null;
     this._audioCtx = null;
@@ -97,20 +105,34 @@ export class BearClient {
 
     // Streaming state
     this._streaming = false;
+    this._streamBuf = '';
+    this._thinkingLineShown = false;
+
+    // Spinner
+    this._spinnerFrame = 0;
+    this._spinnerTimer = null;
+
+    // Session info
+    this._sessionName = '';
+    this._sessionCwd = '';
+
+    // Output buffer (array of ANSI-colored strings)
+    this._outputLines = [];
+    this._scrollOffset = 0; // 0 = bottom
 
     // Slash command dropdown state
     this._dropdownLines = 0;
-    this._dropdownIdx = -1; // -1 = no selection
+    this._dropdownIdx = -1;
     this.slashCommands = [];
 
-    // Last tool tracking for tool-specific output rendering
+    // Last tool tracking
     this._lastToolName = '';
     this._lastToolArgs = {};
 
     // Tool confirmation picker state
     this.inToolConfirm = false;
-    this.toolConfirmCall = null;   // the tool_call object
-    this.toolConfirmIdx = 0;       // 0=Approve, 1=Deny, 2=Always
+    this.toolConfirmCall = null;
+    this.toolConfirmIdx = 0;
     this.toolConfirmRendered = false;
     this.autoApproved = new Set();
     this._lastExtractedCommands = [];
@@ -130,7 +152,213 @@ export class BearClient {
     this.userPromptSelected = [];
     this.userPromptRendered = false;
 
+    // Screen dimensions
+    this._cols = term.cols || 80;
+    this._rows = term.rows || 24;
+
     this._bindTerminal();
+    this._bindResize();
+  }
+
+  // -------------------------------------------------------------------------
+  // Screen geometry
+  // -------------------------------------------------------------------------
+
+  _outputAreaHeight() {
+    return Math.max(1, this._rows - BOTTOM_H);
+  }
+
+  _inputRow() {
+    return this._rows - BOTTOM_H;
+  }
+
+  _statusRow() {
+    return this._rows - 1;
+  }
+
+  // -------------------------------------------------------------------------
+  // Output buffer
+  // -------------------------------------------------------------------------
+
+  _pushLine(text) {
+    this._outputLines.push(text);
+    this._scrollOffset = 0;
+  }
+
+  _pushLines(lines) {
+    for (const l of lines) this._outputLines.push(l);
+    this._scrollOffset = 0;
+  }
+
+  _scrollUp(n) {
+    const max = Math.max(0, this._outputLines.length - this._outputAreaHeight());
+    this._scrollOffset = Math.min(this._scrollOffset + n, max);
+  }
+
+  _scrollDown(n) {
+    this._scrollOffset = Math.max(0, this._scrollOffset - n);
+  }
+
+  // -------------------------------------------------------------------------
+  // Full repaint
+  // -------------------------------------------------------------------------
+
+  _fullRepaint() {
+    this.term.write('\x1b[?25l'); // hide cursor
+    this._drawOutputArea();
+    this._drawInputBox();
+    this._drawStatusBar();
+  }
+
+  _drawOutputArea() {
+    const height = this._outputAreaHeight();
+    const total = this._outputLines.length;
+    const end = total - this._scrollOffset;
+    const start = Math.max(0, end - height);
+
+    for (let row = 0; row < height; row++) {
+      const lineIdx = start + row;
+      this.term.write(`\x1b[${row + 1};1H\x1b[2K`); // move to row, clear line
+      if (lineIdx >= 0 && lineIdx < end) {
+        const line = this._outputLines[lineIdx].replace(/\x00STREAM\x00/g, '');
+        this.term.write(line);
+      }
+    }
+
+    // Scroll indicator
+    if (this._scrollOffset > 0) {
+      const indicator = ` ↑ ${this._scrollOffset} more `;
+      const col = Math.max(1, this._cols - indicator.length - 1);
+      this.term.write(`\x1b[1;${col}H${C.bgGray}${C.white}${indicator}${C.reset}`);
+    }
+  }
+
+  _drawInputBox() {
+    const row = this._inputRow() + 1; // 1-indexed
+    const w = this._cols;
+    const borderW = Math.max(0, w - 2);
+
+    // Top border
+    this.term.write(`\x1b[${row};1H\x1b[2K`);
+    this.term.write(`${C.gray}${BOX.tl}${BOX.h.repeat(borderW)}${BOX.tr}${C.reset}`);
+
+    // Input line
+    this.term.write(`\x1b[${row + 1};1H\x1b[2K`);
+    const isSlash = this.inputBuf.startsWith('/');
+    const prompt = isSlash ? 'cmd-> ' : 'bear> ';
+    const promptColor = isSlash ? C.yellow : C.cyan;
+    const innerW = Math.max(0, w - 4);
+    const promptLen = 6;
+    const textSpace = Math.max(0, innerW - promptLen);
+    const displayText = this.inputBuf.length > textSpace
+      ? this.inputBuf.slice(this.inputBuf.length - textSpace)
+      : this.inputBuf;
+    const padding = Math.max(0, innerW - promptLen - displayText.length);
+
+    this.term.write(
+      `${C.gray}${BOX.v} ${C.reset}` +
+      `${promptColor}${C.bold}${prompt}${C.reset}` +
+      `${displayText}` +
+      `${' '.repeat(padding)}` +
+      `${C.gray} ${BOX.v}${C.reset}`
+    );
+
+    // Bottom border
+    this.term.write(`\x1b[${row + 2};1H\x1b[2K`);
+    this.term.write(`${C.gray}${BOX.bl}${BOX.h.repeat(borderW)}${BOX.br}${C.reset}`);
+
+    // Position cursor
+    const cursorCol = 3 + promptLen + Math.min(this.cursorPos, textSpace);
+    this.term.write(`\x1b[${row + 1};${cursorCol}H\x1b[?25h`); // show cursor
+
+    // Dropdown above input box
+    if (isSlash) {
+      const matches = matchingSlashCommands(this.inputBuf, this.slashCommands);
+      if (matches.length > 0) {
+        if (this._dropdownIdx >= matches.length) {
+          this._dropdownIdx = matches.length - 1;
+        }
+        const ddStart = row - matches.length; // rows above input box
+        for (let i = 0; i < matches.length; i++) {
+          const r = ddStart + i;
+          if (r < 1) continue;
+          this.term.write(`\x1b[${r};1H\x1b[2K`);
+          const { cmd, desc } = matches[i];
+          if (i === this._dropdownIdx) {
+            this.term.write(`${C.yellow}  ❯ ${C.white}${cmd}${C.gray}  ${desc}${C.reset}`);
+          } else {
+            this.term.write(`${C.gray}    ${C.yellow}${cmd}${C.gray}  ${desc}${C.reset}`);
+          }
+        }
+        this._dropdownLines = matches.length;
+        // Restore cursor
+        this.term.write(`\x1b[${row + 1};${cursorCol}H`);
+      } else {
+        this._dropdownLines = 0;
+      }
+    } else {
+      this._dropdownLines = 0;
+    }
+  }
+
+  _drawStatusBar() {
+    const row = this._statusRow() + 1; // 1-indexed
+    const w = this._cols;
+
+    this.term.write(`\x1b[${row};1H\x1b[2K`);
+
+    const spinner = this._streaming
+      ? SPINNER[this._spinnerFrame % SPINNER.length]
+      : '·····';
+    const session = this._sessionName || 'bear';
+
+    const left = `${spinner}  ${session}`;
+    const right = this._streaming
+      ? 'esc interrupt'
+      : 'esc interrupt  ↑↓ history  pgup/pgdn scroll';
+
+    const gap = Math.max(1, w - left.length - right.length - 2);
+
+    this.term.write(`${C.gray} ${left}${' '.repeat(gap)}${right} ${C.reset}`);
+
+    // Restore cursor to input box
+    const inputRow = this._inputRow() + 2; // 1-indexed, +1 for input line within box
+    const promptLen = 6;
+    const innerW = Math.max(0, w - 4);
+    const textSpace = Math.max(0, innerW - promptLen);
+    const cursorCol = 3 + promptLen + Math.min(this.cursorPos, textSpace);
+    this.term.write(`\x1b[${inputRow};${cursorCol}H\x1b[?25h`);
+  }
+
+  // -------------------------------------------------------------------------
+  // Spinner
+  // -------------------------------------------------------------------------
+
+  _startSpinner() {
+    if (this._spinnerTimer) return;
+    this._spinnerTimer = setInterval(() => {
+      this._spinnerFrame = (this._spinnerFrame + 1) % SPINNER.length;
+      this._drawStatusBar();
+    }, 100);
+  }
+
+  _stopSpinner() {
+    if (this._spinnerTimer) {
+      clearInterval(this._spinnerTimer);
+      this._spinnerTimer = null;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Resize
+  // -------------------------------------------------------------------------
+
+  _bindResize() {
+    this.term.onResize(({ cols, rows }) => {
+      this._cols = cols;
+      this._rows = rows;
+      this._fullRepaint();
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -138,32 +366,26 @@ export class BearClient {
   // -------------------------------------------------------------------------
 
   async boot() {
-    this._printBanner();
+    this._pushLine('');
+    this._pushLine(`${C.bold}${C.blue}  ╔══════════════════════════════════╗${C.reset}`);
+    this._pushLine(`${C.bold}${C.blue}  ║${C.reset}${C.bold}   🐻 Bear — Browser Terminal     ${C.blue}║${C.reset}`);
+    this._pushLine(`${C.bold}${C.blue}  ╚══════════════════════════════════╝${C.reset}`);
+    this._pushLine('');
+    this._fullRepaint();
+
     try {
       await fetch(SERVER_URL + '/sessions');
     } catch {
-      this._writeln(`${C.red}Cannot reach bear-server at ${SERVER_URL}${C.reset}`);
-      this._writeln(`${C.red}Start it with: cargo run -p bear-server${C.reset}`);
-      this._drawPrompt();
+      this._pushLine(`${C.red}Cannot reach bear-server at ${SERVER_URL}${C.reset}`);
+      this._pushLine(`${C.red}Start it with: cargo run -p bear-server${C.reset}`);
+      this._fullRepaint();
       return;
     }
     await this._showSessionPicker();
   }
 
   // -------------------------------------------------------------------------
-  // Banner
-  // -------------------------------------------------------------------------
-
-  _printBanner() {
-    this.term.writeln('');
-    this.term.writeln(`${C.bold}${C.blue}  ╔══════════════════════════════════╗${C.reset}`);
-    this.term.writeln(`${C.bold}${C.blue}  ║${C.reset}${C.bold}   🐻 Bear — Browser Terminal     ${C.blue}║${C.reset}`);
-    this.term.writeln(`${C.bold}${C.blue}  ╚══════════════════════════════════╝${C.reset}`);
-    this.term.writeln('');
-  }
-
-  // -------------------------------------------------------------------------
-  // Session picker (rendered in terminal)
+  // Session picker
   // -------------------------------------------------------------------------
 
   async _showSessionPicker() {
@@ -178,8 +400,8 @@ export class BearClient {
       this.pickerSessions = [];
     }
 
-    this._writeln(`${C.bold}${C.white}  Select a session:${C.reset}`);
-    this._writeln('');
+    this._pushLine(`${C.bold}${C.white}  Select a session:${C.reset}`);
+    this._pushLine('');
 
     this.pickerRendered = false;
     this._renderPicker();
@@ -194,13 +416,11 @@ export class BearClient {
       })),
     ];
 
-    // +1 for the hint line at the bottom
-    const totalLines = items.length + 1;
-
-    // Clear previous render (skip on first draw)
+    // Remove previous picker lines
     if (this.pickerRendered) {
-      for (let i = 0; i < totalLines; i++) {
-        this.term.write('\x1b[A\x1b[2K');
+      const removeCount = items.length + 1; // items + hint
+      for (let i = 0; i < removeCount; i++) {
+        this._outputLines.pop();
       }
     }
     this.pickerRendered = true;
@@ -210,19 +430,19 @@ export class BearClient {
       const prefix = selected ? `${C.bold}${C.blue}  ❯ ` : `${C.gray}    `;
       const labelColor = selected ? C.white : C.gray;
       const detailStr = items[i].detail ? `  ${C.dim}${C.gray}${items[i].detail}${C.reset}` : '';
-      this.term.writeln(`${prefix}${labelColor}${items[i].label}${C.reset}${detailStr}`);
+      this._pushLine(`${prefix}${labelColor}${items[i].label}${C.reset}${detailStr}`);
     }
-
-    this.term.writeln(`${C.gray}  ↑/↓ navigate, Enter select${C.reset}`);
+    this._pushLine(`${C.gray}  ↑/↓ navigate, Enter select${C.reset}`);
+    this._fullRepaint();
   }
 
   async _pickerSelect() {
     this.inSessionPicker = false;
-    this.term.writeln('');
+    this._pushLine('');
 
     if (this.pickerIdx === 0) {
-      // New session
-      this._writeln(`${C.gray}  Creating new session…${C.reset}`);
+      this._pushLine(`${C.gray}  Creating new session…${C.reset}`);
+      this._fullRepaint();
       try {
         const res = await fetch(SERVER_URL + '/sessions', {
           method: 'POST',
@@ -232,8 +452,8 @@ export class BearClient {
         const data = await res.json();
         this._connectToSession(data.session.id);
       } catch (e) {
-        this._writeln(`${C.red}  Failed to create session: ${e.message}${C.reset}`);
-        this._drawPrompt();
+        this._pushLine(`${C.red}  Failed to create session: ${e.message}${C.reset}`);
+        this._fullRepaint();
       }
     } else {
       const session = this.pickerSessions[this.pickerIdx - 1];
@@ -242,7 +462,7 @@ export class BearClient {
   }
 
   // -------------------------------------------------------------------------
-  // WebRTC DataChannel connection (with HTTP signaling)
+  // WebRTC DataChannel connection
   // -------------------------------------------------------------------------
 
   _connectToSession(sid) {
@@ -255,24 +475,23 @@ export class BearClient {
 
     this._cleanup();
 
-    this._writeln(`${C.gray}  Connecting via WebRTC…${C.reset}`);
+    this._pushLine(`${C.gray}  Connecting via WebRTC…${C.reset}`);
+    this._fullRepaint();
 
     this.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-
-    // Create the DataChannel before creating the offer
     this.dc = this.pc.createDataChannel('bear', { ordered: true });
 
-    this.dc.onopen = () => {
-      // prompt will be drawn after session_info message
-    };
+    this.dc.onopen = () => {};
 
     this.dc.onclose = () => {
-      this._writeln(`${C.gray}  Disconnected.${C.reset}`);
-      this._stopIcePoll();
+      this._pushLine(`${C.gray}  Disconnected.${C.reset}`);
+      this._stopSpinner();
+      this._fullRepaint();
     };
 
     this.dc.onerror = (e) => {
-      this._writeln(`${C.red}  DataChannel error: ${e.error?.message || 'unknown'}${C.reset}`);
+      this._pushLine(`${C.red}  DataChannel error: ${e.error?.message || 'unknown'}${C.reset}`);
+      this._fullRepaint();
     };
 
     this.dc.onmessage = (event) => {
@@ -281,7 +500,6 @@ export class BearClient {
       this._handleServerMessage(msg);
     };
 
-    // Gather ICE candidates and send them to the server
     this.pc.onicecandidate = (event) => {
       if (event.candidate && this._connId) {
         fetch(`${SERVER_URL}/rtc/${sid}/ice/${this._connId}`, {
@@ -298,12 +516,12 @@ export class BearClient {
 
     this.pc.onconnectionstatechange = () => {
       if (this.pc.connectionState === 'failed' || this.pc.connectionState === 'disconnected') {
-        this._writeln(`${C.red}  Connection lost.${C.reset}`);
-        this._stopIcePoll();
+        this._pushLine(`${C.red}  Connection lost.${C.reset}`);
+        this._stopSpinner();
+        this._fullRepaint();
       }
     };
 
-    // Start the SDP offer/answer exchange
     this._doSignaling(sid);
   }
 
@@ -319,7 +537,8 @@ export class BearClient {
       });
 
       if (!res.ok) {
-        this._writeln(`${C.red}  Signaling failed: ${res.status}${C.reset}`);
+        this._pushLine(`${C.red}  Signaling failed: ${res.status}${C.reset}`);
+        this._fullRepaint();
         return;
       }
 
@@ -330,10 +549,10 @@ export class BearClient {
         new RTCSessionDescription({ type: 'answer', sdp: data.sdp })
       );
 
-      // Start polling for server ICE candidates
       this._startIcePoll(sid);
     } catch (e) {
-      this._writeln(`${C.red}  Signaling error: ${e.message}${C.reset}`);
+      this._pushLine(`${C.red}  Signaling error: ${e.message}${C.reset}`);
+      this._fullRepaint();
     }
   }
 
@@ -356,8 +575,6 @@ export class BearClient {
         }
       } catch { /* ignore */ }
     }, 200);
-
-    // Stop polling after 30 seconds (ICE gathering should be done by then)
     setTimeout(() => this._stopIcePoll(), 30000);
   }
 
@@ -370,6 +587,7 @@ export class BearClient {
 
   _cleanup() {
     this._stopIcePoll();
+    this._stopSpinner();
     if (this.dc) { try { this.dc.close(); } catch {} this.dc = null; }
     if (this.pc) { try { this.pc.close(); } catch {} this.pc = null; }
     if (this.ws) { this.ws.close(); this.ws = null; }
@@ -389,72 +607,81 @@ export class BearClient {
     switch (msg.type) {
       case 'slash_commands':
         this.slashCommands = Array.isArray(msg.commands) ? msg.commands : [];
-        this._redrawInput();
+        this._drawInputBox();
         break;
 
       case 'session_info':
-        this._writeln(`${C.green}  Connected to session ${C.bold}${msg.session.id}${C.reset}`);
-        this._writeln(`${C.gray}  Working directory: ${msg.session.cwd}${C.reset}`);
-        this._writeln(`${C.gray}  Type /help for commands${C.reset}`);
-        this.term.writeln('');
-        this._drawPrompt();
+        this._sessionName = msg.session.name || msg.session.id.substring(0, 8);
+        this._sessionCwd = msg.session.cwd || '';
+        this._pushLine('');
+        this._pushLine(`${C.cyan}  Connected to session ${C.bold}${msg.session.id}${C.reset}`);
+        this._pushLine(`${C.gray}  Working directory: ${msg.session.cwd}${C.reset}`);
+        this._pushLine(`${C.gray}  Type /help for commands${C.reset}`);
+        this._pushLine('');
+        this._fullRepaint();
         break;
 
       case 'assistant_text':
-        if (!this._streaming) {
-          this._clearInputLine();
-          this._streaming = true;
-          this.term.write(`${C.green}  `);
+        // Remove the "Thinking…" line if present (before streaming check)
+        if (this._thinkingLineShown) {
+          this._outputLines.pop();
+          this._thinkingLineShown = false;
         }
-        // Write chunk inline, indenting any newlines
-        this.term.write(`${C.green}${msg.text.replace(/\n/g, '\r\n  ')}${C.reset}`);
+        if (!this._streaming) {
+          this._streaming = true;
+          this._streamBuf = '';
+          this._startSpinner();
+        }
+        this._streamBuf += msg.text;
+        this._flushStreamToOutput();
+        this._fullRepaint();
         break;
 
       case 'assistant_text_done':
         if (this._streaming) {
           this._streaming = false;
-          this.term.write(`${C.reset}\r\n`);
+          this._flushStreamToOutput();
+          this._streamBuf = '';
+          this._pushLine('');
+          this._stopSpinner();
         }
-        this._restorePrompt();
+        this._fullRepaint();
         break;
 
       case 'tool_request': {
         const tc = msg.tool_call;
         this._lastToolName = tc.name;
         this._lastToolArgs = tc.arguments;
-        // Use server-provided extracted commands if available, else fall back
         const cmds = msg.extracted_commands || [this._extractBaseCommand(tc)];
         this._lastExtractedCommands = cmds;
-
-        this._clearInputLine();
 
         const allApproved = cmds.length > 0 && cmds.every(c => this.autoApproved.has(c));
 
         if (allApproved) {
           const descLines = formatToolDescription(tc.name, tc.arguments || {});
-          this._writeln(`${C.gray}  ┌─ ⚡ ${tc.name} ─ (auto-approved)${C.reset}`);
+          this._pushLine(`${C.gray}  ┌─ ⚡ ${tc.name} ─ (auto-approved)${C.reset}`);
           for (const line of descLines) {
-            this._writeln(`${C.gray}  │  ${line}${C.reset}`);
+            this._pushLine(`${C.gray}  │  ${line}${C.reset}`);
           }
-          this._writeln(`${C.gray}  └─${C.reset}`);
+          this._pushLine(`${C.gray}  └─${C.reset}`);
           this._sendJson({ type: 'tool_confirm', tool_call_id: tc.id, approved: true });
-          this._drawPrompt();
+          this._fullRepaint();
         } else {
-          // Show tool info card
+          // Show tool card
           const descLines = formatToolDescription(tc.name, tc.arguments || {});
-          this._writeln(`${C.gray}  ┌─ ${C.magenta}⚡ ${tc.name}${C.gray} ─${C.reset}`);
+          this._pushLine(`${C.gray}  ┌─ ${C.magenta}⚡ ${tc.name}${C.gray} ─${C.reset}`);
           for (const line of descLines) {
-            this._writeln(`${C.gray}  │  ${C.white}${line}${C.reset}`);
+            this._pushLine(`${C.gray}  │  ${C.white}${line}${C.reset}`);
           }
-          // Show which commands need approval
           if (tc.name === 'run_command' && cmds.length > 0) {
             const unapproved = cmds.filter(c => !this.autoApproved.has(c));
             if (unapproved.length > 0) {
               const cmdList = unapproved.map(c => `'${c}'`).join(' and ');
-              this._writeln(`${C.gray}  │  ${C.yellow}Requires approval for ${cmdList}${C.reset}`);
+              this._pushLine(`${C.gray}  │  ${C.yellow}Requires approval for ${cmdList}${C.reset}`);
             }
           }
-          this._writeln(`${C.gray}  └─${C.reset}`);
+          this._pushLine(`${C.gray}  └─${C.reset}`);
+
           // Enter picker mode
           this.toolConfirmCall = tc;
           this.toolConfirmIdx = 0;
@@ -467,71 +694,66 @@ export class BearClient {
       }
 
       case 'tool_output':
-        this._clearInputLine();
         this._renderToolOutput(this._lastToolName || '', this._lastToolArgs || {}, msg.output);
-        this._restorePrompt();
+        this._fullRepaint();
         break;
 
       case 'process_started':
-        this._clearInputLine();
-        this._writeln(`${C.magenta}  [proc] Started pid=${msg.info.pid} cmd=${msg.info.command}${C.reset}`);
-        this._restorePrompt();
+        this._pushLine(`${C.magenta}  [proc] Started pid=${msg.info.pid} cmd=${msg.info.command}${C.reset}`);
+        this._fullRepaint();
         break;
 
       case 'process_output':
-        this._clearInputLine();
-        this._writeln(`${C.magenta}  [${msg.pid}] ${msg.text}${C.reset}`);
-        this._restorePrompt();
+        this._pushLine(`${C.magenta}  [${msg.pid}] ${msg.text}${C.reset}`);
+        this._fullRepaint();
         break;
 
       case 'process_exited': {
         const code = msg.code !== null && msg.code !== undefined ? msg.code : 'unknown';
-        this._clearInputLine();
-        this._writeln(`${C.magenta}  [proc] Process ${msg.pid} exited (code ${code})${C.reset}`);
-        this._restorePrompt();
+        this._pushLine(`${C.magenta}  [proc] Process ${msg.pid} exited (code ${code})${C.reset}`);
+        this._fullRepaint();
         break;
       }
 
       case 'process_list_result':
-        this._clearInputLine();
         if (msg.processes.length === 0) {
-          this._writeln(`${C.gray}  No background processes.${C.reset}`);
+          this._pushLine(`${C.gray}  No background processes.${C.reset}`);
         } else {
-          this._writeln(`${C.white}  Background processes:${C.reset}`);
+          this._pushLine(`${C.white}  Background processes:${C.reset}`);
           for (const p of msg.processes) {
             const status = p.running ? 'running' : 'exited';
-            this._writeln(`${C.gray}    pid=${p.pid} [${status}] ${p.command}${C.reset}`);
+            this._pushLine(`${C.gray}    pid=${p.pid} [${status}] ${p.command}${C.reset}`);
           }
         }
-        this._restorePrompt();
+        this._fullRepaint();
         break;
 
       case 'session_renamed':
-        this._clearInputLine();
-        this._writeln(`${C.green}  Session renamed to: ${msg.name}${C.reset}`);
-        this._restorePrompt();
+        this._sessionName = msg.name;
+        this._pushLine(`${C.green}  Session renamed to: ${msg.name}${C.reset}`);
+        this._fullRepaint();
         break;
 
       case 'notice':
-        this._clearInputLine();
-        this._writeln(`${C.gray}  ${msg.text}${C.reset}`);
-        this._restorePrompt();
+        this._pushLine(`${C.yellow}[notice] ${msg.text}${C.reset}`);
+        this._fullRepaint();
         break;
 
       case 'error':
-        this._clearInputLine();
-        this._writeln(`${C.red}  ${msg.text}${C.reset}`);
-        this._restorePrompt();
+        this._pushLine(`${C.red}[error] ${msg.text}${C.reset}`);
+        this._fullRepaint();
         break;
 
       case 'thinking':
-        this._clearInputLine();
         this._streaming = true;
-        this._writeln(`${C.dim}${C.gray}  ⟳ Thinking…${C.reset}`);
+        this._streamBuf = '';
+        this._pushLine(`${C.dim}${C.gray}  ⟳ Thinking…${C.reset}`);
+        this._thinkingLineShown = true;
+        this._startSpinner();
+        this._fullRepaint();
         break;
 
       case 'user_prompt':
-        this._clearInputLine();
         this.inUserPrompt = true;
         this.userPromptId = msg.prompt_id;
         this.userPromptOptions = msg.options;
@@ -539,8 +761,8 @@ export class BearClient {
         this.userPromptIdx = 0;
         this.userPromptSelected = new Array(msg.options.length).fill(false);
         this.userPromptRendered = false;
-        this._writeln(`${C.bold}${C.cyan}  ${msg.question}${C.reset}`);
-        this._writeln('');
+        this._pushLine(`${C.bold}${C.cyan}  ${msg.question}${C.reset}`);
+        this._pushLine('');
         this._playAlert();
         this._renderUserPrompt();
         break;
@@ -551,62 +773,69 @@ export class BearClient {
   }
 
   // -------------------------------------------------------------------------
+  // Streaming buffer
+  // -------------------------------------------------------------------------
+
+  _flushStreamToOutput() {
+    const TAG = '\x00STREAM\x00';
+    // Remove previous stream lines (tagged)
+    while (this._outputLines.length > 0 && this._outputLines[this._outputLines.length - 1].startsWith(TAG)) {
+      this._outputLines.pop();
+    }
+    const lines = this._streamBuf.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const prefix = i === 0 ? '🐻 ' : '   ';
+      this._outputLines.push(`${TAG}  ${prefix}${C.green}${lines[i]}${C.reset}`);
+    }
+    this._scrollOffset = 0;
+  }
+
+  // -------------------------------------------------------------------------
   // Terminal input binding
   // -------------------------------------------------------------------------
 
   _bindTerminal() {
     this.term.onData((data) => {
-      // Session picker mode
-      if (this.inSessionPicker) {
-        this._handlePickerKey(data);
-        return;
-      }
-
-      // Tool confirmation picker mode
-      if (this.inToolConfirm) {
-        this._handleToolConfirmKey(data);
-        return;
-      }
-
-      // User prompt mode
-      if (this.inUserPrompt) {
-        this._handleUserPromptKey(data);
-        return;
-      }
+      if (this.inSessionPicker) { this._handlePickerKey(data); return; }
+      if (this.inToolConfirm) { this._handleToolConfirmKey(data); return; }
+      if (this.inUserPrompt) { this._handleUserPromptKey(data); return; }
 
       for (let i = 0; i < data.length; i++) {
         const ch = data[i];
         const code = ch.charCodeAt(0);
 
-        // ESC sequence (arrow keys etc)
+        // ESC sequence
         if (ch === '\x1b' && data[i + 1] === '[') {
           const arrow = data[i + 2];
           i += 2;
+
           if (this._dropdownActive()) {
-            if (arrow === 'A') { this._dropdownUp(); this._redrawInput(); continue; }
-            if (arrow === 'B') { this._dropdownDown(); this._redrawInput(); continue; }
-            // Left/Right: reset selection, fall through to normal behavior
+            if (arrow === 'A') { this._dropdownUp(); this._drawInputBox(); continue; }
+            if (arrow === 'B') { this._dropdownDown(); this._drawInputBox(); continue; }
             this._dropdownIdx = -1;
           }
+
           if (arrow === 'A') { this._historyUp(); continue; }
           if (arrow === 'B') { this._historyDown(); continue; }
           if (arrow === 'C') { this._cursorRight(); continue; }
           if (arrow === 'D') { this._cursorLeft(); continue; }
+
+          // Page up/down: \x1b[5~ and \x1b[6~
+          if (arrow === '5' && data[i + 1] === '~') { i++; this._scrollUp(5); this._fullRepaint(); continue; }
+          if (arrow === '6' && data[i + 1] === '~') { i++; this._scrollDown(5); this._fullRepaint(); continue; }
           continue;
         }
 
-        // Bare Esc (not part of arrow sequence)
+        // Bare Esc
         if (code === 27) {
           if (this._streaming) {
-            // During streaming: show prompt so user can type to interrupt
-            this.term.write(`${C.reset}\r\n`);
-            this._writeln(`${C.gray}  (type a message and press Enter to interrupt)${C.reset}`);
-            this._drawPrompt();
+            this._pushLine(`${C.gray}  (type a message and press Enter to interrupt)${C.reset}`);
+            this._fullRepaint();
           } else if (this._dropdownActive()) {
             this.inputBuf = '';
             this.cursorPos = 0;
             this._dropdownIdx = -1;
-            this._redrawInput();
+            this._drawInputBox();
           }
           continue;
         }
@@ -615,7 +844,7 @@ export class BearClient {
         if (code === 9) {
           if (this._dropdownActive()) {
             this._acceptDropdown();
-            this._redrawInput();
+            this._drawInputBox();
           }
           continue;
         }
@@ -624,11 +853,9 @@ export class BearClient {
         if (ch === '\r' || ch === '\n') {
           if (this._dropdownActive() && this._dropdownIdx >= 0) {
             this._acceptDropdown();
-            this._redrawInput();
+            this._drawInputBox();
             continue;
           }
-          this._clearDropdown();
-          this.term.writeln('');
           this._submitInput();
           continue;
         }
@@ -644,76 +871,58 @@ export class BearClient {
         if (code === 3) {
           this.inputBuf = '';
           this.cursorPos = 0;
-          this.term.writeln('^C');
-          this._drawPrompt();
+          this._drawInputBox();
           continue;
         }
 
-        // Ctrl+D — disabled in browser client
-        if (code === 4) {
-          continue;
-        }
+        // Ctrl+D
+        if (code === 4) continue;
 
-        // Ctrl+U — clear line
+        // Ctrl+U
         if (code === 21) {
           this.inputBuf = '';
           this.cursorPos = 0;
-          this._redrawInput();
+          this._drawInputBox();
           continue;
         }
 
-        // Regular printable character
+        // Printable
         if (code >= 32) {
           this._dropdownIdx = -1;
           this.inputBuf = this.inputBuf.slice(0, this.cursorPos) + ch + this.inputBuf.slice(this.cursorPos);
           this.cursorPos++;
-          this._redrawInput();
+          this._drawInputBox();
         }
       }
     });
   }
 
+  // -------------------------------------------------------------------------
+  // Picker key handling
+  // -------------------------------------------------------------------------
+
   _handlePickerKey(data) {
     const totalItems = this.pickerSessions.length + 1;
-
     if (data === '\x1b[A') {
-      // Up
-      if (this.pickerIdx > 0) {
-        this.pickerIdx--;
-        this._renderPicker();
-      }
+      if (this.pickerIdx > 0) { this.pickerIdx--; this._renderPicker(); }
     } else if (data === '\x1b[B') {
-      // Down
-      if (this.pickerIdx < totalItems - 1) {
-        this.pickerIdx++;
-        this._renderPicker();
-      }
+      if (this.pickerIdx < totalItems - 1) { this.pickerIdx++; this._renderPicker(); }
     } else if (data === '\r' || data === '\n') {
       this._pickerSelect();
     }
   }
 
   // -------------------------------------------------------------------------
-  // User prompt (interactive option selection)
+  // User prompt
   // -------------------------------------------------------------------------
 
   _handleUserPromptKey(data) {
     const total = this.userPromptOptions.length;
-
     if (data === '\x1b[A') {
-      // Up
-      if (this.userPromptIdx > 0) {
-        this.userPromptIdx--;
-        this._renderUserPrompt();
-      }
+      if (this.userPromptIdx > 0) { this.userPromptIdx--; this._renderUserPrompt(); }
     } else if (data === '\x1b[B') {
-      // Down
-      if (this.userPromptIdx < total - 1) {
-        this.userPromptIdx++;
-        this._renderUserPrompt();
-      }
+      if (this.userPromptIdx < total - 1) { this.userPromptIdx++; this._renderUserPrompt(); }
     } else if (data === ' ' && this.userPromptMulti) {
-      // Toggle selection in multi mode
       this.userPromptSelected[this.userPromptIdx] = !this.userPromptSelected[this.userPromptIdx];
       this._renderUserPrompt();
     } else if (data === '\r' || data === '\n') {
@@ -723,13 +932,10 @@ export class BearClient {
 
   _renderUserPrompt() {
     const opts = this.userPromptOptions;
-    const totalLines = opts.length + 1; // options + hint
+    const removeCount = opts.length + 1;
 
-    // Clear previous render
     if (this.userPromptRendered) {
-      for (let i = 0; i < totalLines; i++) {
-        this.term.write('\x1b[A\x1b[2K');
-      }
+      for (let i = 0; i < removeCount; i++) this._outputLines.pop();
     }
     this.userPromptRendered = true;
 
@@ -738,15 +944,15 @@ export class BearClient {
       if (this.userPromptMulti) {
         const check = this.userPromptSelected[i] ? '[x]' : '[ ]';
         if (focused) {
-          this.term.writeln(`${C.bold}${C.yellow}  ${check} ${C.white}${opts[i]}${C.reset}`);
+          this._pushLine(`${C.bold}${C.yellow}  ${check} ${C.white}${opts[i]}${C.reset}`);
         } else {
-          this.term.writeln(`${C.gray}  ${check} ${opts[i]}${C.reset}`);
+          this._pushLine(`${C.gray}  ${check} ${opts[i]}${C.reset}`);
         }
       } else {
         if (focused) {
-          this.term.writeln(`${C.bold}${C.blue}  ❯ ${C.white}${opts[i]}${C.reset}`);
+          this._pushLine(`${C.bold}${C.blue}  ❯ ${C.white}${opts[i]}${C.reset}`);
         } else {
-          this.term.writeln(`${C.gray}    ${opts[i]}${C.reset}`);
+          this._pushLine(`${C.gray}    ${opts[i]}${C.reset}`);
         }
       }
     }
@@ -754,13 +960,12 @@ export class BearClient {
     const hint = this.userPromptMulti
       ? `${C.gray}  ↑/↓ navigate, Space toggle, Enter confirm${C.reset}`
       : `${C.gray}  ↑/↓ navigate, Enter select${C.reset}`;
-    this.term.writeln(hint);
+    this._pushLine(hint);
+    this._fullRepaint();
   }
 
   _userPromptSelect() {
     this.inUserPrompt = false;
-    this.term.writeln('');
-
     let selected;
     if (this.userPromptMulti) {
       selected = [];
@@ -771,339 +976,24 @@ export class BearClient {
       selected = [this.userPromptIdx];
     }
 
-    this._sendJson({
-      type: 'user_prompt_response',
-      prompt_id: this.userPromptId,
-      selected,
-    });
-    this._drawPrompt();
-  }
+    // Replace picker lines with selection
+    const opts = this.userPromptOptions;
+    const removeCount = opts.length + 1;
+    for (let i = 0; i < removeCount; i++) this._outputLines.pop();
 
-  // -------------------------------------------------------------------------
-  // Input line management
-  // -------------------------------------------------------------------------
-
-  _drawPrompt() {
-    this.inputBuf = '';
-    this.cursorPos = 0;
-    this._dropdownIdx = -1;
-    this._clearDropdown();
-    this.term.write(PROMPT);
-  }
-
-  _restorePrompt() {
-    // Redraw prompt preserving any in-progress user input
-    this._clearDropdown();
-    const p = this.inputBuf.startsWith('/') ? PROMPT_CMD : PROMPT;
-    this.term.write(`${p}${this.inputBuf}`);
-    // Reposition cursor if not at end
-    const back = this.inputBuf.length - this.cursorPos;
-    if (back > 0) {
-      this.term.write(`\x1b[${back}D`);
-    }
-    this._renderDropdown();
-  }
-
-  _redrawInput() {
-    // Clear dropdown first, then redraw prompt line
-    this._clearDropdown();
-    this._clearWrappedInput();
-    const p = this.inputBuf.startsWith('/') ? PROMPT_CMD : PROMPT;
-    this.term.write(`${p}${this.inputBuf}`);
-    // Move cursor to correct position
-    const promptLen = 6; // "bear> " / "cmd-> "
-    const targetCol = promptLen + this.cursorPos;
-    const endCol = promptLen + this.inputBuf.length;
-    if (targetCol < endCol) {
-      this.term.write(`\x1b[${endCol - targetCol}D`);
-    }
-    // Show dropdown if in slash mode
-    this._renderDropdown();
-  }
-
-  _clearInputLine() {
-    this._clearDropdown();
-    this._clearWrappedInput();
-  }
-
-  _clearWrappedInput() {
-    // Calculate how many visual rows the prompt + input currently occupies
-    const promptLen = 6; // "bear> " / "cmd-> "
-    const totalChars = promptLen + this.inputBuf.length;
-    const cols = this.term.cols || 80;
-    const rows = Math.ceil(totalChars / cols) || 1;
-    // Move cursor up to the first row of the prompt (cursor may be on any wrapped row)
-    if (rows > 1) {
-      // Figure out which row the cursor is currently on
-      const cursorChars = promptLen + this.cursorPos;
-      const cursorRow = Math.floor(cursorChars / cols); // 0-indexed from prompt start
-      if (cursorRow > 0) {
-        this.term.write(`\x1b[${cursorRow}A`);
+    if (this.userPromptMulti) {
+      for (let i = 0; i < opts.length; i++) {
+        if (this.userPromptSelected[i]) {
+          this._pushLine(`${C.green}  [x] ${C.white}${opts[i]}${C.reset}`);
+        }
       }
-    }
-    // Now clear from the first row downward
-    this.term.write('\r\x1b[J');
-  }
-
-  _clearDropdown() {
-    if (this._dropdownLines > 0) {
-      this.term.write('\x1b[s');
-      for (let i = 0; i < this._dropdownLines; i++) {
-        this.term.write('\r\n\x1b[2K');
-      }
-      this.term.write('\x1b[u');
-      this._dropdownLines = 0;
-    }
-  }
-
-  _renderDropdown() {
-    const matches = matchingSlashCommands(this.inputBuf, this.slashCommands);
-    if (matches.length === 0) {
-      this._dropdownIdx = -1;
-      return;
-    }
-    // Clamp index
-    if (this._dropdownIdx >= matches.length) {
-      this._dropdownIdx = matches.length - 1;
-    }
-    this.term.write('\x1b[s');
-    for (let i = 0; i < matches.length; i++) {
-      const { cmd, desc } = matches[i];
-      const selected = i === this._dropdownIdx;
-      if (selected) {
-        this.term.write(`\r\n\x1b[2K${C.yellow}    ❯ ${C.white}${cmd}${C.gray}  ${desc}${C.reset}`);
-      } else {
-        this.term.write(`\r\n\x1b[2K${C.gray}      ${C.yellow}${cmd}${C.gray}  ${desc}${C.reset}`);
-      }
-    }
-    this._dropdownLines = matches.length;
-    this.term.write('\x1b[u');
-  }
-
-  _dropdownActive() {
-    return this._dropdownLines > 0 && this.inputBuf.startsWith('/');
-  }
-
-  _dropdownUp() {
-    const matches = matchingSlashCommands(this.inputBuf, this.slashCommands);
-    if (matches.length === 0) return;
-    if (this._dropdownIdx <= 0) {
-      this._dropdownIdx = matches.length - 1;
     } else {
-      this._dropdownIdx--;
+      this._pushLine(`${C.yellow}  ❯ ${C.white}${opts[this.userPromptIdx]}${C.reset}`);
     }
-  }
+    this._pushLine('');
 
-  _dropdownDown() {
-    const matches = matchingSlashCommands(this.inputBuf, this.slashCommands);
-    if (matches.length === 0) return;
-    if (this._dropdownIdx < 0 || this._dropdownIdx >= matches.length - 1) {
-      this._dropdownIdx = 0;
-    } else {
-      this._dropdownIdx++;
-    }
-  }
-
-  _acceptDropdown() {
-    const matches = matchingSlashCommands(this.inputBuf, this.slashCommands);
-    const idx = this._dropdownIdx >= 0 ? this._dropdownIdx : 0;
-    if (idx < matches.length) {
-      this.inputBuf = matches[idx].cmd + ' ';
-      this.cursorPos = this.inputBuf.length;
-    }
-    this._dropdownIdx = -1;
-  }
-
-  _writeln(text) {
-    this.term.writeln(text);
-  }
-
-  _playAlert() {
-    try {
-      if (!this._audioCtx) {
-        this._audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      }
-      const ctx = this._audioCtx;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(880, ctx.currentTime);
-      gain.gain.setValueAtTime(0.3, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + 0.15);
-    } catch (_) {
-      // Audio not available — ignore silently
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // Input editing
-  // -------------------------------------------------------------------------
-
-  _backspace() {
-    if (this.cursorPos > 0) {
-      this.inputBuf = this.inputBuf.slice(0, this.cursorPos - 1) + this.inputBuf.slice(this.cursorPos);
-      this.cursorPos--;
-      this._redrawInput();
-    }
-  }
-
-  _cursorLeft() {
-    if (this.cursorPos > 0) {
-      this.cursorPos--;
-      this.term.write('\x1b[D');
-    }
-  }
-
-  _cursorRight() {
-    if (this.cursorPos < this.inputBuf.length) {
-      this.cursorPos++;
-      this.term.write('\x1b[C');
-    }
-  }
-
-  _historyUp() {
-    if (this.history.length === 0) return;
-    if (this.historyIdx === -1) {
-      this.savedInput = this.inputBuf;
-      this.historyIdx = this.history.length - 1;
-    } else if (this.historyIdx > 0) {
-      this.historyIdx--;
-    }
-    this.inputBuf = this.history[this.historyIdx];
-    this.cursorPos = this.inputBuf.length;
-    this._redrawInput();
-  }
-
-  _historyDown() {
-    if (this.historyIdx === -1) return;
-    if (this.historyIdx < this.history.length - 1) {
-      this.historyIdx++;
-      this.inputBuf = this.history[this.historyIdx];
-    } else {
-      this.historyIdx = -1;
-      this.inputBuf = this.savedInput;
-    }
-    this.cursorPos = this.inputBuf.length;
-    this._redrawInput();
-  }
-
-  // -------------------------------------------------------------------------
-  // Submit input
-  // -------------------------------------------------------------------------
-
-  _submitInput() {
-    this._clearDropdown();
-    this._dropdownIdx = -1;
-    const text = this.inputBuf.trim();
-    this.inputBuf = '';
-    this.cursorPos = 0;
-
-    if (!text) {
-      this._drawPrompt();
-      return;
-    }
-
-    // Push to history
-    if (this.history.length === 0 || this.history[this.history.length - 1] !== text) {
-      this.history.push(text);
-    }
-    this.historyIdx = -1;
-    this.savedInput = '';
-
-    // Slash commands
-    if (text === '/help') {
-      this._showHelp();
-      this._drawPrompt();
-      return;
-    }
-
-    if (text === '/allowed') {
-      if (this.autoApproved.size === 0) {
-        this._writeln(`${C.gray}  No auto-approved commands.${C.reset}`);
-      } else {
-        this._writeln(`${C.white}  Auto-approved: ${[...this.autoApproved].sort().join(', ')}${C.reset}`);
-      }
-      this._drawPrompt();
-      return;
-    }
-
-    if (text === '/end') {
-      if (this._isConnected()) {
-        this._sendJson({ type: 'session_end' });
-      }
-      this._writeln(`${C.gray}  Session ended.${C.reset}`);
-      this._cleanup();
-      this.term.writeln('');
-      this._showSessionPicker();
-      return;
-    }
-
-    if (text === '/exit') {
-      this._writeln(`${C.gray}  Disconnecting. Session preserved.${C.reset}`);
-      this._cleanup();
-      this.term.writeln('');
-      this._showSessionPicker();
-      return;
-    }
-
-    if (!this._isConnected()) {
-      this._writeln(`${C.red}  Not connected. Use /exit to pick a session.${C.reset}`);
-      this._drawPrompt();
-      return;
-    }
-
-    if (text === '/ps') {
-      this._sendJson({ type: 'process_list' });
-      return;
-    }
-
-    const killMatch = text.match(/^\/kill\s+(\d+)$/);
-    if (killMatch) {
-      this._sendJson({ type: 'process_kill', pid: parseInt(killMatch[1]) });
-      return;
-    }
-
-    const sendMatch = text.match(/^\/send\s+(\d+)\s+(.+)$/);
-    if (sendMatch) {
-      this._sendJson({ type: 'process_input', pid: parseInt(sendMatch[1]), text: sendMatch[2] });
-      return;
-    }
-
-    const sessionNameMatch = text.match(/^\/session\s+name\s+(.+)$/);
-    if (sessionNameMatch) {
-      const name = sessionNameMatch[1].trim();
-      if (!name) {
-        this._writeln(`${C.red}  Usage: /session name <session name>${C.reset}`);
-        this._drawPrompt();
-      } else {
-        this._sendJson({ type: 'session_rename', name });
-      }
-      return;
-    }
-    const sessionWorkdirMatch = text.match(/^\/session\s+workdir\s+(.+)$/);
-    if (sessionWorkdirMatch) {
-      const path = sessionWorkdirMatch[1].trim();
-      if (!path) {
-        this._writeln(`${C.red}  Usage: /session workdir <path>${C.reset}`);
-        this._drawPrompt();
-      } else {
-        this._sendJson({ type: 'session_workdir', path });
-      }
-      return;
-    }
-    if (text.startsWith('/session')) {
-      this._writeln(`${C.red}  Usage: /session name <session name> OR /session workdir <path>${C.reset}`);
-      this._drawPrompt();
-      return;
-    }
-
-    // Regular chat input
-    this._sendJson({ type: 'input', text: text });
-    // Don't draw prompt yet — wait for server response
+    this._sendJson({ type: 'user_prompt_response', prompt_id: this.userPromptId, selected });
+    this._fullRepaint();
   }
 
   // -------------------------------------------------------------------------
@@ -1112,17 +1002,9 @@ export class BearClient {
 
   _handleToolConfirmKey(data) {
     if (data === '\x1b[A') {
-      // Up
-      if (this.toolConfirmIdx > 0) {
-        this.toolConfirmIdx--;
-        this._renderToolConfirm();
-      }
+      if (this.toolConfirmIdx > 0) { this.toolConfirmIdx--; this._renderToolConfirm(); }
     } else if (data === '\x1b[B') {
-      // Down
-      if (this.toolConfirmIdx < 2) {
-        this.toolConfirmIdx++;
-        this._renderToolConfirm();
-      }
+      if (this.toolConfirmIdx < 2) { this.toolConfirmIdx++; this._renderToolConfirm(); }
     } else if (data === '\r' || data === '\n') {
       this._toolConfirmSelect();
     }
@@ -1131,25 +1013,23 @@ export class BearClient {
   _renderToolConfirm() {
     const labels = ['Approve', 'Deny', 'Always approve for session'];
     const colors = [C.green, C.red, C.yellow];
-    const totalLines = labels.length + 1; // options + hint
+    const removeCount = labels.length + 1;
 
-    // Clear previous render
     if (this.toolConfirmRendered) {
-      for (let i = 0; i < totalLines; i++) {
-        this.term.write('\x1b[A\x1b[2K');
-      }
+      for (let i = 0; i < removeCount; i++) this._outputLines.pop();
     }
     this.toolConfirmRendered = true;
 
     for (let i = 0; i < labels.length; i++) {
       const focused = i === this.toolConfirmIdx;
       if (focused) {
-        this.term.writeln(`${C.yellow}  ❯ ${colors[i]}${labels[i]}${C.reset}`);
+        this._pushLine(`${C.yellow}  ❯ ${colors[i]}${labels[i]}${C.reset}`);
       } else {
-        this.term.writeln(`${C.gray}    ${labels[i]}${C.reset}`);
+        this._pushLine(`${C.gray}    ${labels[i]}${C.reset}`);
       }
     }
-    this.term.writeln(`${C.gray}  ↑/↓ navigate, Enter select${C.reset}`);
+    this._pushLine(`${C.gray}  ↑/↓ navigate, Enter select${C.reset}`);
+    this._fullRepaint();
   }
 
   _toolConfirmSelect() {
@@ -1158,28 +1038,29 @@ export class BearClient {
 
     const cmds = this._lastExtractedCommands || [this._extractBaseCommand(tc)];
     const idx = this.toolConfirmIdx;
-    const approved = idx !== 1; // 0=Approve, 1=Deny, 2=Always
+    const approved = idx !== 1;
 
     this.inToolConfirm = false;
     this.toolConfirmCall = null;
-    this.term.writeln('');
+
+    // Replace picker lines with result
+    const removeCount = 4; // 3 options + hint
+    for (let i = 0; i < removeCount; i++) this._outputLines.pop();
 
     if (idx === 2) {
-      // Add all extracted commands to auto-approved set
-      for (const cmd of cmds) {
-        this.autoApproved.add(cmd);
-      }
+      for (const cmd of cmds) this.autoApproved.add(cmd);
       const label = cmds.map(c => `'${c}'`).join(', ');
-      this._writeln(`${C.yellow}  ${label} will be auto-approved for this session.${C.reset}`);
+      this._pushLine(`${C.yellow}  ${label} will be auto-approved for this session.${C.reset}`);
     }
 
     const verdict = approved
       ? `${C.green}  ✓ Approved${C.reset}`
       : `${C.red}  ✗ Denied${C.reset}`;
-    this._writeln(verdict);
+    this._pushLine(verdict);
+    this._pushLine('');
 
     this._sendJson({ type: 'tool_confirm', tool_call_id: tc.id, approved });
-    // Don't draw prompt — wait for tool_output or next message
+    this._fullRepaint();
   }
 
   _extractBaseCommand(toolCall) {
@@ -1198,7 +1079,213 @@ export class BearClient {
   }
 
   // -------------------------------------------------------------------------
-  // Tool-specific output rendering
+  // Dropdown
+  // -------------------------------------------------------------------------
+
+  _dropdownActive() {
+    return this._dropdownLines > 0 && this.inputBuf.startsWith('/');
+  }
+
+  _dropdownUp() {
+    const matches = matchingSlashCommands(this.inputBuf, this.slashCommands);
+    if (matches.length === 0) return;
+    this._dropdownIdx = this._dropdownIdx <= 0 ? matches.length - 1 : this._dropdownIdx - 1;
+  }
+
+  _dropdownDown() {
+    const matches = matchingSlashCommands(this.inputBuf, this.slashCommands);
+    if (matches.length === 0) return;
+    this._dropdownIdx = (this._dropdownIdx < 0 || this._dropdownIdx >= matches.length - 1) ? 0 : this._dropdownIdx + 1;
+  }
+
+  _acceptDropdown() {
+    const matches = matchingSlashCommands(this.inputBuf, this.slashCommands);
+    const idx = this._dropdownIdx >= 0 ? this._dropdownIdx : 0;
+    if (idx < matches.length) {
+      this.inputBuf = matches[idx].cmd + ' ';
+      this.cursorPos = this.inputBuf.length;
+    }
+    this._dropdownIdx = -1;
+    this._dropdownLines = 0;
+  }
+
+  // -------------------------------------------------------------------------
+  // Input editing
+  // -------------------------------------------------------------------------
+
+  _backspace() {
+    if (this.cursorPos > 0) {
+      this.inputBuf = this.inputBuf.slice(0, this.cursorPos - 1) + this.inputBuf.slice(this.cursorPos);
+      this.cursorPos--;
+      this._drawInputBox();
+    }
+  }
+
+  _cursorLeft() {
+    if (this.cursorPos > 0) {
+      this.cursorPos--;
+      this._drawInputBox();
+    }
+  }
+
+  _cursorRight() {
+    if (this.cursorPos < this.inputBuf.length) {
+      this.cursorPos++;
+      this._drawInputBox();
+    }
+  }
+
+  _historyUp() {
+    if (this.history.length === 0) return;
+    if (this.historyIdx === -1) {
+      this.savedInput = this.inputBuf;
+      this.historyIdx = this.history.length - 1;
+    } else if (this.historyIdx > 0) {
+      this.historyIdx--;
+    }
+    this.inputBuf = this.history[this.historyIdx];
+    this.cursorPos = this.inputBuf.length;
+    this._drawInputBox();
+  }
+
+  _historyDown() {
+    if (this.historyIdx === -1) return;
+    if (this.historyIdx < this.history.length - 1) {
+      this.historyIdx++;
+      this.inputBuf = this.history[this.historyIdx];
+    } else {
+      this.historyIdx = -1;
+      this.inputBuf = this.savedInput;
+    }
+    this.cursorPos = this.inputBuf.length;
+    this._drawInputBox();
+  }
+
+  // -------------------------------------------------------------------------
+  // Submit
+  // -------------------------------------------------------------------------
+
+  _submitInput() {
+    this._dropdownIdx = -1;
+    this._dropdownLines = 0;
+    const text = this.inputBuf.trim();
+    this.inputBuf = '';
+    this.cursorPos = 0;
+
+    if (!text) {
+      this._drawInputBox();
+      return;
+    }
+
+    // Show submitted line in output
+    const prompt = text.startsWith('/') ? 'cmd-> ' : 'bear> ';
+    this._pushLine(`  ${C.bold}${C.white}${prompt}${C.reset}${C.white}${text}${C.reset}`);
+
+    if (this.history.length === 0 || this.history[this.history.length - 1] !== text) {
+      this.history.push(text);
+    }
+    this.historyIdx = -1;
+    this.savedInput = '';
+
+    // Slash commands
+    if (text === '/help') {
+      this._showHelp();
+      this._fullRepaint();
+      return;
+    }
+
+    if (text === '/allowed') {
+      if (this.autoApproved.size === 0) {
+        this._pushLine(`${C.gray}  No auto-approved commands.${C.reset}`);
+      } else {
+        this._pushLine(`${C.white}  Auto-approved: ${[...this.autoApproved].sort().join(', ')}${C.reset}`);
+      }
+      this._fullRepaint();
+      return;
+    }
+
+    if (text === '/end') {
+      if (this._isConnected()) this._sendJson({ type: 'session_end' });
+      this._pushLine(`${C.gray}  Session ended.${C.reset}`);
+      this._cleanup();
+      this._pushLine('');
+      this._fullRepaint();
+      this._showSessionPicker();
+      return;
+    }
+
+    if (text === '/exit') {
+      this._pushLine(`${C.gray}  Disconnecting. Session preserved.${C.reset}`);
+      this._cleanup();
+      this._pushLine('');
+      this._fullRepaint();
+      this._showSessionPicker();
+      return;
+    }
+
+    if (!this._isConnected()) {
+      this._pushLine(`${C.red}  Not connected. Use /exit to pick a session.${C.reset}`);
+      this._fullRepaint();
+      return;
+    }
+
+    if (text === '/ps') {
+      this._sendJson({ type: 'process_list' });
+      this._fullRepaint();
+      return;
+    }
+
+    const killMatch = text.match(/^\/kill\s+(\d+)$/);
+    if (killMatch) {
+      this._sendJson({ type: 'process_kill', pid: parseInt(killMatch[1]) });
+      this._fullRepaint();
+      return;
+    }
+
+    const sendMatch = text.match(/^\/send\s+(\d+)\s+(.+)$/);
+    if (sendMatch) {
+      this._sendJson({ type: 'process_input', pid: parseInt(sendMatch[1]), text: sendMatch[2] });
+      this._fullRepaint();
+      return;
+    }
+
+    const sessionNameMatch = text.match(/^\/session\s+name\s+(.+)$/);
+    if (sessionNameMatch) {
+      const name = sessionNameMatch[1].trim();
+      if (!name) {
+        this._pushLine(`${C.red}  Usage: /session name <session name>${C.reset}`);
+      } else {
+        this._sendJson({ type: 'session_rename', name });
+      }
+      this._fullRepaint();
+      return;
+    }
+
+    const sessionWorkdirMatch = text.match(/^\/session\s+workdir\s+(.+)$/);
+    if (sessionWorkdirMatch) {
+      const path = sessionWorkdirMatch[1].trim();
+      if (!path) {
+        this._pushLine(`${C.red}  Usage: /session workdir <path>${C.reset}`);
+      } else {
+        this._sendJson({ type: 'session_workdir', path });
+      }
+      this._fullRepaint();
+      return;
+    }
+
+    if (text.startsWith('/session')) {
+      this._pushLine(`${C.red}  Usage: /session name <session name> OR /session workdir <path>${C.reset}`);
+      this._fullRepaint();
+      return;
+    }
+
+    // Regular chat
+    this._sendJson({ type: 'input', text: text });
+    this._fullRepaint();
+  }
+
+  // -------------------------------------------------------------------------
+  // Tool output rendering
   // -------------------------------------------------------------------------
 
   _renderToolOutput(toolName, toolArgs, output) {
@@ -1208,10 +1295,10 @@ export class BearClient {
       case 'read_file': {
         const path = toolArgs.path || '?';
         if (output.startsWith('Error')) {
-          this._writeln(`${C.red}  ✗ ${output}${C.reset}`);
+          this._pushLine(`${C.red}  ✗ ${output}${C.reset}`);
         } else {
           const lineCount = output.split('\n').length;
-          this._writeln(`${C.green}  ✓ Read ${path} (${lineCount} lines)${C.reset}`);
+          this._pushLine(`${C.green}  ✓ Read ${path} (${lineCount} lines)${C.reset}`);
         }
         break;
       }
@@ -1219,34 +1306,31 @@ export class BearClient {
       case 'edit_file':
       case 'patch_file': {
         const isErr = output.startsWith('Error') || output.startsWith('Patch failed');
-        // Split status line from diff (separated by blank line)
         const blankIdx = output.indexOf('\n\n');
         const status = blankIdx >= 0 ? output.substring(0, blankIdx) : output;
         const diff = blankIdx >= 0 ? output.substring(blankIdx + 2).trimEnd() : null;
         const color = isErr ? C.red : C.green;
         const icon = isErr ? '✗' : '✓';
-        this._writeln(`${color}  ${icon} ${status}${C.reset}`);
-        if (diff) {
-          this._writeDiff(diff, MAX_LINES * 2);
-        }
+        this._pushLine(`${color}  ${icon} ${status}${C.reset}`);
+        if (diff) this._writeDiffToBuffer(diff, MAX_LINES * 2);
         break;
       }
       case 'run_command':
-        this._writeToolTruncated(output, MAX_LINES);
+        this._writeTruncatedToBuffer(output, MAX_LINES);
         break;
       case 'list_files': {
         const count = output.split('\n').filter(l => l.length > 0).length;
-        this._writeln(`${C.green}  ✓ ${count} entries${C.reset}`);
-        this._writeToolTruncated(output, MAX_LINES);
+        this._pushLine(`${C.green}  ✓ ${count} entries${C.reset}`);
+        this._writeTruncatedToBuffer(output, MAX_LINES);
         break;
       }
       case 'search_text': {
         if (output === 'No matches found.') {
-          this._writeln(`${C.gray}  │ ${output}${C.reset}`);
+          this._pushLine(`${C.gray}  │ ${output}${C.reset}`);
         } else {
           const count = output.split('\n').filter(l => l.length > 0 && !l.startsWith('[')).length;
-          this._writeln(`${C.green}  ✓ ${count} matches${C.reset}`);
-          this._writeToolTruncated(output, MAX_LINES);
+          this._pushLine(`${C.green}  ✓ ${count} matches${C.reset}`);
+          this._writeTruncatedToBuffer(output, MAX_LINES);
         }
         break;
       }
@@ -1254,63 +1338,57 @@ export class BearClient {
         const isNoop = output.startsWith('Error') || output === 'Nothing to undo.';
         const color = isNoop ? C.gray : C.green;
         const icon = isNoop ? '│' : '✓';
-        this._writeln(`${color}  ${icon} ${output}${C.reset}`);
+        this._pushLine(`${color}  ${icon} ${output}${C.reset}`);
         break;
       }
       case 'user_prompt_options':
-        this._writeln(`${C.cyan}  │ ${output}${C.reset}`);
+        this._pushLine(`${C.cyan}  │ ${output}${C.reset}`);
         break;
       default:
-        this._writeToolTruncated(output, MAX_LINES);
+        this._writeTruncatedToBuffer(output, MAX_LINES);
         break;
     }
   }
 
-  _writeDiff(diff, maxLines) {
+  _writeDiffToBuffer(diff, maxLines) {
     const lines = diff.split('\n');
     const total = lines.length;
-    const renderLine = (line) => {
+    const render = (line) => {
       if (line.startsWith('+++') || line.startsWith('---')) {
-        this._writeln(`${C.bold}${C.white}    ${line}${C.reset}`);
+        return `${C.bold}${C.white}    ${line}${C.reset}`;
       } else if (line.startsWith('@@')) {
-        this._writeln(`${C.cyan}    ${line}${C.reset}`);
+        return `${C.cyan}    ${line}${C.reset}`;
       } else if (line.startsWith('+')) {
-        this._writeln(`${C.green}    ${line}${C.reset}`);
+        return `${C.green}    ${line}${C.reset}`;
       } else if (line.startsWith('-')) {
-        this._writeln(`${C.red}    ${line}${C.reset}`);
+        return `${C.red}    ${line}${C.reset}`;
       } else {
-        this._writeln(`${C.gray}    ${line}${C.reset}`);
+        return `${C.gray}    ${line}${C.reset}`;
       }
     };
     if (total <= maxLines) {
-      for (const line of lines) renderLine(line);
+      for (const line of lines) this._pushLine(render(line));
     } else {
       const head = Math.floor(maxLines / 2);
       const tail = maxLines - head;
-      for (let i = 0; i < head; i++) renderLine(lines[i]);
-      this._writeln(`${C.gray}    … (${total - head - tail} lines hidden) …${C.reset}`);
-      for (let i = total - tail; i < total; i++) renderLine(lines[i]);
+      for (let i = 0; i < head; i++) this._pushLine(render(lines[i]));
+      this._pushLine(`${C.gray}    … (${total - head - tail} lines hidden) …${C.reset}`);
+      for (let i = total - tail; i < total; i++) this._pushLine(render(lines[i]));
     }
   }
 
-  _writeToolTruncated(output, maxLines) {
+  _writeTruncatedToBuffer(output, maxLines) {
     const lines = output.split('\n');
     const total = lines.length;
     if (total <= maxLines) {
-      for (const line of lines) {
-        this._writeln(`${C.gray}  │ ${line}${C.reset}`);
-      }
+      for (const line of lines) this._pushLine(`${C.gray}  │ ${line}${C.reset}`);
       return;
     }
     const head = Math.floor(maxLines / 2);
     const tail = maxLines - head;
-    for (let i = 0; i < head; i++) {
-      this._writeln(`${C.gray}  │ ${lines[i]}${C.reset}`);
-    }
-    this._writeln(`${C.dim}${C.gray}  │   … (${total - head - tail} lines hidden) …${C.reset}`);
-    for (let i = total - tail; i < total; i++) {
-      this._writeln(`${C.gray}  │ ${lines[i]}${C.reset}`);
-    }
+    for (let i = 0; i < head; i++) this._pushLine(`${C.gray}  │ ${lines[i]}${C.reset}`);
+    this._pushLine(`${C.dim}${C.gray}  │   … (${total - head - tail} lines hidden) …${C.reset}`);
+    for (let i = total - tail; i < total; i++) this._pushLine(`${C.gray}  │ ${lines[i]}${C.reset}`);
   }
 
   // -------------------------------------------------------------------------
@@ -1347,11 +1425,34 @@ export class BearClient {
       `${C.cyan}    user_prompt_options ${C.white}Present choices to user${C.reset}`,
       '',
     ];
-    for (const l of lines) this._writeln(l);
+    for (const l of lines) this._pushLine(l);
   }
 
   // -------------------------------------------------------------------------
-  // Transport helpers
+  // Audio alert
+  // -------------------------------------------------------------------------
+
+  _playAlert() {
+    try {
+      if (!this._audioCtx) {
+        this._audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      const ctx = this._audioCtx;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.15);
+    } catch (_) {}
+  }
+
+  // -------------------------------------------------------------------------
+  // Transport
   // -------------------------------------------------------------------------
 
   _sendJson(obj) {

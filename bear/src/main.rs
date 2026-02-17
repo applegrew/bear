@@ -525,6 +525,7 @@ fn dispatch_server_msg(
             let _ = render_tx.send(RenderCmd::Notice(
                 format!("Session renamed to: {name}"),
             ));
+            let _ = render_tx.send(RenderCmd::SessionRenamed(name.clone()));
         }
         ServerMessage::Notice { text } => {
             let _ = render_tx.send(RenderCmd::Notice(text.clone()));
