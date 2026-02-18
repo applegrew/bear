@@ -495,6 +495,19 @@ export class BearClient {
     this.dc.onmessage = (event) => {
       let msg;
       try { msg = JSON.parse(event.data); } catch { return; }
+
+      // Reassemble chunked messages from the server
+      if (msg.__chunk) {
+        if (!this._chunkBufs) this._chunkBufs = {};
+        const buf = this._chunkBufs[msg.id] || (this._chunkBufs[msg.id] = { parts: [], total: msg.total });
+        buf.parts[msg.idx] = msg.data;
+        const received = buf.parts.filter(p => p !== undefined).length;
+        if (received < buf.total) return; // still waiting for more chunks
+        const full = buf.parts.join('');
+        delete this._chunkBufs[msg.id];
+        try { msg = JSON.parse(full); } catch { return; }
+      }
+
       this._handleServerMessage(msg);
     };
 

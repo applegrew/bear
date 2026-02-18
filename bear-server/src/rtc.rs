@@ -366,15 +366,13 @@ async fn handle_data_channel(
         tokio::select! {
             // Messages from session worker → forward to DataChannel
             batch = consumer.next_batch() => {
-                let mut send_failed = false;
-                for msg in batch {
-                    if dc_send_msg(&dc, &msg).await.is_err() {
-                        tracing::info!("rtc: client disconnected from session {session_id} (send failed)");
-                        send_failed = true;
-                        break;
+                for msg in &batch {
+                    if let Err(e) = dc_send_msg(&dc, msg).await {
+                        tracing::warn!("rtc: send failed for session {session_id}: {e}");
+                        // Don't break — the DataChannel may still be usable
+                        // for smaller messages. Only break on close event.
                     }
                 }
-                if send_failed { break; }
             }
             // Messages from DataChannel → forward to session worker
             dc_text = dc_msg_rx.recv() => {
@@ -411,11 +409,52 @@ async fn handle_data_channel(
     tracing::info!("rtc: DataChannel relay ended for session {session_id}, worker continues");
 }
 
+/// Maximum payload size per DataChannel message.
+/// SCTP (used by WebRTC DataChannels) typically limits messages to 16 KB.
+/// We use 15 KB to leave headroom for the chunk envelope.
+const DC_MAX_PAYLOAD: usize = 15_000;
+
 /// Send a ServerMessage as JSON text over a DataChannel.
+/// If the serialized JSON exceeds `DC_MAX_PAYLOAD`, it is split into numbered
+/// chunks that the browser client reassembles.
 async fn dc_send_msg(dc: &Arc<RTCDataChannel>, msg: &ServerMessage) -> Result<(), String> {
     let payload = serde_json::to_string(msg).map_err(|e| e.to_string())?;
-    dc.send_text(payload)
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+
+    if payload.len() <= DC_MAX_PAYLOAD {
+        return dc.send_text(payload)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+    }
+
+    // Split into chunks on char boundaries
+    let chunk_id = uuid::Uuid::new_v4().to_string();
+    let mut chunks: Vec<&str> = Vec::new();
+    let mut start = 0;
+    while start < payload.len() {
+        let mut end = (start + DC_MAX_PAYLOAD).min(payload.len());
+        // Back up to a char boundary
+        while end < payload.len() && !payload.is_char_boundary(end) {
+            end -= 1;
+        }
+        chunks.push(&payload[start..end]);
+        start = end;
+    }
+    let total = chunks.len();
+    tracing::debug!("dc_send_msg: splitting {}-byte payload into {total} chunks", payload.len());
+
+    for (idx, data) in chunks.iter().enumerate() {
+        let envelope = serde_json::json!({
+            "__chunk": true,
+            "id": chunk_id,
+            "idx": idx,
+            "total": total,
+            "data": data,
+        });
+        dc.send_text(envelope.to_string())
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
