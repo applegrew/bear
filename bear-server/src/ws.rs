@@ -317,7 +317,7 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
     let client_tx = ensure_worker_running(&state, session_id).await;
 
     // Subscribe to the session bus broadcast
-    let mut bus_rx = {
+    let (mut bus_rx, message_log, mut msg_idx) = {
         let buses = state.buses.read().await;
         let Some(bus) = buses.get(&session_id) else {
             let _ = ws_send(&mut socket, &ServerMessage::Error {
@@ -326,13 +326,15 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
             return;
         };
         // Replay buffered messages first
-        let log = bus.message_log.lock().await;
+        let log_ref = bus.message_log.clone();
+        let log = log_ref.lock().await;
+        let count = log.len();
         for msg in log.iter() {
             if ws_send(&mut socket, msg).await.is_err() {
                 return;
             }
         }
-        bus.bus_tx.subscribe()
+        (bus.bus_tx.subscribe(), log_ref.clone(), count)
     };
 
     tracing::info!("client connected to session {session_id}, replayed message log");
@@ -345,6 +347,7 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
             bus_msg = bus_rx.recv() => {
                 match bus_msg {
                     Ok(msg) => {
+                        msg_idx += 1;
                         let payload = match serde_json::to_string(&msg) {
                             Ok(p) => p,
                             Err(_) => continue,
@@ -355,8 +358,22 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("client lagged {n} messages on session {session_id}");
-                        // Continue — client will miss some messages but stay connected
+                        tracing::warn!("ws: client lagged {n} messages on session {session_id}, replaying from log");
+                        // Replay missed messages from the log
+                        let log = message_log.lock().await;
+                        let start = msg_idx;
+                        let end = log.len();
+                        for msg in &log[start..end] {
+                            let payload = match serde_json::to_string(msg) {
+                                Ok(p) => p,
+                                Err(_) => continue,
+                            };
+                            if SinkExt::send(&mut ws_sink, Message::Text(payload)).await.is_err() {
+                                tracing::info!("client disconnected during lag recovery on session {session_id}");
+                                break;
+                            }
+                        }
+                        msg_idx = end;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         tracing::info!("session bus closed for {session_id}");

@@ -255,7 +255,7 @@ pub struct SessionBus {
 
 impl SessionBus {
     pub fn new(client_tx: mpsc::Sender<ClientMessage>) -> Self {
-        let (bus_tx, _) = broadcast::channel(256);
+        let (bus_tx, _) = broadcast::channel(1024);
         Self {
             bus_tx,
             message_log: Arc::new(tokio::sync::Mutex::new(Vec::new())),

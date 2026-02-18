@@ -326,7 +326,7 @@ async fn handle_data_channel(
     let client_tx = ensure_worker_running(&state, session_id).await;
 
     // Subscribe to the session bus broadcast
-    let mut bus_rx = {
+    let (mut bus_rx, message_log, mut msg_idx) = {
         let buses = state.buses.read().await;
         let Some(bus) = buses.get(&session_id) else {
             let _ = dc_send_msg(&dc, &ServerMessage::Error {
@@ -335,13 +335,15 @@ async fn handle_data_channel(
             return;
         };
         // Replay buffered messages
-        let log = bus.message_log.lock().await;
+        let log_ref = bus.message_log.clone();
+        let log = log_ref.lock().await;
+        let count = log.len();
         for msg in log.iter() {
             if dc_send_msg(&dc, msg).await.is_err() {
                 return;
             }
         }
-        bus.bus_tx.subscribe()
+        (bus.bus_tx.subscribe(), log_ref.clone(), count)
     };
 
     tracing::info!("rtc: client connected to session {session_id}, replayed message log");
@@ -375,13 +377,24 @@ async fn handle_data_channel(
             bus_msg = bus_rx.recv() => {
                 match bus_msg {
                     Ok(msg) => {
+                        msg_idx += 1;
                         if dc_send_msg(&dc, &msg).await.is_err() {
                             tracing::info!("rtc: client disconnected from session {session_id} (send failed)");
                             break;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("rtc: client lagged {n} messages on session {session_id}");
+                        tracing::warn!("rtc: client lagged {n} messages on session {session_id}, replaying from log");
+                        let log = message_log.lock().await;
+                        let start = msg_idx;
+                        let end = log.len();
+                        for msg in &log[start..end] {
+                            if dc_send_msg(&dc, msg).await.is_err() {
+                                tracing::info!("rtc: client disconnected during lag recovery on session {session_id}");
+                                break;
+                            }
+                        }
+                        msg_idx = end;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         tracing::info!("rtc: session bus closed for {session_id}");

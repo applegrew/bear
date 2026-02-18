@@ -166,7 +166,7 @@ pub fn spawn_terminal_thread(
                     state.push_line("");
                     // Use the existing inline menu for approval
                     let options = vec!["Approve".to_string(), "Reject".to_string()];
-                    if let Some(selected) = state.run_inline_menu(&render_rx, None, "Execute this plan?", &options, false) {
+                    if let Some(selected) = state.run_inline_menu(&render_rx, Some(&plan_id), "Execute this plan?", &options, false) {
                         let approved = selected.first().copied() == Some(0);
                         let _ = rt.block_on(event_tx.send(
                             TermEvent::TaskPlanResult { plan_id, approved },
