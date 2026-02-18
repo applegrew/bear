@@ -877,6 +877,17 @@ export class BearClient {
   // -------------------------------------------------------------------------
 
   _bindTerminal() {
+    // Mouse wheel / trackpad scroll → viewport scroll
+    this.term.element.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      if (e.deltaY < 0) {
+        this._scrollUp(3);
+      } else if (e.deltaY > 0) {
+        this._scrollDown(3);
+      }
+      this._fullRepaint();
+    }, { passive: false });
+
     this.term.onData((data) => {
       if (this.inSessionPicker) { this._handlePickerKey(data); return; }
       if (this.inToolConfirm) { this._handleToolConfirmKey(data); return; }

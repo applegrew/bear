@@ -193,9 +193,25 @@ pub fn spawn_terminal_thread(
                 }
             }
 
-            // Poll keyboard (50ms)
+            // Poll terminal events (50ms)
             if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
-                if let Ok(Event::Key(key)) = event::read() {
+                let ev = event::read();
+                // Handle mouse scroll for viewport scrolling
+                if let Ok(Event::Mouse(mouse)) = &ev {
+                    match mouse.kind {
+                        event::MouseEventKind::ScrollUp => {
+                            state.scroll_up(3);
+                            state.full_repaint();
+                        }
+                        event::MouseEventKind::ScrollDown => {
+                            state.scroll_down(3);
+                            state.full_repaint();
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+                if let Ok(Event::Key(key)) = ev {
                     let action = map_key(key);
 
                     if state.dropdown_active() {
@@ -458,7 +474,7 @@ impl TermState {
         terminal::enable_raw_mode()?;
         let (w, h) = terminal::size().unwrap_or((80, 24));
         let mut out = io::stdout();
-        let _ = execute!(out, terminal::EnterAlternateScreen, cursor::Hide);
+        let _ = execute!(out, terminal::EnterAlternateScreen, cursor::Hide, event::EnableMouseCapture);
         Ok(Self {
             input_buf: String::new(),
             cursor_pos: 0,
@@ -485,7 +501,7 @@ impl TermState {
 
     fn cleanup(&self) {
         let mut out = io::stdout();
-        let _ = execute!(out, cursor::Show, terminal::LeaveAlternateScreen);
+        let _ = execute!(out, event::DisableMouseCapture, cursor::Show, terminal::LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
     }
 
