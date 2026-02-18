@@ -84,7 +84,6 @@ pub enum TermEvent {
     },
     UserPromptResult { prompt_id: String, selected: Vec<usize> },
     TaskPlanResult { plan_id: String, approved: bool },
-    Interrupt,
     Quit,
 }
 
@@ -148,6 +147,11 @@ pub fn spawn_terminal_thread(
                             TermEvent::ToolConfirmResult { tool_call_id, choice },
                         ));
                     }
+                    if state.quit_requested {
+                        state.cleanup();
+                        let _ = rt.block_on(event_tx.send(TermEvent::Quit));
+                        return;
+                    }
                     // else: resolved by another client, no event to send
                     state.full_repaint();
                     continue;
@@ -157,6 +161,11 @@ pub fn spawn_terminal_thread(
                         let _ = rt.block_on(event_tx.send(
                             TermEvent::UserPromptResult { prompt_id, selected },
                         ));
+                    }
+                    if state.quit_requested {
+                        state.cleanup();
+                        let _ = rt.block_on(event_tx.send(TermEvent::Quit));
+                        return;
                     }
                     state.full_repaint();
                     continue;
@@ -177,6 +186,11 @@ pub fn spawn_terminal_thread(
                         let _ = rt.block_on(event_tx.send(
                             TermEvent::TaskPlanResult { plan_id, approved },
                         ));
+                    }
+                    if state.quit_requested {
+                        state.cleanup();
+                        let _ = rt.block_on(event_tx.send(TermEvent::Quit));
+                        return;
                     }
                     state.full_repaint();
                     continue;
@@ -267,9 +281,6 @@ pub fn spawn_terminal_thread(
                             let _ = rt.block_on(event_tx.send(TermEvent::UserLine(line)));
                             state.full_repaint();
                         }
-                        KeyAction::Interrupt => {
-                            let _ = rt.block_on(event_tx.send(TermEvent::Interrupt));
-                        }
                         KeyAction::Quit => {
                             state.cleanup();
                             let _ = rt.block_on(event_tx.send(TermEvent::Quit));
@@ -325,6 +336,9 @@ struct TermState {
 
     /// Commands received during a blocking picker that need to be processed later.
     deferred_cmds: Vec<RenderCmd>,
+
+    /// Set by a blocking picker when the user presses Ctrl+C to quit.
+    quit_requested: bool,
 }
 
 /// Format a tool call into human-readable description lines for the card UI.
@@ -502,6 +516,7 @@ impl TermState {
             last_dropdown_count: 0,
             slash_commands: Vec::new(),
             deferred_cmds: Vec::new(),
+            quit_requested: false,
         })
     }
 
@@ -720,7 +735,7 @@ impl TermState {
         let right = if self.streaming {
             "esc interrupt                          "
         } else {
-            "esc interrupt  ↑↓ history  ctrl+d quit"
+            "esc interrupt  ↑↓ history  ctrl+c quit"
         };
 
         let left_len = visible_len(&left);
@@ -987,6 +1002,12 @@ impl TermState {
                                 _ => ToolConfirmChoice::Always,
                             });
                         }
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.output_lines.truncate(picker_start);
+                            self.push_line("");
+                            self.quit_requested = true;
+                            return None;
+                        }
                         _ => continue,
                     }
                     // Redraw picker
@@ -1090,6 +1111,12 @@ impl TermState {
                                 self.push_line("");
                                 return Some(vec![idx]);
                             }
+                        }
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.output_lines.truncate(menu_start);
+                            self.push_line("");
+                            self.quit_requested = true;
+                            return None;
                         }
                         _ => continue,
                     }
@@ -1358,7 +1385,6 @@ enum KeyAction {
     Tab,
     Escape,
     Submit,
-    Interrupt,
     Quit,
     None,
 }
@@ -1366,8 +1392,7 @@ enum KeyAction {
 fn map_key(key: KeyEvent) -> KeyAction {
     match key.code {
         KeyCode::Enter => KeyAction::Submit,
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => KeyAction::Interrupt,
-        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => KeyAction::Quit,
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => KeyAction::Quit,
         KeyCode::Up => KeyAction::HistoryPrev,
         KeyCode::Down => KeyAction::HistoryNext,
         KeyCode::Left => KeyAction::Left,

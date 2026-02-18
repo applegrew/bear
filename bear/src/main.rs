@@ -355,9 +355,6 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                     ws_write.send(Message::Text(payload)).await?;
                 }
             }
-            LoopEvent::FromTerm(TermEvent::Interrupt) => {
-                // Ctrl+C — no-op (tool confirmation is handled by picker)
-            }
             LoopEvent::FromTerm(TermEvent::UserPromptResult { prompt_id, selected }) => {
                 let payload = serde_json::to_string(
                     &ClientMessage::UserPromptResponse { prompt_id, selected },
