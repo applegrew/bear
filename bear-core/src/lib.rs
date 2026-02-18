@@ -182,6 +182,8 @@ pub enum ServerMessage {
     PromptResolved {
         prompt_id: String,
     },
+    /// Echo of a user's chat input, broadcast so other clients can display it.
+    UserInput { text: String },
     Notice { text: String },
     Error { text: String },
     Thinking,

@@ -125,6 +125,9 @@ export class BearClient {
     this._dropdownIdx = -1;
     this.slashCommands = [];
 
+    // Echo suppression: skip the next UserInput echo from the server
+    this._awaitingInputEcho = false;
+
     // Last tool tracking
     this._lastToolName = '';
     this._lastToolArgs = {};
@@ -783,6 +786,18 @@ export class BearClient {
         break;
       }
 
+      case 'user_input':
+        if (this._awaitingInputEcho) {
+          // Our own echo — already rendered locally in _submitInput()
+          this._awaitingInputEcho = false;
+        } else {
+          // Another client submitted this prompt
+          const uiPrompt = msg.text.startsWith('/') ? 'cmd-> ' : 'bear> ';
+          this._pushLine(`  ${C.bold}${C.white}${uiPrompt}${C.reset}${C.white}${msg.text}${C.reset}`);
+          this._fullRepaint();
+        }
+        break;
+
       case 'notice':
         this._pushLine(`${C.yellow}[notice] ${msg.text}${C.reset}`);
         this._fullRepaint();
@@ -1385,6 +1400,7 @@ export class BearClient {
     }
 
     // Regular chat
+    this._awaitingInputEcho = true;
     this._sendJson({ type: 'input', text: text });
     this._fullRepaint();
   }

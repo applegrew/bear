@@ -521,6 +521,8 @@ async fn session_worker(
 
         match client_msg {
             ClientMessage::Input { text } => {
+                // Broadcast the user's input so all connected clients can display it.
+                bus.send(ServerMessage::UserInput { text: text.clone() }).await;
                 // Record input to shared history
                 {
                     let mut sessions = state.sessions.write().await;

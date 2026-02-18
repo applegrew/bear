@@ -56,6 +56,10 @@ pub enum RenderCmd {
         detail: Option<String>,
     },
     Thinking,
+    /// Another client submitted a chat prompt — display it.
+    UserInput { text: String },
+    /// Tell the terminal to skip the next UserInput echo (we already rendered it locally).
+    SuppressNextInputEcho,
     Quit,
 }
 
@@ -339,6 +343,10 @@ struct TermState {
 
     /// Set by a blocking picker when the user presses Ctrl+C to quit.
     quit_requested: bool,
+
+    /// Set after this client submits input, cleared when the echo arrives.
+    /// Prevents double-rendering of our own prompt.
+    awaiting_input_echo: bool,
 }
 
 /// Format a tool call into human-readable description lines for the card UI.
@@ -517,6 +525,7 @@ impl TermState {
             slash_commands: Vec::new(),
             deferred_cmds: Vec::new(),
             quit_requested: false,
+            awaiting_input_echo: false,
         })
     }
 
@@ -1244,6 +1253,17 @@ impl TermState {
                 self.push_line(&format!("  {} {}{}", icon, color_fn(&description), a_gray(&detail_str)));
                 self.full_repaint();
             }
+            RenderCmd::UserInput { text } => {
+                if self.awaiting_input_echo {
+                    // This is our own echo — already rendered locally in submit()
+                    self.awaiting_input_echo = false;
+                } else {
+                    // Another client submitted this prompt — display it
+                    let prompt = if text.starts_with('/') { "cmd-> " } else { "bear> " };
+                    self.push_line(&format!("  {}{}", a_bold(&a_white(prompt)), a_white(&text)));
+                    self.full_repaint();
+                }
+            }
             RenderCmd::Thinking => {
                 if !self.thinking_line_shown {
                     self.streaming = true;
@@ -1252,6 +1272,9 @@ impl TermState {
                     self.thinking_line_shown = true;
                     self.full_repaint();
                 }
+            }
+            RenderCmd::SuppressNextInputEcho => {
+                self.awaiting_input_echo = true;
             }
             RenderCmd::UserPrompt { .. } => {}
             RenderCmd::ToolResolved { .. } => {}

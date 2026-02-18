@@ -349,6 +349,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                     let _ = render_tx.send(RenderCmd::Notice(help));
                 } else {
                     // Regular chat input -> send to server/LLM
+                    let _ = render_tx.send(RenderCmd::SuppressNextInputEcho);
                     let payload = serde_json::to_string(
                         &ClientMessage::Input { text: line },
                     )?;
@@ -528,6 +529,9 @@ fn dispatch_server_msg(
             let _ = render_tx.send(RenderCmd::PromptResolved {
                 prompt_id: prompt_id.clone(),
             });
+        }
+        ServerMessage::UserInput { text } => {
+            let _ = render_tx.send(RenderCmd::UserInput { text: text.clone() });
         }
         ServerMessage::Pong => {}
     }
