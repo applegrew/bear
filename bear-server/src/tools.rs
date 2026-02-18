@@ -1264,13 +1264,20 @@ async fn execute_web_fetch(
     let text = collapse_whitespace(&text);
 
     if text.len() > max_chars {
-        format!("{}\n\n[... truncated at {max_chars} chars, total {} chars]", &text[..max_chars], text.len())
+        // Find a char boundary at or before max_chars to avoid splitting a multi-byte char.
+        let mut end = max_chars;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}\n\n[... truncated at {end} bytes, total {} bytes]", &text[..end], text.len())
     } else {
         text
     }
 }
 
 /// Simple HTML tag stripper — removes tags, decodes common entities, collapses whitespace.
+/// All indexing uses **byte** offsets into the lowercased string so that
+/// multi-byte UTF-8 characters (e.g. `·`) never cause a panic.
 fn strip_html_tags(html: &str) -> String {
     let mut result = String::with_capacity(html.len());
     let mut in_tag = false;
@@ -1278,30 +1285,33 @@ fn strip_html_tags(html: &str) -> String {
     let mut in_style = false;
 
     let lower = html.to_lowercase();
-    let chars: Vec<char> = html.chars().collect();
-    let len = chars.len();
+    let bytes = lower.as_bytes();
+    let len = bytes.len();
     let mut i = 0;
 
     while i < len {
-        if !in_tag && i + 7 < len && &lower[i..i+7] == "<script" {
+        // --- script / style filtering (all tag literals are ASCII) ---
+        if !in_tag && lower[i..].starts_with("<script") {
             in_script = true;
             in_tag = true;
             i += 1;
             continue;
         }
-        if in_script && i + 9 <= len && &lower[i..i+9] == "</script>" {
+        if in_script && lower[i..].starts_with("</script>") {
             in_script = false;
+            in_tag = false;
             i += 9;
             continue;
         }
-        if !in_tag && i + 6 < len && &lower[i..i+6] == "<style" {
+        if !in_tag && lower[i..].starts_with("<style") {
             in_style = true;
             in_tag = true;
             i += 1;
             continue;
         }
-        if in_style && i + 8 <= len && &lower[i..i+8] == "</style>" {
+        if in_style && lower[i..].starts_with("</style>") {
             in_style = false;
+            in_tag = false;
             i += 8;
             continue;
         }
@@ -1309,65 +1319,71 @@ fn strip_html_tags(html: &str) -> String {
             i += 1;
             continue;
         }
-        if chars[i] == '<' {
+
+        if bytes[i] == b'<' {
             in_tag = true;
             // Add newline for block elements
-            if i + 2 < len {
-                let next2 = &lower[i..lower.len().min(i+5)];
-                if next2.starts_with("<br") || next2.starts_with("<p ")
-                    || next2.starts_with("<p>") || next2.starts_with("<div")
-                    || next2.starts_with("<li") || next2.starts_with("<h1")
-                    || next2.starts_with("<h2") || next2.starts_with("<h3")
-                    || next2.starts_with("<tr")
-                {
-                    result.push('\n');
-                }
+            let rest = &lower[i..];
+            if rest.starts_with("<br") || rest.starts_with("<p ")
+                || rest.starts_with("<p>") || rest.starts_with("<div")
+                || rest.starts_with("<li") || rest.starts_with("<h1")
+                || rest.starts_with("<h2") || rest.starts_with("<h3")
+                || rest.starts_with("<tr")
+            {
+                result.push('\n');
             }
             i += 1;
             continue;
         }
-        if chars[i] == '>' {
+        if bytes[i] == b'>' {
             in_tag = false;
             i += 1;
             continue;
         }
         if !in_tag {
-            // Decode common HTML entities
-            if chars[i] == '&' {
-                if i + 4 <= len && &html[i..i+4] == "&lt;" {
+            // Decode common HTML entities (all ASCII, safe to compare bytes)
+            if bytes[i] == b'&' {
+                if html[i..].starts_with("&lt;") {
                     result.push('<');
                     i += 4;
                     continue;
                 }
-                if i + 4 <= len && &html[i..i+4] == "&gt;" {
+                if html[i..].starts_with("&gt;") {
                     result.push('>');
                     i += 4;
                     continue;
                 }
-                if i + 5 <= len && &html[i..i+5] == "&amp;" {
+                if html[i..].starts_with("&amp;") {
                     result.push('&');
                     i += 5;
                     continue;
                 }
-                if i + 6 <= len && &html[i..i+6] == "&quot;" {
+                if html[i..].starts_with("&quot;") {
                     result.push('"');
                     i += 6;
                     continue;
                 }
-                if i + 6 <= len && &html[i..i+6] == "&nbsp;" {
+                if html[i..].starts_with("&nbsp;") {
                     result.push(' ');
                     i += 6;
                     continue;
                 }
-                if i + 5 <= len && &html[i..i+5] == "&#39;" {
+                if html[i..].starts_with("&#39;") {
                     result.push('\'');
                     i += 5;
                     continue;
                 }
             }
-            result.push(chars[i]);
+            // Push the full UTF-8 character at this byte position
+            if let Some(ch) = lower[i..].chars().next() {
+                result.push(ch);
+                i += ch.len_utf8();
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
         }
-        i += 1;
     }
     result
 }
@@ -1955,6 +1971,53 @@ Then the second:
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "write_file");
         assert_eq!(calls[0].arguments["path"], "a.json");
+    }
+
+    // -- strip_html_tags ----------------------------------------------------
+
+    #[test]
+    fn strip_html_basic() {
+        assert_eq!(strip_html_tags("<p>hello</p>"), "\nhello");
+    }
+
+    #[test]
+    fn strip_html_entities() {
+        assert_eq!(strip_html_tags("a &lt; b &amp; c &gt; d"), "a < b & c > d");
+    }
+
+    #[test]
+    fn strip_html_script_removed() {
+        assert_eq!(
+            strip_html_tags("before<script>var x=1;</script>after"),
+            "beforeafter"
+        );
+    }
+
+    #[test]
+    fn strip_html_multibyte_utf8() {
+        // Regression: '·' is 2 bytes (0xC2 0xB7). The old code used char
+        // indices as byte indices, panicking on multi-byte characters.
+        let html = "<a>tao/examples/drag_window.rs at dev · tauri-apps/tao · github</a>";
+        let result = strip_html_tags(html);
+        assert!(result.contains("·"));
+        assert!(result.contains("tauri-apps"));
+    }
+
+    #[test]
+    fn strip_html_multibyte_in_text() {
+        // Various multi-byte chars: '€' (3 bytes), '日' (3 bytes), emoji (4 bytes)
+        let html = "<div>Price: €100</div><p>日本語</p>";
+        let result = strip_html_tags(html);
+        assert!(result.contains("€100"));
+        assert!(result.contains("日本語"));
+    }
+
+    #[test]
+    fn strip_html_multibyte_near_tags() {
+        let html = "café<br>résumé";
+        let result = strip_html_tags(html);
+        assert!(result.contains("café"));
+        assert!(result.contains("résumé"));
     }
 
     // -- resolve_path ------------------------------------------------------
