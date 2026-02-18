@@ -1214,11 +1214,13 @@ impl TermState {
                 self.full_repaint();
             }
             RenderCmd::Thinking => {
-                self.streaming = true;
-                self.streaming_buf.clear();
-                self.push_line(&format!("  {}", a_gray("⟳ Thinking…")));
-                self.thinking_line_shown = true;
-                self.full_repaint();
+                if !self.thinking_line_shown {
+                    self.streaming = true;
+                    self.streaming_buf.clear();
+                    self.push_line(&format!("  {}", a_gray("⟳ Thinking…")));
+                    self.thinking_line_shown = true;
+                    self.full_repaint();
+                }
             }
             RenderCmd::UserPrompt { .. } => {}
             RenderCmd::ToolResolved { .. } => {}

@@ -1051,6 +1051,10 @@ async fn handle_user_input(
         session.history.push(user_msg);
     }
 
+    // Show the thinking indicator immediately — plan_task and reflection
+    // are non-streaming calls that can take a while.
+    bus.send(ServerMessage::Thinking).await;
+
     // --- Task planning: classify the request ---
     let (history, cwd) = {
         let sessions = state.sessions.read().await;

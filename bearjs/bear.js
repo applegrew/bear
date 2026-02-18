@@ -779,12 +779,14 @@ export class BearClient {
         break;
 
       case 'thinking':
-        this._streaming = true;
-        this._streamBuf = '';
-        this._pushLine(`${C.dim}${C.gray}  ⟳ Thinking…${C.reset}`);
-        this._thinkingLineShown = true;
-        this._startSpinner();
-        this._fullRepaint();
+        if (!this._thinkingLineShown) {
+          this._streaming = true;
+          this._streamBuf = '';
+          this._pushLine(`${C.dim}${C.gray}  ⟳ Thinking…${C.reset}`);
+          this._thinkingLineShown = true;
+          this._startSpinner();
+          this._fullRepaint();
+        }
         break;
 
       case 'user_prompt':
