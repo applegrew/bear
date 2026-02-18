@@ -586,10 +586,7 @@ async fn session_worker(
                                 }
                                 // Execute the tool and send output
                                 let output = execute_tool(&state, session_id, &bus, &ptc).await;
-                                bus.send(ServerMessage::ToolOutput {
-                                    tool_call_id: ptc.tool_call.id.clone(),
-                                    output: output.clone(),
-                                }).await;
+                                bus.send(tool_output_msg(&ptc, output.clone())).await;
                                 append_tool_result(&state, session_id, &ptc.tool_call.name, &output).await;
                             }
                             let _ = result_tx.send((approved, always));
@@ -1285,10 +1282,7 @@ async fn execute_task_plan(
                                                         }
                                                     }
                                                     let output = execute_tool(state, session_id, bus, &ptc).await;
-                                                    bus.send(ServerMessage::ToolOutput {
-                                                        tool_call_id: ptc.tool_call.id.clone(),
-                                                        output: output.clone(),
-                                                    }).await;
+                                                    bus.send(tool_output_msg(&ptc, output.clone())).await;
                                                     append_tool_result(state, session_id, &ptc.tool_call.name, &output).await;
                                                 }
                                                 let _ = result_tx.send((approved, always));
@@ -1621,10 +1615,7 @@ async fn run_subagent(
                 display_tc.name = tool_display_name(&ptc.tool_call.name).to_string();
                 bus.send(ServerMessage::ToolAutoApproved { tool_call: display_tc }).await;
                 let output = execute_tool(&state, session_id, &bus, &ptc).await;
-                bus.send(ServerMessage::ToolOutput {
-                    tool_call_id: ptc.tool_call.id.clone(),
-                    output: output.clone(),
-                }).await;
+                bus.send(tool_output_msg(&ptc, output.clone())).await;
                 append_tool_result(&state, session_id, &ptc.tool_call.name, &output).await;
                 budget.increment();
 
@@ -2015,6 +2006,16 @@ fn extract_shell_commands(cmd_str: &str) -> Vec<String> {
     result
 }
 
+/// Build a `ToolOutput` message with the display name and arguments.
+fn tool_output_msg(ptc: &PendingToolCall, output: String) -> ServerMessage {
+    ServerMessage::ToolOutput {
+        tool_call_id: ptc.tool_call.id.clone(),
+        tool_name: tool_display_name(&ptc.tool_call.name).to_string(),
+        tool_args: ptc.tool_call.arguments.clone(),
+        output,
+    }
+}
+
 /// Map internal tool names to their user-facing display names.
 /// `read_symbol` → `read_file`, `patch_symbol` → `patch_file`.
 /// This ensures auto-approve, tool cards, and "Always approve" all treat
@@ -2057,10 +2058,7 @@ async fn present_next_tool(
 
         if options.is_empty() {
             let output = "Error: user_prompt_options requires a non-empty 'options' array.".to_string();
-            bus.send(ServerMessage::ToolOutput {
-                tool_call_id: ptc.tool_call.id.clone(),
-                output: output.clone(),
-            }).await;
+            bus.send(tool_output_msg(&ptc, output.clone())).await;
             append_tool_result(state, session_id, &ptc.tool_call.name, &output).await;
             *tool_depth += 1;
             if !tool_queue.is_empty() {
@@ -2095,10 +2093,7 @@ async fn present_next_tool(
     ];
     if AUTO_APPROVED_TOOLS.contains(&ptc.tool_call.name.as_str()) {
         let output = execute_tool(state, session_id, bus, &ptc).await;
-        bus.send(ServerMessage::ToolOutput {
-            tool_call_id: ptc.tool_call.id.clone(),
-            output: output.clone(),
-        }).await;
+        bus.send(tool_output_msg(&ptc, output.clone())).await;
         append_tool_result(state, session_id, &ptc.tool_call.name, &output).await;
         *tool_depth += 1;
         if !tool_queue.is_empty() {
@@ -2137,10 +2132,7 @@ async fn present_next_tool(
         }).await;
 
         let output = execute_tool(state, session_id, bus, &ptc).await;
-        bus.send(ServerMessage::ToolOutput {
-            tool_call_id: ptc.tool_call.id.clone(),
-            output: output.clone(),
-        }).await;
+        bus.send(tool_output_msg(&ptc, output.clone())).await;
         append_tool_result(state, session_id, &ptc.tool_call.name, &output).await;
         *tool_depth += 1;
         if !tool_queue.is_empty() {
@@ -2236,10 +2228,7 @@ async fn handle_tool_confirm(
 
     if !approved {
         let output = "Tool call rejected by user.".to_string();
-        bus.send(ServerMessage::ToolOutput {
-            tool_call_id: ptc.tool_call.id.clone(),
-            output: output.clone(),
-        }).await;
+        bus.send(tool_output_msg(&ptc, output.clone())).await;
         append_tool_result(state, session_id, &ptc.tool_call.name, &output).await;
         // If rejected, skip remaining queued tools and re-invoke LLM
         tool_queue.clear();
@@ -2249,10 +2238,7 @@ async fn handle_tool_confirm(
     }
 
     let output = execute_tool(state, session_id, bus, &ptc).await;
-    bus.send(ServerMessage::ToolOutput {
-        tool_call_id: ptc.tool_call.id.clone(),
-        output: output.clone(),
-    }).await;
+    bus.send(tool_output_msg(&ptc, output.clone())).await;
     append_tool_result(state, session_id, &ptc.tool_call.name, &output).await;
     *tool_depth += 1;
 
@@ -2317,10 +2303,7 @@ async fn handle_prompt_response(
         }
     };
 
-    bus.send(ServerMessage::ToolOutput {
-        tool_call_id: pp.tool_call.tool_call.id.clone(),
-        output: output.clone(),
-    }).await;
+    bus.send(tool_output_msg(&pp.tool_call, output.clone())).await;
     append_tool_result(state, session_id, &pp.tool_call.tool_call.name, &output).await;
     *tool_depth += 1;
 

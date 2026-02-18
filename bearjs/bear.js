@@ -672,7 +672,9 @@ export class BearClient {
       }
 
       case 'tool_output':
-        this._renderToolOutput(this._lastToolName || '', this._lastToolArgs || {}, msg.output);
+        this._lastToolName = msg.tool_name || this._lastToolName || '';
+        this._lastToolArgs = msg.tool_args || this._lastToolArgs || {};
+        this._renderToolOutput(this._lastToolName, this._lastToolArgs, msg.output);
         this._fullRepaint();
         break;
 

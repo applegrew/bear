@@ -127,7 +127,7 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         extracted_commands: Option<Vec<String>>,
     },
-    ToolOutput { tool_call_id: String, output: String },
+    ToolOutput { tool_call_id: String, tool_name: String, tool_args: serde_json::Value, output: String },
     ProcessStarted { info: ProcessInfo },
     ProcessOutput { pid: u32, text: String },
     ProcessExited { pid: u32, code: Option<i32> },

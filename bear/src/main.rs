@@ -402,10 +402,11 @@ fn dispatch_server_msg(
             card.push_str("└─");
             let _ = render_tx.send(RenderCmd::Notice(card));
         }
-        ServerMessage::ToolOutput { output, .. } => {
+        ServerMessage::ToolOutput { tool_name, tool_args, output, .. } => {
+            *last_tool = (tool_name.clone(), tool_args.clone());
             let _ = render_tx.send(RenderCmd::ToolOutput {
-                tool_name: last_tool.0.clone(),
-                tool_args: last_tool.1.clone(),
+                tool_name: tool_name.clone(),
+                tool_args: tool_args.clone(),
                 output: output.clone(),
             });
         }
