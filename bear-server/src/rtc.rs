@@ -414,6 +414,29 @@ async fn handle_data_channel(
 /// We use 15 KB to leave headroom for the chunk envelope.
 const DC_MAX_PAYLOAD: usize = 15_000;
 
+/// Split `payload` into chunks of at most `max_bytes` each, respecting
+/// UTF-8 char boundaries. Returns a vec of string slices.
+fn chunk_payload(payload: &str, max_bytes: usize) -> Vec<&str> {
+    assert!(max_bytes > 0, "max_bytes must be > 0");
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < payload.len() {
+        let mut end = (start + max_bytes).min(payload.len());
+        // Back up to a char boundary
+        while end > start && !payload.is_char_boundary(end) {
+            end -= 1;
+        }
+        // If we backed up all the way (char wider than max_bytes), include
+        // at least one full char to guarantee forward progress.
+        if end == start {
+            end = start + payload[start..].chars().next().map_or(0, |c| c.len_utf8());
+        }
+        chunks.push(&payload[start..end]);
+        start = end;
+    }
+    chunks
+}
+
 /// Send a ServerMessage as JSON text over a DataChannel.
 /// If the serialized JSON exceeds `DC_MAX_PAYLOAD`, it is split into numbered
 /// chunks that the browser client reassembles.
@@ -427,19 +450,8 @@ async fn dc_send_msg(dc: &Arc<RTCDataChannel>, msg: &ServerMessage) -> Result<()
             .map_err(|e| e.to_string());
     }
 
-    // Split into chunks on char boundaries
     let chunk_id = uuid::Uuid::new_v4().to_string();
-    let mut chunks: Vec<&str> = Vec::new();
-    let mut start = 0;
-    while start < payload.len() {
-        let mut end = (start + DC_MAX_PAYLOAD).min(payload.len());
-        // Back up to a char boundary
-        while end < payload.len() && !payload.is_char_boundary(end) {
-            end -= 1;
-        }
-        chunks.push(&payload[start..end]);
-        start = end;
-    }
+    let chunks = chunk_payload(&payload, DC_MAX_PAYLOAD);
     let total = chunks.len();
     tracing::debug!("dc_send_msg: splitting {}-byte payload into {total} chunks", payload.len());
 
@@ -457,4 +469,95 @@ async fn dc_send_msg(dc: &Arc<RTCDataChannel>, msg: &ServerMessage) -> Result<()
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- chunk_payload tests ------------------------------------------------
+
+    #[test]
+    fn chunk_small_payload_single_chunk() {
+        let payload = "hello";
+        let chunks = chunk_payload(payload, 100);
+        assert_eq!(chunks, vec!["hello"]);
+    }
+
+    #[test]
+    fn chunk_exact_boundary() {
+        let payload = "abcdef";
+        let chunks = chunk_payload(payload, 3);
+        assert_eq!(chunks, vec!["abc", "def"]);
+    }
+
+    #[test]
+    fn chunk_uneven_split() {
+        let payload = "abcdefg";
+        let chunks = chunk_payload(payload, 3);
+        assert_eq!(chunks, vec!["abc", "def", "g"]);
+    }
+
+    #[test]
+    fn chunk_respects_utf8_boundaries() {
+        // '€' is 3 bytes. "a€b" = 5 bytes total.
+        let payload = "a€b";
+        // max_bytes=4: "a€" (4 bytes) + "b" (1 byte)
+        let chunks = chunk_payload(payload, 4);
+        assert_eq!(chunks, vec!["a€", "b"]);
+        assert_eq!(chunks.concat(), payload);
+    }
+
+    #[test]
+    fn chunk_wide_char_exceeds_max_bytes() {
+        // '€' is 3 bytes. With max_bytes=2, the chunker must still
+        // make forward progress by emitting the full char.
+        let payload = "€";
+        let chunks = chunk_payload(payload, 2);
+        assert_eq!(chunks, vec!["€"]);
+    }
+
+    #[test]
+    fn chunk_reassembles_to_original() {
+        let payload = "x".repeat(50_000);
+        let chunks = chunk_payload(&payload, 15_000);
+        assert_eq!(chunks.len(), 4); // 15000 + 15000 + 15000 + 5000
+        let reassembled: String = chunks.concat();
+        assert_eq!(reassembled, payload);
+    }
+
+    #[test]
+    fn chunk_large_json_payload() {
+        // Simulate a large ToolOutput JSON
+        let big_output = "a".repeat(40_000);
+        let msg = serde_json::json!({
+            "type": "tool_output",
+            "output": big_output,
+        });
+        let payload = serde_json::to_string(&msg).unwrap();
+        let chunks = chunk_payload(&payload, DC_MAX_PAYLOAD);
+        assert!(chunks.len() >= 3);
+        let reassembled: String = chunks.concat();
+        assert_eq!(reassembled, payload);
+        // Verify reassembled JSON is valid
+        let parsed: serde_json::Value = serde_json::from_str(&reassembled).unwrap();
+        assert_eq!(parsed["type"], "tool_output");
+    }
+
+    #[test]
+    fn chunk_empty_payload() {
+        let chunks = chunk_payload("", 100);
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn chunk_single_byte_max() {
+        let payload = "abc";
+        let chunks = chunk_payload(payload, 1);
+        assert_eq!(chunks, vec!["a", "b", "c"]);
+    }
 }

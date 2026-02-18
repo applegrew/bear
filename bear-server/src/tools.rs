@@ -1915,6 +1915,48 @@ Then the second:
         assert_eq!(calls[0].name, "read_file");
     }
 
+    #[test]
+    fn parse_tool_name_tag_no_underscore_ignored() {
+        // Tags without underscore should NOT be parsed as tool calls
+        let text = r#"[bold]some text[/bold]"#;
+        let calls = parse_tool_calls(text);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn parse_tool_name_tag_array_body_ignored() {
+        // Body must be a JSON object, not an array
+        let text = r#"[list_files][1,2,3][/list_files]"#;
+        let calls = parse_tool_calls(text);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn parse_tool_name_tag_run_command() {
+        let text = r#"[run_command]{"command": "ls -la"}[/run_command]"#;
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "run_command");
+        assert_eq!(calls[0].arguments["command"], "ls -la");
+    }
+
+    #[test]
+    fn parse_tool_name_tag_with_surrounding_text() {
+        let text = "Let me check.\n[read_file]{\"path\": \"src/main.rs\"}[/read_file]\nDone.";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+    }
+
+    #[test]
+    fn parse_tool_name_tag_nested_json() {
+        let text = r#"[write_file]{"path": "a.json", "content": "{\"key\": \"val\"}"}[/write_file]"#;
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "write_file");
+        assert_eq!(calls[0].arguments["path"], "a.json");
+    }
+
     // -- resolve_path ------------------------------------------------------
 
     #[test]

@@ -411,3 +411,189 @@ pub struct PendingToolCall {
     pub tool_call: ToolCall,
     pub cwd: String,
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn notice(text: &str) -> ServerMessage {
+        ServerMessage::Notice { text: text.to_string() }
+    }
+
+    // -- TopicLog basic operations ------------------------------------------
+
+    #[tokio::test]
+    async fn topic_log_push_and_read() {
+        let log = TopicLog::new();
+        log.push(notice("a")).await;
+        log.push(notice("b")).await;
+        let (msgs, offset) = log.read_from(0).await;
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(offset, 2);
+    }
+
+    #[tokio::test]
+    async fn topic_log_read_from_offset() {
+        let log = TopicLog::new();
+        log.push(notice("a")).await;
+        log.push(notice("b")).await;
+        log.push(notice("c")).await;
+        let (msgs, offset) = log.read_from(1).await;
+        assert_eq!(msgs.len(), 2); // b, c
+        assert_eq!(offset, 3);
+    }
+
+    #[tokio::test]
+    async fn topic_log_read_empty() {
+        let log = TopicLog::new();
+        let (msgs, offset) = log.read_from(0).await;
+        assert!(msgs.is_empty());
+        assert_eq!(offset, 0);
+    }
+
+    #[tokio::test]
+    async fn topic_log_read_at_end() {
+        let log = TopicLog::new();
+        log.push(notice("a")).await;
+        let (msgs, offset) = log.read_from(1).await;
+        assert!(msgs.is_empty());
+        assert_eq!(offset, 1);
+    }
+
+    // -- TopicConsumer: replay from offset 0 --------------------------------
+
+    #[tokio::test]
+    async fn consumer_replays_full_history() {
+        let log = TopicLog::new();
+        log.push(notice("first")).await;
+        log.push(notice("second")).await;
+
+        let mut consumer = log.consumer();
+        let batch = consumer.next_batch().await;
+        assert_eq!(batch.len(), 2);
+    }
+
+    // -- TopicConsumer: next_batch blocks then wakes -------------------------
+
+    #[tokio::test]
+    async fn consumer_blocks_then_receives() {
+        let log = TopicLog::new();
+        let mut consumer = log.consumer();
+
+        let log2 = log.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            log2.push(notice("delayed")).await;
+        });
+
+        let batch = consumer.next_batch().await;
+        assert_eq!(batch.len(), 1);
+    }
+
+    // -- TopicConsumer: multiple batches ------------------------------------
+
+    #[tokio::test]
+    async fn consumer_multiple_batches() {
+        let log = TopicLog::new();
+        log.push(notice("a")).await;
+
+        let mut consumer = log.consumer();
+        let batch1 = consumer.next_batch().await;
+        assert_eq!(batch1.len(), 1);
+
+        log.push(notice("b")).await;
+        log.push(notice("c")).await;
+        let batch2 = consumer.next_batch().await;
+        assert_eq!(batch2.len(), 2);
+    }
+
+    // -- Multiple consumers are independent ---------------------------------
+
+    #[tokio::test]
+    async fn multiple_consumers_independent() {
+        let log = TopicLog::new();
+        log.push(notice("a")).await;
+        log.push(notice("b")).await;
+
+        let mut c1 = log.consumer();
+        let mut c2 = log.consumer();
+
+        let b1 = c1.next_batch().await;
+        assert_eq!(b1.len(), 2);
+
+        // c1 is caught up, c2 still at offset 0
+        log.push(notice("c")).await;
+
+        let b2 = c2.next_batch().await;
+        assert_eq!(b2.len(), 3); // a, b, c — full replay
+
+        let b1_next = c1.next_batch().await;
+        assert_eq!(b1_next.len(), 1); // only c
+    }
+
+    // -- Lost-wakeup prevention: push between read and await ----------------
+
+    #[tokio::test]
+    async fn no_lost_wakeup() {
+        // This test verifies the notified-before-read pattern works.
+        // We push a message, consume it, then push another immediately
+        // and verify the consumer picks it up without hanging.
+        let log = TopicLog::new();
+        let mut consumer = log.consumer();
+
+        log.push(notice("a")).await;
+        let _ = consumer.next_batch().await;
+
+        // Push and immediately try to consume — the notification must not be lost
+        log.push(notice("b")).await;
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            consumer.next_batch(),
+        ).await;
+        assert!(result.is_ok(), "consumer should not hang (lost wakeup)");
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    // -- BusSender integration ----------------------------------------------
+
+    #[tokio::test]
+    async fn bus_sender_delivers_to_consumer() {
+        let (tx, _rx) = mpsc::channel::<ClientMessage>(1);
+        let bus = SessionBus::new(tx);
+        let sender = bus.sender();
+        let mut consumer = bus.consumer();
+
+        sender.send(notice("via sender")).await;
+        let batch = consumer.next_batch().await;
+        assert_eq!(batch.len(), 1);
+    }
+
+    // -- Concurrent producers and consumers ---------------------------------
+
+    #[tokio::test]
+    async fn concurrent_push_and_consume() {
+        let log = TopicLog::new();
+        let mut consumer = log.consumer();
+
+        let log2 = log.clone();
+        let producer = tokio::spawn(async move {
+            for i in 0..20 {
+                log2.push(notice(&format!("msg-{i}"))).await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+
+        let mut total = 0;
+        while total < 20 {
+            let batch = consumer.next_batch().await;
+            total += batch.len();
+        }
+        assert_eq!(total, 20);
+        producer.await.unwrap();
+    }
+}

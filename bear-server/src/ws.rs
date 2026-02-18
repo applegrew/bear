@@ -2597,6 +2597,118 @@ mod tests {
         assert!(out.contains("[1]"));
     }
 
+    // -- is_tool_tag tests ---------------------------------------------------
+
+    #[test]
+    fn is_tool_tag_tool_call() {
+        assert!(is_tool_tag("TOOL_CALL"));
+    }
+
+    #[test]
+    fn is_tool_tag_snake_case() {
+        assert!(is_tool_tag("list_files"));
+        assert!(is_tool_tag("read_file"));
+        assert!(is_tool_tag("run_command"));
+        assert!(is_tool_tag("web_search"));
+        assert!(is_tool_tag("lsp_diagnostics"));
+    }
+
+    #[test]
+    fn is_tool_tag_rejects_no_underscore() {
+        assert!(!is_tool_tag("bold"));
+        assert!(!is_tool_tag("notice"));
+        assert!(!is_tool_tag("a"));
+    }
+
+    #[test]
+    fn is_tool_tag_rejects_digits() {
+        assert!(!is_tool_tag("1"));
+        assert!(!is_tool_tag("h2"));
+        assert!(!is_tool_tag("tool_v2"));
+    }
+
+    #[test]
+    fn is_tool_tag_rejects_uppercase_snake() {
+        // Only TOOL_CALL is allowed as uppercase
+        assert!(!is_tool_tag("READ_FILE"));
+        assert!(!is_tool_tag("List_Files"));
+    }
+
+    #[test]
+    fn is_tool_tag_rejects_empty() {
+        assert!(!is_tool_tag(""));
+    }
+
+    // -- ToolCallFilter additional edge cases --------------------------------
+
+    #[test]
+    fn filter_unclosed_tool_call_discards() {
+        let mut f = ToolCallFilter::new();
+        let mut out = f.feed("Hello [TOOL_CALL]{\"name\":\"x\"}");
+        out.push_str(&f.flush());
+        // Text before the tag is emitted, unclosed tag content is discarded
+        assert!(out.contains("Hello"));
+        assert!(!out.contains("TOOL_CALL"));
+        assert!(!out.contains("name"));
+    }
+
+    #[test]
+    fn filter_mixed_formats_in_one_stream() {
+        let mut f = ToolCallFilter::new();
+        let input = "A [TOOL_CALL]{\"name\":\"x\"}[/TOOL_CALL] B [list_files]{\"path\":\".\"}\
+                     [/list_files] C";
+        let mut out = f.feed(input);
+        out.push_str(&f.flush());
+        assert!(out.contains("A"));
+        assert!(out.contains("B"));
+        assert!(out.contains("C"));
+        assert!(!out.contains("TOOL_CALL"));
+        assert!(!out.contains("list_files"));
+    }
+
+    #[test]
+    fn filter_close_tag_split_across_chunks() {
+        let mut f = ToolCallFilter::new();
+        let mut out = String::new();
+        out.push_str(&f.feed("[list_files]{\"p\":1}[/list"));
+        out.push_str(&f.feed("_files] after"));
+        out.push_str(&f.flush());
+        assert!(out.contains("after"));
+        assert!(!out.contains("list_files"));
+    }
+
+    #[test]
+    fn filter_consecutive_tool_calls_no_gap() {
+        let mut f = ToolCallFilter::new();
+        let input = "[read_file]{\"a\":1}[/read_file][write_file]{\"b\":2}[/write_file]done";
+        let mut out = f.feed(input);
+        out.push_str(&f.flush());
+        assert_eq!(out.trim(), "done");
+    }
+
+    #[test]
+    fn filter_bracket_at_end_of_chunk() {
+        let mut f = ToolCallFilter::new();
+        let mut out = String::new();
+        out.push_str(&f.feed("text ["));
+        out.push_str(&f.feed("read_file]{\"a\":1}[/read_file] end"));
+        out.push_str(&f.flush());
+        assert!(out.contains("text"));
+        assert!(out.contains("end"));
+        assert!(!out.contains("read_file"));
+    }
+
+    #[test]
+    fn filter_non_tool_bracket_followed_by_tool() {
+        let mut f = ToolCallFilter::new();
+        let input = "See [note] and [read_file]{\"a\":1}[/read_file] done";
+        let mut out = f.feed(input);
+        out.push_str(&f.flush());
+        assert!(out.contains("[note]"));
+        assert!(out.contains("done"));
+        assert!(!out.contains("read_file"));
+    }
+
     // -- extract_shell_commands tests ----------------------------------------
 
     #[test]
