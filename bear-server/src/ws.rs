@@ -21,24 +21,36 @@ const ENABLE_REFLECTION: bool = true;
 // Tool-call tag filter for streamed chunks
 // ---------------------------------------------------------------------------
 
-const TOOL_OPEN: &str = "[TOOL_CALL]";
-const TOOL_CLOSE: &str = "[/TOOL_CALL]";
-
-/// Stateful filter that strips `[TOOL_CALL]...[/TOOL_CALL]` markup from
-/// streamed LLM chunks so the client never sees raw tool-call JSON.
+/// Stateful filter that strips tool-call markup from streamed LLM chunks so
+/// the client never sees raw tool-call JSON.
+///
+/// Handles two formats:
+///   1. `[TOOL_CALL]{"name":…,"arguments":…}[/TOOL_CALL]`
+///   2. `[tool_name]{args}[/tool_name]`  (tool name used as the tag)
 ///
 /// Because tags can span chunk boundaries, we buffer text that *might* be
 /// the start of a tag and only emit it once we know it isn't.
 struct ToolCallFilter {
-    /// True while we are inside a `[TOOL_CALL]...[/TOOL_CALL]` block.
+    /// True while we are inside a tool-call block.
     inside: bool,
+    /// The close tag we are looking for (e.g. "[/TOOL_CALL]" or "[/list_files]").
+    close_tag: String,
     /// Accumulates text that could be the beginning of a tag boundary.
     buf: String,
 }
 
+/// Check if `tag_name` looks like a tool-call open tag.
+/// Matches "TOOL_CALL" or any `snake_case` identifier (must contain at least
+/// one underscore to avoid false positives on words like `[bold]`).
+fn is_tool_tag(tag_name: &str) -> bool {
+    tag_name == "TOOL_CALL"
+        || (tag_name.contains('_')
+            && tag_name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+}
+
 impl ToolCallFilter {
     fn new() -> Self {
-        Self { inside: false, buf: String::new() }
+        Self { inside: false, close_tag: String::new(), buf: String::new() }
     }
 
     /// Feed a new chunk and return the text that should be shown to the user.
@@ -48,38 +60,53 @@ impl ToolCallFilter {
 
         loop {
             if self.inside {
-                // Looking for [/TOOL_CALL]
-                if let Some(pos) = self.buf.find(TOOL_CLOSE) {
+                // Looking for the close tag
+                if let Some(pos) = self.buf.find(self.close_tag.as_str()) {
                     // Skip everything up to and including the close tag
-                    self.buf = self.buf[pos + TOOL_CLOSE.len()..].to_string();
+                    self.buf = self.buf[pos + self.close_tag.len()..].to_string();
                     self.inside = false;
+                    self.close_tag.clear();
                     continue;
                 }
                 // Close tag might be partially at the end — keep buffering
-                // Keep at most len("[/TOOL_CALL]")-1 chars in case of partial match
-                let keep = TOOL_CLOSE.len() - 1;
+                let keep = self.close_tag.len() - 1;
                 if self.buf.len() > keep {
                     self.buf = self.buf[self.buf.len() - keep..].to_string();
                 }
                 break;
             } else {
-                // Looking for [TOOL_CALL]
-                if let Some(pos) = self.buf.find(TOOL_OPEN) {
-                    // Emit everything before the tag
-                    output.push_str(&self.buf[..pos]);
-                    self.buf = self.buf[pos + TOOL_OPEN.len()..].to_string();
+                // Look for '[' which could start a tool tag
+                let Some(bracket) = self.buf.find('[') else {
+                    // No bracket at all — emit everything
+                    output.push_str(&self.buf);
+                    self.buf.clear();
+                    break;
+                };
+
+                // Check if we have a complete tag: [something]
+                let after_bracket = &self.buf[bracket + 1..];
+                let Some(close_bracket) = after_bracket.find(']') else {
+                    // Incomplete — emit everything before '[', keep '[' onward buffered
+                    output.push_str(&self.buf[..bracket]);
+                    self.buf = self.buf[bracket..].to_string();
+                    break;
+                };
+
+                let tag_name = &after_bracket[..close_bracket];
+                if is_tool_tag(tag_name) {
+                    // This is a tool-call open tag — emit text before it, enter inside mode
+                    output.push_str(&self.buf[..bracket]);
+                    self.close_tag = format!("[/{tag_name}]");
+                    self.buf = self.buf[bracket + 1 + close_bracket + 1..].to_string();
                     self.inside = true;
                     continue;
+                } else {
+                    // Not a tool tag — emit up to and including ']', continue scanning
+                    let end = bracket + 1 + close_bracket + 1;
+                    output.push_str(&self.buf[..end]);
+                    self.buf = self.buf[end..].to_string();
+                    continue;
                 }
-                // Open tag might be partially at the end — keep those chars buffered
-                // e.g. the buffer ends with "[TOOL" which could be start of "[TOOL_CALL]"
-                let keep = TOOL_OPEN.len() - 1;
-                if self.buf.len() > keep {
-                    let safe = self.buf.len() - keep;
-                    output.push_str(&self.buf[..safe]);
-                    self.buf = self.buf[safe..].to_string();
-                }
-                break;
             }
         }
 
@@ -2480,10 +2507,9 @@ mod tests {
     #[test]
     fn filter_no_tool_calls() {
         let mut f = ToolCallFilter::new();
-        // Buffer keeps up to TOOL_OPEN.len()-1 = 10 chars to detect partial tags
-        let out = f.feed("Hello world");
-        assert_eq!(out, "H"); // 11 chars - 10 buffered = 1 emitted
-        assert_eq!(f.flush(), "ello world");
+        let mut out = f.feed("Hello world");
+        out.push_str(&f.flush());
+        assert_eq!(out, "Hello world");
     }
 
     #[test]
@@ -2533,6 +2559,42 @@ mod tests {
         out.push_str(&f.feed("ghi"));
         out.push_str(&f.flush());
         assert_eq!(out, "abcdefghi");
+    }
+
+    #[test]
+    fn filter_strips_tool_name_tag_format() {
+        let mut f = ToolCallFilter::new();
+        let input = r#"Let me list files. [list_files]{"path": "."}[/list_files] Done."#;
+        let mut out = f.feed(input);
+        out.push_str(&f.flush());
+        assert!(out.contains("Let me list files."));
+        assert!(out.contains("Done."));
+        assert!(!out.contains("list_files"));
+        assert!(!out.contains("path"));
+    }
+
+    #[test]
+    fn filter_tool_name_tag_across_chunks() {
+        let mut f = ToolCallFilter::new();
+        let mut out = String::new();
+        out.push_str(&f.feed("Hello [list"));
+        out.push_str(&f.feed("_files]{\"path\": \".\"}"));
+        out.push_str(&f.feed("[/list_files] done"));
+        out.push_str(&f.flush());
+        assert!(out.contains("Hello"));
+        assert!(out.contains("done"));
+        assert!(!out.contains("list_files"));
+    }
+
+    #[test]
+    fn filter_preserves_non_tool_brackets() {
+        let mut f = ToolCallFilter::new();
+        let input = "Use [bold] text and [1] references.";
+        let mut out = f.feed(input);
+        out.push_str(&f.flush());
+        // [bold] has no underscore, [1] has digits — neither is a tool tag
+        assert!(out.contains("[bold]"));
+        assert!(out.contains("[1]"));
     }
 
     // -- extract_shell_commands tests ----------------------------------------

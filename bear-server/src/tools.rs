@@ -73,6 +73,8 @@ async fn execute_session_workdir(
 
 pub fn parse_tool_calls(text: &str) -> Vec<ParsedToolCall> {
     let mut calls = Vec::new();
+
+    // Format 1: [TOOL_CALL]{"name": "tool", "arguments": {…}}[/TOOL_CALL]
     let mut remaining = text;
     while let Some(start) = remaining.find("[TOOL_CALL]") {
         let after_tag = &remaining[start + 11..];
@@ -90,6 +92,35 @@ pub fn parse_tool_calls(text: &str) -> Vec<ParsedToolCall> {
             break;
         }
     }
+
+    // Format 2: [tool_name]{args}[/tool_name]  (tool name used as the tag)
+    // Only try this if format 1 found nothing.
+    if calls.is_empty() {
+        let mut rem = text;
+        while let Some(open) = rem.find('[') {
+            let after = &rem[open + 1..];
+            let Some(close) = after.find(']') else { break };
+            let tag = &after[..close];
+            // Must be snake_case with at least one underscore
+            if tag.contains('_') && tag.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') {
+                let body_start = &after[close + 1..];
+                let close_tag = format!("[/{tag}]");
+                if let Some(end) = body_start.find(&close_tag) {
+                    let body = body_start[..end].trim();
+                    if let Ok(arguments) = serde_json::from_str::<serde_json::Value>(body) {
+                        if arguments.is_object() {
+                            calls.push(ParsedToolCall { name: tag.to_string(), arguments });
+                        }
+                    }
+                    rem = &body_start[end + close_tag.len()..];
+                    continue;
+                }
+            }
+            // Not a tool tag or no matching close — skip past this bracket
+            rem = &rem[open + 1..];
+        }
+    }
+
     calls
 }
 
@@ -1839,6 +1870,49 @@ Then the second:
         let text = r#"[TOOL_CALL]{"name": "read_file", "arguments": {"path": "a.rs"}}"#;
         let calls = parse_tool_calls(text);
         assert!(calls.is_empty());
+    }
+
+    // -- parse_tool_calls format 2: [tool_name]{args}[/tool_name] ----------
+
+    #[test]
+    fn parse_tool_name_tag_single() {
+        let text = r#"Let me list files. [list_files]{"path": "."}[/list_files]"#;
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "list_files");
+        assert_eq!(calls[0].arguments["path"], ".");
+    }
+
+    #[test]
+    fn parse_tool_name_tag_multiple() {
+        let text = r#"[read_file]{"path": "a.rs"}[/read_file] then [read_file]{"path": "b.rs"}[/read_file]"#;
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].arguments["path"], "a.rs");
+        assert_eq!(calls[1].arguments["path"], "b.rs");
+    }
+
+    #[test]
+    fn parse_tool_name_tag_malformed_json() {
+        let text = "[list_files]{bad json}[/list_files]";
+        let calls = parse_tool_calls(text);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn parse_tool_name_tag_missing_close() {
+        let text = r#"[list_files]{"path": "."}"#;
+        let calls = parse_tool_calls(text);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn parse_format1_takes_priority() {
+        // If both formats are present, format 1 wins (format 2 only tried when format 1 finds nothing)
+        let text = r#"[TOOL_CALL]{"name": "read_file", "arguments": {"path": "x"}}[/TOOL_CALL] [list_files]{"path": "."}[/list_files]"#;
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
     }
 
     // -- resolve_path ------------------------------------------------------

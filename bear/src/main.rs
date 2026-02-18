@@ -42,6 +42,8 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string());
     let base_url = Url::parse(&server_url).context("invalid server URL")?;
 
+    install_signal_handlers()?;
+
     let http_client = reqwest::Client::new();
 
     // First session: use CLI args
@@ -64,6 +66,29 @@ async fn main() -> anyhow::Result<()> {
             Some(id) => id,
             None => break, // user cancelled — exit
         };
+    }
+
+    Ok(())
+}
+
+fn install_signal_handlers() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut sigterm = signal(SignalKind::terminate())?;
+        let mut sigint = signal(SignalKind::interrupt())?;
+        let mut sighup = signal(SignalKind::hangup())?;
+
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = sigterm.recv() => {},
+                _ = sigint.recv() => {},
+                _ = sighup.recv() => {},
+            }
+            term::cleanup_terminal();
+            std::process::exit(1);
+        });
     }
 
     Ok(())

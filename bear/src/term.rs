@@ -59,6 +59,12 @@ pub enum RenderCmd {
     Quit,
 }
 
+pub fn cleanup_terminal() {
+    let mut out = io::stdout();
+    let _ = execute!(out, event::DisableMouseCapture, cursor::Show, terminal::LeaveAlternateScreen);
+    let _ = terminal::disable_raw_mode();
+}
+
 // ---------------------------------------------------------------------------
 // Events the terminal thread sends out
 // ---------------------------------------------------------------------------
@@ -500,9 +506,7 @@ impl TermState {
     }
 
     fn cleanup(&self) {
-        let mut out = io::stdout();
-        let _ = execute!(out, event::DisableMouseCapture, cursor::Show, terminal::LeaveAlternateScreen);
-        let _ = terminal::disable_raw_mode();
+        cleanup_terminal();
     }
 
     fn push_line(&mut self, s: &str) {
