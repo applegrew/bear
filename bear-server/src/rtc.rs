@@ -325,8 +325,8 @@ async fn handle_data_channel(
     // Ensure the session worker is running
     let client_tx = ensure_worker_running(&state, session_id).await;
 
-    // Subscribe to the session bus broadcast
-    let (mut bus_rx, message_log, mut msg_idx) = {
+    // Create a consumer for this client (starts at offset 0 — full replay)
+    let mut consumer = {
         let buses = state.buses.read().await;
         let Some(bus) = buses.get(&session_id) else {
             let _ = dc_send_msg(&dc, &ServerMessage::Error {
@@ -334,19 +334,10 @@ async fn handle_data_channel(
             }).await;
             return;
         };
-        // Replay buffered messages
-        let log_ref = bus.message_log.clone();
-        let log = log_ref.lock().await;
-        let count = log.len();
-        for msg in log.iter() {
-            if dc_send_msg(&dc, msg).await.is_err() {
-                return;
-            }
-        }
-        (bus.bus_tx.subscribe(), log_ref.clone(), count)
+        bus.consumer()
     };
 
-    tracing::info!("rtc: client connected to session {session_id}, replayed message log");
+    tracing::info!("rtc: client connected to session {session_id}");
 
     // Channel for incoming DataChannel messages
     let (dc_msg_tx, mut dc_msg_rx) = mpsc::channel::<String>(64);
@@ -374,33 +365,16 @@ async fn handle_data_channel(
     loop {
         tokio::select! {
             // Messages from session worker → forward to DataChannel
-            bus_msg = bus_rx.recv() => {
-                match bus_msg {
-                    Ok(msg) => {
-                        msg_idx += 1;
-                        if dc_send_msg(&dc, &msg).await.is_err() {
-                            tracing::info!("rtc: client disconnected from session {session_id} (send failed)");
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("rtc: client lagged {n} messages on session {session_id}, replaying from log");
-                        let log = message_log.lock().await;
-                        let start = msg_idx;
-                        let end = log.len();
-                        for msg in &log[start..end] {
-                            if dc_send_msg(&dc, msg).await.is_err() {
-                                tracing::info!("rtc: client disconnected during lag recovery on session {session_id}");
-                                break;
-                            }
-                        }
-                        msg_idx = end;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::info!("rtc: session bus closed for {session_id}");
+            batch = consumer.next_batch() => {
+                let mut send_failed = false;
+                for msg in batch {
+                    if dc_send_msg(&dc, &msg).await.is_err() {
+                        tracing::info!("rtc: client disconnected from session {session_id} (send failed)");
+                        send_failed = true;
                         break;
                     }
                 }
+                if send_failed { break; }
             }
             // Messages from DataChannel → forward to session worker
             dc_text = dc_msg_rx.recv() => {

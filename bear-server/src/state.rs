@@ -1,7 +1,7 @@
 use bear_core::{ClientMessage, ProcessInfo, ServerMessage, ToolCall};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{mpsc, Notify, RwLock};
 use uuid::Uuid;
 
 use crate::llm::OllamaMessage;
@@ -237,28 +237,86 @@ pub struct Session {
 }
 
 // ---------------------------------------------------------------------------
-// Session bus: broadcast channel + message log for replay on reconnect
+// Session bus: offset-based pub-sub (Kafka-like topic per session)
 // ---------------------------------------------------------------------------
 
-/// Holds the broadcast infrastructure for a session so that LLM processing
-/// can continue independently of any connected WebSocket client.
+/// Append-only message log shared by all consumers of a session.
+/// The producer appends messages and notifies waiting consumers.
+#[derive(Clone)]
+pub struct TopicLog {
+    messages: Arc<tokio::sync::Mutex<Vec<ServerMessage>>>,
+    notify: Arc<Notify>,
+}
+
+impl TopicLog {
+    pub fn new() -> Self {
+        Self {
+            messages: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    /// Append a message and wake all waiting consumers.
+    pub async fn push(&self, msg: ServerMessage) {
+        self.messages.lock().await.push(msg);
+        self.notify.notify_waiters();
+    }
+
+    /// Create a consumer starting at offset 0 (will replay all history).
+    pub fn consumer(&self) -> TopicConsumer {
+        TopicConsumer {
+            log: self.clone(),
+            offset: 0,
+        }
+    }
+
+    /// Read messages from `start` to current end. Returns the messages and
+    /// the new offset (end of log at time of read).
+    async fn read_from(&self, start: usize) -> (Vec<ServerMessage>, usize) {
+        let log = self.messages.lock().await;
+        let end = log.len();
+        let msgs = log[start..end].to_vec();
+        (msgs, end)
+    }
+}
+
+/// Per-client consumer that tracks its own offset into the topic log.
+/// Guarantees ordered, exactly-once delivery — no messages are ever skipped.
+pub struct TopicConsumer {
+    log: TopicLog,
+    offset: usize,
+}
+
+impl TopicConsumer {
+    /// Wait for the next batch of messages. Returns one or more messages
+    /// that the consumer hasn't seen yet. Blocks until at least one is
+    /// available.
+    pub async fn next_batch(&mut self) -> Vec<ServerMessage> {
+        loop {
+            let (msgs, new_offset) = self.log.read_from(self.offset).await;
+            if !msgs.is_empty() {
+                self.offset = new_offset;
+                return msgs;
+            }
+            // Nothing new — wait for the producer to notify us.
+            self.log.notify.notified().await;
+        }
+    }
+}
+
+/// Holds the pub-sub infrastructure for a session so that LLM processing
+/// can continue independently of any connected client.
 pub struct SessionBus {
-    /// Broadcast sender — every `ServerMessage` produced by the session worker
-    /// is sent here. Connected clients subscribe via `bus_tx.subscribe()`.
-    pub bus_tx: broadcast::Sender<ServerMessage>,
-    /// Ordered log of every `ServerMessage` sent so far. A reconnecting client
-    /// replays this log before subscribing to the live broadcast.
-    pub message_log: Arc<tokio::sync::Mutex<Vec<ServerMessage>>>,
+    /// The topic log — append-only, shared by producer and all consumers.
+    pub topic: TopicLog,
     /// Channel for clients to send messages to the session worker.
     pub client_tx: mpsc::Sender<ClientMessage>,
 }
 
 impl SessionBus {
     pub fn new(client_tx: mpsc::Sender<ClientMessage>) -> Self {
-        let (bus_tx, _) = broadcast::channel(1024);
         Self {
-            bus_tx,
-            message_log: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            topic: TopicLog::new(),
             client_tx,
         }
     }
@@ -266,24 +324,26 @@ impl SessionBus {
     /// Create a lightweight sender handle that the worker task can own.
     pub fn sender(&self) -> BusSender {
         BusSender {
-            bus_tx: self.bus_tx.clone(),
-            message_log: self.message_log.clone(),
+            topic: self.topic.clone(),
         }
+    }
+
+    /// Create a new consumer for a connecting client. Starts at offset 0
+    /// so the client receives the full message history.
+    pub fn consumer(&self) -> TopicConsumer {
+        self.topic.consumer()
     }
 }
 
 /// Lightweight handle for sending messages from the session worker.
-/// Writes to both the broadcast channel and the message log.
 #[derive(Clone)]
 pub struct BusSender {
-    pub bus_tx: broadcast::Sender<ServerMessage>,
-    message_log: Arc<tokio::sync::Mutex<Vec<ServerMessage>>>,
+    topic: TopicLog,
 }
 
 impl BusSender {
     pub async fn send(&self, msg: ServerMessage) {
-        self.message_log.lock().await.push(msg.clone());
-        let _ = self.bus_tx.send(msg);
+        self.topic.push(msg).await;
     }
 }
 

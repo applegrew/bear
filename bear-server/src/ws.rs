@@ -316,8 +316,8 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
     // Ensure the session worker is running and get the client_tx
     let client_tx = ensure_worker_running(&state, session_id).await;
 
-    // Subscribe to the session bus broadcast
-    let (mut bus_rx, message_log, mut msg_idx) = {
+    // Create a consumer for this client (starts at offset 0 — full replay)
+    let mut consumer = {
         let buses = state.buses.read().await;
         let Some(bus) = buses.get(&session_id) else {
             let _ = ws_send(&mut socket, &ServerMessage::Error {
@@ -325,61 +325,30 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
             }).await;
             return;
         };
-        // Replay buffered messages first
-        let log_ref = bus.message_log.clone();
-        let log = log_ref.lock().await;
-        let count = log.len();
-        for msg in log.iter() {
-            if ws_send(&mut socket, msg).await.is_err() {
-                return;
-            }
-        }
-        (bus.bus_tx.subscribe(), log_ref.clone(), count)
+        bus.consumer()
     };
 
-    tracing::info!("client connected to session {session_id}, replayed message log");
+    tracing::info!("ws: client connected to session {session_id}");
 
     // Main relay loop: forward between WebSocket and session bus
     let (mut ws_sink, mut ws_stream) = socket.split();
     loop {
         tokio::select! {
             // Messages from the session worker → forward to WebSocket client
-            bus_msg = bus_rx.recv() => {
-                match bus_msg {
-                    Ok(msg) => {
-                        msg_idx += 1;
-                        let payload = match serde_json::to_string(&msg) {
-                            Ok(p) => p,
-                            Err(_) => continue,
-                        };
-                        if SinkExt::send(&mut ws_sink, Message::Text(payload)).await.is_err() {
-                            tracing::info!("client disconnected from session {session_id} (send failed)");
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("ws: client lagged {n} messages on session {session_id}, replaying from log");
-                        // Replay missed messages from the log
-                        let log = message_log.lock().await;
-                        let start = msg_idx;
-                        let end = log.len();
-                        for msg in &log[start..end] {
-                            let payload = match serde_json::to_string(msg) {
-                                Ok(p) => p,
-                                Err(_) => continue,
-                            };
-                            if SinkExt::send(&mut ws_sink, Message::Text(payload)).await.is_err() {
-                                tracing::info!("client disconnected during lag recovery on session {session_id}");
-                                break;
-                            }
-                        }
-                        msg_idx = end;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::info!("session bus closed for {session_id}");
+            batch = consumer.next_batch() => {
+                let mut send_failed = false;
+                for msg in batch {
+                    let payload = match serde_json::to_string(&msg) {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
+                    if SinkExt::send(&mut ws_sink, Message::Text(payload)).await.is_err() {
+                        tracing::info!("ws: client disconnected from session {session_id} (send failed)");
+                        send_failed = true;
                         break;
                     }
                 }
+                if send_failed { break; }
             }
             // Messages from WebSocket client → forward to session worker
             ws_msg = ws_stream.next() => {
