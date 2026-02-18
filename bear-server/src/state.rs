@@ -293,13 +293,19 @@ impl TopicConsumer {
     /// available.
     pub async fn next_batch(&mut self) -> Vec<ServerMessage> {
         loop {
+            // Register interest in notifications BEFORE reading the log.
+            // This prevents a race where the producer pushes + notifies
+            // between our read and our await (the "lost wakeup" problem).
+            let notified = self.log.notify.notified();
+            tokio::pin!(notified);
+
             let (msgs, new_offset) = self.log.read_from(self.offset).await;
             if !msgs.is_empty() {
                 self.offset = new_offset;
                 return msgs;
             }
-            // Nothing new — wait for the producer to notify us.
-            self.log.notify.notified().await;
+            // Nothing new — wait for the producer to wake us.
+            notified.await;
         }
     }
 }
