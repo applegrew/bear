@@ -383,7 +383,19 @@ async fn handle_data_channel(
                                 let _ = dc_send_msg(&dc, &ServerMessage::Pong).await;
                             }
                             Ok(client_msg) => {
-                                let _ = client_tx.send(client_msg).await;
+                                tracing::info!("rtc: forwarding {client_msg:?} to session {session_id}");
+                                match client_tx.try_send(client_msg) {
+                                    Ok(()) => {}
+                                    Err(mpsc::error::TrySendError::Full(msg)) => {
+                                        tracing::warn!("rtc: client_tx full for session {session_id}, dropping {msg:?}");
+                                        let _ = dc_send_msg(&dc, &ServerMessage::Error {
+                                            text: "Server busy — please try again in a moment.".to_string(),
+                                        }).await;
+                                    }
+                                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                                        tracing::warn!("rtc: client_tx closed for session {session_id}");
+                                    }
+                                }
                             }
                             Err(err) => {
                                 let _ = dc_send_msg(&dc, &ServerMessage::Error {

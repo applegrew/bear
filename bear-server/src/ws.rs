@@ -287,8 +287,9 @@ pub async fn ensure_worker_running(
     drop(buses); // release lock before spawning
 
     let worker_state = state.clone();
+    let worker_tx = client_tx.clone();
     tokio::spawn(async move {
-        session_worker(worker_state, session_id, bus_sender, client_rx).await;
+        session_worker(worker_state, session_id, bus_sender, worker_tx, client_rx).await;
     });
 
     client_tx
@@ -388,7 +389,20 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
                                 let _ = SinkExt::send(&mut ws_sink, Message::Text(payload)).await;
                             }
                             Ok(client_msg) => {
-                                let _ = client_tx.send(client_msg).await;
+                                tracing::info!("ws: forwarding {client_msg:?} to session {session_id}");
+                                match client_tx.try_send(client_msg) {
+                                    Ok(()) => {}
+                                    Err(mpsc::error::TrySendError::Full(msg)) => {
+                                        tracing::warn!("ws: client_tx full for session {session_id}, dropping {msg:?}");
+                                        let payload = serde_json::to_string(&ServerMessage::Error {
+                                            text: "Server busy — please try again in a moment.".to_string(),
+                                        }).unwrap_or_default();
+                                        let _ = SinkExt::send(&mut ws_sink, Message::Text(payload)).await;
+                                    }
+                                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                                        tracing::warn!("ws: client_tx closed for session {session_id}");
+                                    }
+                                }
                             }
                             Err(err) => {
                                 let payload = serde_json::to_string(&ServerMessage::Error {
@@ -423,6 +437,7 @@ async fn session_worker(
     state: ServerState,
     session_id: Uuid,
     bus: BusSender,
+    client_tx: mpsc::Sender<ClientMessage>,
     mut client_rx: mpsc::Receiver<ClientMessage>,
 ) {
     tracing::info!("session worker started for {session_id}");
@@ -518,9 +533,11 @@ async fn session_worker(
         };
 
         let Some(client_msg) = client_msg else { break };
+        tracing::debug!("session_worker {session_id}: received {client_msg:?}");
 
         match client_msg {
             ClientMessage::Input { text } => {
+                tracing::info!("session_worker {session_id}: Input received: {text:?}");
                 // Broadcast the user's input so all connected clients can display it.
                 bus.send(ServerMessage::UserInput { text: text.clone() }).await;
                 // Record input to shared history
@@ -686,7 +703,8 @@ async fn session_worker(
                                 text: "Task plan approved. Starting execution…".to_string(),
                             }).await;
                             execute_task_plan(
-                                &state, session_id, &bus, &mut client_rx,
+                                &state, session_id, &bus, &client_tx,
+                                &mut client_rx,
                                 &mut pending, &mut pending_prompt,
                                 &mut pending_depth_prompt,
                                 &mut tool_queue, &mut tool_depth,
@@ -1156,6 +1174,7 @@ async fn execute_task_plan(
     state: &ServerState,
     session_id: Uuid,
     bus: &BusSender,
+    client_tx: &mpsc::Sender<ClientMessage>,
     client_rx: &mut mpsc::Receiver<ClientMessage>,
     pending: &mut Option<PendingToolCall>,
     pending_prompt: &mut Option<PendingPrompt>,
@@ -1331,6 +1350,19 @@ async fn execute_task_plan(
                                             }
                                         }
                                     }
+                                }
+                                ClientMessage::Input { text } => {
+                                    tracing::info!("execute_task_plan: interrupted by new input: {text:?}");
+                                    // Abort subagents and return to the main loop
+                                    budget.terminated.store(true, Ordering::SeqCst);
+                                    budget.resume.notify_waiters();
+                                    pending_queued = None;
+                                    // Broadcast the user's input so all clients see it
+                                    bus.send(ServerMessage::UserInput { text: text.clone() }).await;
+                                    // Re-queue the input so the session worker main loop picks it up
+                                    let _ = client_tx.send(ClientMessage::Input { text }).await;
+                                    // Break out of the subagent wait loop
+                                    break;
                                 }
                                 ClientMessage::Interrupt => {
                                     // Abort subagents — they'll finish and result_rx will close
