@@ -1,6 +1,8 @@
 use std::io::BufRead;
+use std::panic::AssertUnwindSafe;
 
 use bear_core::{ProcessInfo, ServerMessage};
+use futures::FutureExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -129,6 +131,31 @@ pub fn parse_tool_calls(text: &str) -> Vec<ParsedToolCall> {
 // ---------------------------------------------------------------------------
 
 pub async fn execute_tool(
+    state: &ServerState,
+    session_id: Uuid,
+    bus: &BusSender,
+    ptc: &PendingToolCall,
+) -> String {
+    match AssertUnwindSafe(execute_tool_inner(state, session_id, bus, ptc))
+        .catch_unwind()
+        .await
+    {
+        Ok(output) => output,
+        Err(panic) => {
+            let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = panic.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "unknown panic".to_string()
+            };
+            tracing::error!("tool '{}' panicked: {msg}", ptc.tool_call.name);
+            format!("Error: tool panicked: {msg}")
+        }
+    }
+}
+
+async fn execute_tool_inner(
     state: &ServerState,
     session_id: Uuid,
     bus: &BusSender,
