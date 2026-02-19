@@ -128,6 +128,10 @@ export class BearClient {
     // Echo suppression: skip the next UserInput echo from the server
     this._awaitingInputEcho = false;
 
+    // Heartbeat: detect stale connections
+    this._heartbeatTimer = null;
+    this._lastPongAt = 0;
+
     // Last tool tracking
     this._lastToolName = '';
     this._lastToolArgs = {};
@@ -482,7 +486,9 @@ export class BearClient {
     this.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     this.dc = this.pc.createDataChannel('bear', { ordered: true });
 
-    this.dc.onopen = () => {};
+    this.dc.onopen = () => {
+      this._startHeartbeat();
+    };
 
     this.dc.onclose = () => {
       this._pushLine(`${C.gray}  Disconnected.${C.reset}`);
@@ -602,6 +608,7 @@ export class BearClient {
   _cleanup() {
     this._stopIcePoll();
     this._stopSpinner();
+    this._stopHeartbeat();
     if (this.dc) { try { this.dc.close(); } catch {} this.dc = null; }
     if (this.pc) { try { this.pc.close(); } catch {} this.pc = null; }
     if (this.ws) { this.ws.close(); this.ws = null; }
@@ -882,6 +889,7 @@ export class BearClient {
       }
 
       case 'pong':
+        this._lastPongAt = Date.now();
         break;
     }
   }
@@ -1576,12 +1584,41 @@ export class BearClient {
   // Transport
   // -------------------------------------------------------------------------
 
+  _startHeartbeat() {
+    this._stopHeartbeat();
+    this._lastPongAt = Date.now();
+    this._heartbeatTimer = setInterval(() => {
+      if (!this._isConnected()) {
+        this._stopHeartbeat();
+        return;
+      }
+      // Check if we got a pong recently
+      if (Date.now() - this._lastPongAt > 10000) {
+        this._pushLine(`${C.red}  Connection lost (no heartbeat response).${C.reset}`);
+        this._stopHeartbeat();
+        this._cleanup();
+        this._fullRepaint();
+        return;
+      }
+      this._sendJson({ type: 'ping' });
+    }, 5000);
+  }
+
+  _stopHeartbeat() {
+    if (this._heartbeatTimer) {
+      clearInterval(this._heartbeatTimer);
+      this._heartbeatTimer = null;
+    }
+  }
+
   _sendJson(obj) {
     const payload = JSON.stringify(obj);
     if (this.dc && this.dc.readyState === 'open') {
       this.dc.send(payload);
     } else if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(payload);
+    } else {
+      console.warn('bear: _sendJson called but no transport is open', obj);
     }
   }
 }
