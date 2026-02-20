@@ -118,6 +118,22 @@ pub fn spawn_terminal_thread(
             }
         };
 
+        // Welcome banner
+        state.push_line("");
+        state.push_line("\x1b[33m  ⠀⠀⠀⠀⠀⠀⠀⣤⠶⣤⣤⣤⡴⢦⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀\x1b[0m");
+        state.push_line("\x1b[33m  ⠀⠀⠀⠀⠀⠀⠀⢷⠉⠀⠀⠀⠈⠁⢷⠖⠒⠲⠶⢤⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀\x1b[0m");
+        state.push_line("\x1b[33m  ⠀⠀⠀⠀⠀⠀⠀⢸⠀⠠⠀⠠⠀⢠⠀⢳⠀⠀⠀⠀⠉⢳⡄⠀⠀⠀⠀⠀⠀⠀\x1b[0m");
+        state.push_line("\x1b[33m  ⠀⠀⠀⠀⠀⠀⠀⠈⣧⡀⣶⡆⣠⠏⠀⠀⠀⠀⠀⠀⠀⠀⢹⡄⠀⠀⠀⠀⠀⠀\x1b[0m");
+        state.push_line("\x1b[33m  ⠀⠀⠀⠀⠀⠀⠀⠀⢸⡉⠒⠚⠁⠀⠀⠀⢀⠀⠀⠀⠀⠀⠀⡇⠀⠀⠀⠀⠀⠀\x1b[0m");
+        state.push_line("\x1b[33m  ⠀⠀⠀⠀⠀⠀⠀⠀⠸⡇⢢⡀⣤⠀⠀⠀⢸⠀⠀⠀⠀⠀⢀⡇⠀⠀⠀⠀⠀⠀\x1b[0m");
+        state.push_line("\x1b[33m  ⠀⠀⠀⠀⠀⠀⠀⠀⠀⣷⠀⠉⢻⡀⠀⠀⣾⠤⠤⡄⠀⠀⢸⠁⠀⠀⠀⠀⠀⠀\x1b[0m");
+        state.push_line("\x1b[33m  ⠀⠀⠀⠀⠀⠀⠀⠀⠀⣸⠄⠀⣼⡇⠀⢠⡇⢀⡼⣻⠀⢀⡟⠀⠀⠀⠀⠀⠀⠀\x1b[0m");
+        state.push_line("\x1b[33m  ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠛⠒⠚⠙⠷⠶⠞⠉⠉⠀⠓⠒⠚⠁⠀⠀⠀⠀⠀\x1b[0m");
+        state.push_line("");
+        state.push_line("\x1b[1m\x1b[36m    Welcome to Bear coding agent\x1b[0m");
+        state.push_line("\x1b[90m    Type /help for commands\x1b[0m");
+        state.push_line("");
+
         state.full_repaint();
 
         loop {

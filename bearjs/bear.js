@@ -373,9 +373,18 @@ export class BearClient {
 
   async boot() {
     this._pushLine('');
-    this._pushLine(`${C.bold}${C.blue}  ╔══════════════════════════════════╗${C.reset}`);
-    this._pushLine(`${C.bold}${C.blue}  ║${C.reset}${C.bold}   🐻 Bear — Browser Terminal     ${C.blue}║${C.reset}`);
-    this._pushLine(`${C.bold}${C.blue}  ╚══════════════════════════════════╝${C.reset}`);
+    this._pushLine(`${C.yellow}  ⠀⠀⠀⠀⠀⠀⠀⣤⠶⣤⣤⣤⡴⢦⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀${C.reset}`);
+    this._pushLine(`${C.yellow}  ⠀⠀⠀⠀⠀⠀⠀⢷⠉⠀⠀⠀⠈⠁⢷⠖⠒⠲⠶⢤⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀${C.reset}`);
+    this._pushLine(`${C.yellow}  ⠀⠀⠀⠀⠀⠀⠀⢸⠀⠠⠀⠠⠀⢠⠀⢳⠀⠀⠀⠀⠉⢳⡄⠀⠀⠀⠀⠀⠀⠀${C.reset}`);
+    this._pushLine(`${C.yellow}  ⠀⠀⠀⠀⠀⠀⠀⠈⣧⡀⣶⡆⣠⠏⠀⠀⠀⠀⠀⠀⠀⠀⢹⡄⠀⠀⠀⠀⠀⠀${C.reset}`);
+    this._pushLine(`${C.yellow}  ⠀⠀⠀⠀⠀⠀⠀⠀⢸⡉⠒⠚⠁⠀⠀⠀⢀⠀⠀⠀⠀⠀⠀⡇⠀⠀⠀⠀⠀⠀${C.reset}`);
+    this._pushLine(`${C.yellow}  ⠀⠀⠀⠀⠀⠀⠀⠀⠸⡇⢢⡀⣤⠀⠀⠀⢸⠀⠀⠀⠀⠀⢀⡇⠀⠀⠀⠀⠀⠀${C.reset}`);
+    this._pushLine(`${C.yellow}  ⠀⠀⠀⠀⠀⠀⠀⠀⠀⣷⠀⠉⢻⡀⠀⠀⣾⠤⠤⡄⠀⠀⢸⠁⠀⠀⠀⠀⠀⠀${C.reset}`);
+    this._pushLine(`${C.yellow}  ⠀⠀⠀⠀⠀⠀⠀⠀⠀⣸⠄⠀⣼⡇⠀⢠⡇⢀⡼⣻⠀⢀⡟⠀⠀⠀⠀⠀⠀⠀${C.reset}`);
+    this._pushLine(`${C.yellow}  ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠛⠒⠚⠙⠷⠶⠞⠉⠉⠀⠓⠒⠚⠁⠀⠀⠀⠀⠀${C.reset}`);
+    this._pushLine('');
+    this._pushLine(`${C.bold}${C.cyan}    Welcome to Bear coding agent${C.reset}`);
+    this._pushLine(`${C.gray}    Type /help for commands${C.reset}`);
     this._pushLine('');
     this._fullRepaint();
 
