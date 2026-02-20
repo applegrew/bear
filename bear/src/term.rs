@@ -1387,19 +1387,39 @@ impl TermState {
 
     /// Flush current streaming buffer into output lines.
     /// Removes previously written streaming lines and replaces them.
+    /// Lines inside `<think>` blocks or starting with `THOUGHT:` are rendered
+    /// in muted gray instead of the normal green.
     fn flush_streaming_to_output(&mut self) {
         // Remove any previous streaming lines (marked with a tag)
         while self.output_lines.last().map(|l| l.starts_with("\x01STREAM\x01")).unwrap_or(false) {
             self.output_lines.pop();
         }
         // Add current streaming content as tagged lines
+        let mut in_think = false;
         for (i, line) in self.streaming_buf.lines().enumerate() {
             let prefix = if i == 0 { "🐻 " } else { "   " };
-            self.output_lines.push(format!("\x01STREAM\x01  {}{}", prefix, a_green(line)));
-        }
-        // If streaming text doesn't end with newline, the last line is partial
-        if !self.streaming_buf.ends_with('\n') && !self.streaming_buf.is_empty() {
-            // Already handled above
+            let trimmed = line.trim();
+
+            // Track <think> blocks
+            if trimmed.starts_with("<think>") || trimmed.starts_with("<think ") {
+                in_think = true;
+            }
+
+            let is_thought = in_think
+                || trimmed.starts_with("THOUGHT:")
+                || trimmed.starts_with("Thought:")
+                || trimmed.starts_with("thought:");
+
+            let colored = if is_thought {
+                a_gray(line)
+            } else {
+                a_green(line)
+            };
+            self.output_lines.push(format!("\x01STREAM\x01  {}{}", prefix, colored));
+
+            if trimmed.contains("</think>") {
+                in_think = false;
+            }
         }
         self.scroll_offset = 0;
     }

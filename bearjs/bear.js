@@ -948,9 +948,27 @@ export class BearClient {
       this._outputLines.pop();
     }
     const lines = this._streamBuf.split('\n');
+    let inThink = false;
     for (let i = 0; i < lines.length; i++) {
       const prefix = i === 0 ? '🐻 ' : '   ';
-      this._outputLines.push(`${TAG}  ${prefix}${C.green}${lines[i]}${C.reset}`);
+      const trimmed = lines[i].trim();
+
+      // Track <think> blocks
+      if (trimmed.startsWith('<think>') || trimmed.startsWith('<think ')) {
+        inThink = true;
+      }
+
+      const isThought = inThink
+        || trimmed.startsWith('THOUGHT:')
+        || trimmed.startsWith('Thought:')
+        || trimmed.startsWith('thought:');
+
+      const color = isThought ? C.gray : C.green;
+      this._outputLines.push(`${TAG}  ${prefix}${color}${lines[i]}${C.reset}`);
+
+      if (trimmed.includes('</think>')) {
+        inThink = false;
+      }
     }
     this._scrollOffset = 0;
   }

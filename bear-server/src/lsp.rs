@@ -555,6 +555,47 @@ async fn reader_loop(
 }
 
 // ---------------------------------------------------------------------------
+// LSP availability check
+// ---------------------------------------------------------------------------
+
+/// Check if any known LSP server binary is available on $PATH.
+/// This is used at startup to decide whether to include LSP tools in the
+/// system prompt sent to the LLM.
+pub fn any_lsp_server_available() -> bool {
+    // All known (language_id, default_command) pairs
+    let known: &[(&str, &str)] = &[
+        ("rust", "rust-analyzer"),
+        ("typescript", "typescript-language-server"),
+        ("python", "pyright-langserver"),
+        ("go", "gopls"),
+        ("c", "clangd"),
+        ("java", "jdtls"),
+        ("zig", "zls"),
+    ];
+
+    for (lang_id, default_cmd) in known {
+        let cmd = lsp_command_for_lang(lang_id, default_cmd);
+        // Take just the binary name (first word, before any args)
+        let binary = cmd.split_whitespace().next().unwrap_or(&cmd);
+        if which_binary(binary) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if a binary exists on $PATH using `which`.
+fn which_binary(name: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(name)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
 // LspManager — owns all LSP server instances
 // ---------------------------------------------------------------------------
 

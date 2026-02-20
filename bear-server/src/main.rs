@@ -25,7 +25,7 @@ use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
 use llm::OllamaMessage;
-use state::{AppConfig, Session, ServerState, DEFAULT_BIND, SYSTEM_PROMPT, LlmProvider};
+use state::{AppConfig, Session, ServerState, DEFAULT_BIND, LlmProvider};
 
 // ---------------------------------------------------------------------------
 // main
@@ -128,8 +128,16 @@ async fn create_session(
                 .unwrap_or_else(|| ".".to_string())
         });
 
+    // Check if any LSP server is available on $PATH
+    let lsp_available = lsp::any_lsp_server_available();
+    if lsp_available {
+        tracing::info!("LSP servers detected on $PATH — LSP tools enabled in system prompt");
+    } else {
+        tracing::info!("No LSP servers found on $PATH — LSP tools excluded from system prompt");
+    }
+
     // Build system prompt, optionally enriched with README.md from the working directory
-    let mut system_content = SYSTEM_PROMPT.to_string();
+    let mut system_content = state::system_prompt(lsp_available);
     if let Some(readme) = read_readme_from_dir(&cwd) {
         system_content.push_str("\n\n## Project README\n\nThe working directory contains the following README.md:\n\n");
         system_content.push_str(&readme);

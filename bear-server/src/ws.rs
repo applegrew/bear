@@ -1505,7 +1505,8 @@ async fn run_subagent(
     task_description: String,
     result_tx: mpsc::Sender<(String, String)>,
 ) {
-    use crate::state::SUBAGENT_SYSTEM_PROMPT;
+    let lsp_available = crate::lsp::any_lsp_server_available();
+    let subagent_prompt = crate::state::subagent_system_prompt(lsp_available);
 
     let cwd = {
         let sessions = state.sessions.read().await;
@@ -1513,7 +1514,7 @@ async fn run_subagent(
     };
 
     let session_context = format!("Session context:\n- Working directory: {cwd}");
-    let system_content = format!("{SUBAGENT_SYSTEM_PROMPT}\n\n{session_context}");
+    let system_content = format!("{subagent_prompt}\n\n{session_context}");
 
     let mut history = vec![
         OllamaMessage {
