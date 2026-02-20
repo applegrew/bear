@@ -79,8 +79,9 @@ Bear is configured via environment variables on the **server**:
 | Variable | Default | Description |
 |---|---|---|
 | `BEAR_LLM_PROVIDER` | `ollama` | LLM provider (`ollama` or `openai`) |
-| `BEAR_OPENAI_API_KEY` | `your_key` | OpenAI API key |
-| `BEAR_OPENAI_MODEL` | `gpt-4o` | OpenAI model name |
+| `BEAR_OPENAI_API_KEY` | *(none)* | OpenAI-compatible API key |
+| `BEAR_OPENAI_MODEL` | `gpt-4` | OpenAI model name |
+| `BEAR_OPENAI_URL` | `https://api.openai.com` | OpenAI-compatible API base URL |
 | `BEAR_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama API base URL |
 | `BEAR_OLLAMA_MODEL` | `llama3.1` | Ollama model name |
 | `BEAR_MAX_TOOL_DEPTH` | `100` | Max consecutive tool calls before prompting to continue |
@@ -89,10 +90,17 @@ Bear is configured via environment variables on the **server**:
 | `BEAR_KEEP_RECENT` | `20` | Number of recent messages always kept in context |
 | `BEAR_LSP_<LANG>` | *(per-language defaults)* | Override LSP server command for a language |
 
-Example:
+Examples:
 
 ```bash
+# Ollama (default)
 BEAR_OLLAMA_MODEL=qwen2.5-coder BEAR_MAX_TOOL_DEPTH=50 cargo run -p bear-server
+
+# OpenAI
+BEAR_LLM_PROVIDER=openai BEAR_OPENAI_API_KEY=sk-... cargo run -p bear-server
+
+# OpenAI-compatible provider (e.g. LM Studio, vLLM)
+BEAR_LLM_PROVIDER=openai BEAR_OPENAI_URL=http://localhost:1234 BEAR_OPENAI_MODEL=my-model cargo run -p bear-server
 ```
 
 ## Browser client

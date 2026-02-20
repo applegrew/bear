@@ -149,15 +149,6 @@ async fn call_ollama(
     Ok(body.message)
 }
 
-/// Public non-streaming Ollama call for use by subagents and other callers.
-pub async fn call_ollama_non_streaming(
-    http_client: &reqwest::Client,
-    config: &AppConfig,
-    messages: &[OllamaMessage],
-) -> anyhow::Result<OllamaMessage> {
-    call_ollama(http_client, config, messages).await
-}
-
 // ---------------------------------------------------------------------------
 // Non-streaming OpenAI call
 // ---------------------------------------------------------------------------
@@ -183,9 +174,6 @@ async fn call_openai(
         stream: false,
     };
 
-    #[derive(Debug, serde::Deserialize)]
-    struct Resp { choices: Vec<OpenAiChoice> }
-
     tracing::info!("openai non-streaming request to {}/v1/chat/completions model={}", config.openai_url, config.openai_model);
     let response = http_client
         .post(&format!("{}/v1/chat/completions", config.openai_url))
@@ -210,15 +198,6 @@ async fn call_openai(
         role: choice.message.role.clone(),
         content: choice.message.content.clone(),
     })
-}
-
-/// Public non-streaming OpenAI call.
-pub async fn call_openai_non_streaming(
-    http_client: &reqwest::Client,
-    config: &AppConfig,
-    messages: &[ChatMessage],
-) -> anyhow::Result<ChatMessage> {
-    call_openai(http_client, config, messages).await
 }
 
 // ---------------------------------------------------------------------------

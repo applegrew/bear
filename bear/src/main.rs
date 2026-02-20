@@ -57,7 +57,14 @@ async fn main() -> anyhow::Result<()> {
     };
 
     loop {
-        let result = connect_session(&base_url, session_id).await?;
+        let result = match connect_session(&base_url, session_id).await {
+            Ok(r) => r,
+            Err(err) => {
+                eprintln!("\n  Connection failed: {err:#}\n");
+                // Return to session selection instead of crashing
+                SessionResult::EndSession
+            }
+        };
         if result == SessionResult::Quit {
             break;
         }
@@ -171,7 +178,8 @@ enum LoopEvent {
 
 async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<SessionResult> {
     let ws_url = to_ws_url(base_url, session_id)?;
-    let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url).await?;
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url).await
+        .with_context(|| format!("failed to connect to {ws_url}"))?;
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
     // Channel: server messages forwarded into the main loop
@@ -200,12 +208,28 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
 
     let mut last_tool: (String, serde_json::Value) = (String::new(), serde_json::Value::Null);
     let mut slash_commands: Vec<(String, String)> = Vec::new();
+    let mut disconnected = false;
+
+    // Helper macro: send a WS message, or break out of the main loop on error.
+    macro_rules! ws_send {
+        ($payload:expr) => {
+            if ws_write.send(Message::Text($payload)).await.is_err() {
+                disconnected = true;
+                break;
+            }
+        };
+    }
 
     loop {
         let event = tokio::select! {
-            Some(msg) = srv_rx.recv() => LoopEvent::FromServer(msg),
-            Some(te) = term_event_rx.recv() => LoopEvent::FromTerm(te),
-            else => break,
+            msg = srv_rx.recv() => match msg {
+                Some(m) => LoopEvent::FromServer(m),
+                None => { disconnected = true; break; }
+            },
+            te = term_event_rx.recv() => match te {
+                Some(t) => LoopEvent::FromTerm(t),
+                None => break,
+            },
         };
 
         match event {
@@ -222,7 +246,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                     approved,
                     always,
                 })?;
-                ws_write.send(Message::Text(payload)).await?;
+                ws_send!(payload);
             }
             LoopEvent::FromTerm(TermEvent::UserLine(line)) => {
                 let line = line.trim().to_string();
@@ -233,14 +257,14 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                 // Slash commands
                 if line == "/ps" {
                     let payload = serde_json::to_string(&ClientMessage::ProcessList)?;
-                    ws_write.send(Message::Text(payload)).await?;
+                    ws_send!(payload);
                 } else if let Some(rest) = line.strip_prefix("/kill ") {
                     match rest.trim().parse::<u32>() {
                         Ok(pid) => {
                             let payload = serde_json::to_string(
                                 &ClientMessage::ProcessKill { pid },
                             )?;
-                            ws_write.send(Message::Text(payload)).await?;
+                            ws_send!(payload);
                         }
                         Err(_) => {
                             let _ = render_tx.send(RenderCmd::Error(
@@ -257,7 +281,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                                     text: text.to_string(),
                                 },
                             )?;
-                            ws_write.send(Message::Text(payload)).await?;
+                            ws_send!(payload);
                         } else {
                             let _ = render_tx.send(RenderCmd::Error(
                                 "Usage: /send <pid> <text>".into(),
@@ -271,7 +295,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                 } else if line == "/end" {
                     // Tell the server to delete this session
                     let payload = serde_json::to_string(&ClientMessage::SessionEnd)?;
-                    ws_write.send(Message::Text(payload)).await?;
+                    ws_send!(payload);
                     let _ = render_tx.send(RenderCmd::Notice(
                         "Session ended. Returning to session selection...".into(),
                     ));
@@ -298,7 +322,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                             let payload = serde_json::to_string(
                                 &ClientMessage::SessionRename { name: name.to_string() },
                             )?;
-                            ws_write.send(Message::Text(payload)).await?;
+                            ws_send!(payload);
                         }
                     } else if let Some(path) = rest.strip_prefix("workdir ") {
                         let path = path.trim();
@@ -310,7 +334,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                             let payload = serde_json::to_string(
                                 &ClientMessage::SessionWorkdir { path: path.to_string() },
                             )?;
-                            ws_write.send(Message::Text(payload)).await?;
+                            ws_send!(payload);
                         }
                     } else {
                         let _ = render_tx.send(RenderCmd::Error(
@@ -353,20 +377,20 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                     let payload = serde_json::to_string(
                         &ClientMessage::Input { text: line },
                     )?;
-                    ws_write.send(Message::Text(payload)).await?;
+                    ws_send!(payload);
                 }
             }
             LoopEvent::FromTerm(TermEvent::UserPromptResult { prompt_id, selected }) => {
                 let payload = serde_json::to_string(
                     &ClientMessage::UserPromptResponse { prompt_id, selected },
                 )?;
-                ws_write.send(Message::Text(payload)).await?;
+                ws_send!(payload);
             }
             LoopEvent::FromTerm(TermEvent::TaskPlanResult { plan_id, approved }) => {
                 let payload = serde_json::to_string(
                     &ClientMessage::TaskPlanResponse { plan_id, approved },
                 )?;
-                ws_write.send(Message::Text(payload)).await?;
+                ws_send!(payload);
             }
             LoopEvent::FromTerm(TermEvent::Quit) => {
                 let _ = render_tx.send(RenderCmd::Quit);
@@ -375,6 +399,20 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                 return Ok(SessionResult::Quit);
             }
         }
+    }
+
+    // Show disconnection message and return to session selection
+    if disconnected {
+        let _ = render_tx.send(RenderCmd::Error(
+            "Disconnected from server.".into(),
+        ));
+        let _ = render_tx.send(RenderCmd::Notice(
+            "Session preserved. Returning to session selection...".into(),
+        ));
+        let _ = render_tx.send(RenderCmd::Quit);
+        drop(render_tx);
+        let _ = term_handle.join();
+        return Ok(SessionResult::EndSession);
     }
 
     Ok(SessionResult::Quit)
@@ -503,17 +541,15 @@ fn dispatch_server_msg(
                 tasks: task_tuples,
             });
         }
-        ServerMessage::TaskProgress { plan_id, task_id, status, detail } => {
+        ServerMessage::TaskProgress { task_id, status, detail, .. } => {
             let _ = render_tx.send(RenderCmd::TaskProgress {
-                plan_id: plan_id.clone(),
                 task_id: task_id.clone(),
                 status: status.clone(),
                 detail: detail.clone(),
             });
         }
-        ServerMessage::SubagentUpdate { subagent_id, description, status, detail } => {
+        ServerMessage::SubagentUpdate { description, status, detail, .. } => {
             let _ = render_tx.send(RenderCmd::SubagentUpdate {
-                subagent_id: subagent_id.clone(),
                 description: description.clone(),
                 status: status.clone(),
                 detail: detail.clone(),

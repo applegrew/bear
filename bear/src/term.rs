@@ -44,13 +44,11 @@ pub enum RenderCmd {
         tasks: Vec<(String, String, bool)>, // (id, description, needs_write)
     },
     TaskProgress {
-        plan_id: String,
         task_id: String,
         status: String,
         detail: Option<String>,
     },
     SubagentUpdate {
-        subagent_id: String,
         description: String,
         status: String,
         detail: Option<String>,
@@ -1219,7 +1217,7 @@ impl TermState {
             RenderCmd::TaskPlan { .. } => {
                 // Handled in the render loop via run_inline_menu
             }
-            RenderCmd::TaskProgress { plan_id: _, task_id, status, detail } => {
+            RenderCmd::TaskProgress { task_id, status, detail } => {
                 let icon = match status.as_str() {
                     "in_progress" => "→",
                     "completed" => "✓",
@@ -1236,7 +1234,7 @@ impl TermState {
                 self.push_line(&format!("  {} {}", color_fn(&format!("{icon} Task {task_id}")), a_gray(&detail_str)));
                 self.full_repaint();
             }
-            RenderCmd::SubagentUpdate { subagent_id: _, description, status, detail } => {
+            RenderCmd::SubagentUpdate { description, status, detail } => {
                 let icon = match status.as_str() {
                     "running" => "🔍",
                     "completed" => "✓",

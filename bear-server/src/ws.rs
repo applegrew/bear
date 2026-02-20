@@ -1356,7 +1356,6 @@ async fn execute_task_plan(
                                     // Abort subagents and return to the main loop
                                     budget.terminated.store(true, Ordering::SeqCst);
                                     budget.resume.notify_waiters();
-                                    pending_queued = None;
                                     // Broadcast the user's input so all clients see it
                                     bus.send(ServerMessage::UserInput { text: text.clone() }).await;
                                     // Re-queue the input so the session worker main loop picks it up
