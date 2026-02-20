@@ -13,6 +13,9 @@ use crate::llm::{call_llm_streaming, compact_history_if_needed, plan_task, refle
 use crate::process::{cleanup_session_processes, handle_process_kill, handle_process_input};
 use crate::state::{BusSender, PendingToolCall, SessionBus, ServerState};
 use crate::tools::{execute_tool, parse_tool_calls};
+use bear_core::tools::{ToolCallFilter, extract_shell_commands, tool_display_name, tool_output_msg, truncate_tool_output};
+#[cfg(test)]
+use bear_core::tools::is_tool_tag;
 
 /// When true, run a non-streaming reflection call before the main LLM response.
 const ENABLE_REFLECTION: bool = true;
@@ -21,109 +24,7 @@ const ENABLE_REFLECTION: bool = true;
 // Tool-call tag filter for streamed chunks
 // ---------------------------------------------------------------------------
 
-/// Stateful filter that strips tool-call markup from streamed LLM chunks so
-/// the client never sees raw tool-call JSON.
-///
-/// Handles two formats:
-///   1. `[TOOL_CALL]{"name":…,"arguments":…}[/TOOL_CALL]`
-///   2. `[tool_name]{args}[/tool_name]`  (tool name used as the tag)
-///
-/// Because tags can span chunk boundaries, we buffer text that *might* be
-/// the start of a tag and only emit it once we know it isn't.
-struct ToolCallFilter {
-    /// True while we are inside a tool-call block.
-    inside: bool,
-    /// The close tag we are looking for (e.g. "[/TOOL_CALL]" or "[/list_files]").
-    close_tag: String,
-    /// Accumulates text that could be the beginning of a tag boundary.
-    buf: String,
-}
-
-/// Check if `tag_name` looks like a tool-call open tag.
-/// Matches "TOOL_CALL" or any `snake_case` identifier (must contain at least
-/// one underscore to avoid false positives on words like `[bold]`).
-fn is_tool_tag(tag_name: &str) -> bool {
-    tag_name == "TOOL_CALL"
-        || (tag_name.contains('_')
-            && tag_name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
-}
-
-impl ToolCallFilter {
-    fn new() -> Self {
-        Self { inside: false, close_tag: String::new(), buf: String::new() }
-    }
-
-    /// Feed a new chunk and return the text that should be shown to the user.
-    fn feed(&mut self, chunk: &str) -> String {
-        self.buf.push_str(chunk);
-        let mut output = String::new();
-
-        loop {
-            if self.inside {
-                // Looking for the close tag
-                if let Some(pos) = self.buf.find(self.close_tag.as_str()) {
-                    // Skip everything up to and including the close tag
-                    self.buf = self.buf[pos + self.close_tag.len()..].to_string();
-                    self.inside = false;
-                    self.close_tag.clear();
-                    continue;
-                }
-                // Close tag might be partially at the end — keep buffering
-                let keep = self.close_tag.len() - 1;
-                if self.buf.len() > keep {
-                    self.buf = self.buf[self.buf.len() - keep..].to_string();
-                }
-                break;
-            } else {
-                // Look for '[' which could start a tool tag
-                let Some(bracket) = self.buf.find('[') else {
-                    // No bracket at all — emit everything
-                    output.push_str(&self.buf);
-                    self.buf.clear();
-                    break;
-                };
-
-                // Check if we have a complete tag: [something]
-                let after_bracket = &self.buf[bracket + 1..];
-                let Some(close_bracket) = after_bracket.find(']') else {
-                    // Incomplete — emit everything before '[', keep '[' onward buffered
-                    output.push_str(&self.buf[..bracket]);
-                    self.buf = self.buf[bracket..].to_string();
-                    break;
-                };
-
-                let tag_name = &after_bracket[..close_bracket];
-                if is_tool_tag(tag_name) {
-                    // This is a tool-call open tag — emit text before it, enter inside mode
-                    output.push_str(&self.buf[..bracket]);
-                    self.close_tag = format!("[/{tag_name}]");
-                    self.buf = self.buf[bracket + 1 + close_bracket + 1..].to_string();
-                    self.inside = true;
-                    continue;
-                } else {
-                    // Not a tool tag — emit up to and including ']', continue scanning
-                    let end = bracket + 1 + close_bracket + 1;
-                    output.push_str(&self.buf[..end]);
-                    self.buf = self.buf[end..].to_string();
-                    continue;
-                }
-            }
-        }
-
-        output
-    }
-
-    /// Flush any remaining buffered text (call when streaming is done).
-    fn flush(&mut self) -> String {
-        if self.inside {
-            // Unclosed tag — discard the buffered content
-            self.buf.clear();
-            String::new()
-        } else {
-            std::mem::take(&mut self.buf)
-        }
-    }
-}
+// ToolCallFilter, is_tool_tag imported from bear_core::tools
 
 // ---------------------------------------------------------------------------
 // WebSocket handler — thin relay between client and session bus
@@ -2073,80 +1974,7 @@ async fn invoke_llm(
     }
 }
 
-/// Extract individual command names from a shell string.
-///
-/// Splits on shell operators (`&&`, `||`, `;`, `|`) and extracts the base
-/// command name from each segment, skipping env-var assignments, `sudo`, `env`,
-/// and path prefixes. Returns deduplicated command names.
-///
-/// Examples:
-///   "cd /tmp && rm -rf foo"  → ["cd", "rm"]
-///   "FOO=1 sudo cargo build" → ["cargo"]
-///   "ls | grep foo | wc -l"  → ["ls", "grep", "wc"]
-fn extract_shell_commands(cmd_str: &str) -> Vec<String> {
-    let mut result = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    // Split on shell operators: &&, ||, ;, |
-    let replaced = cmd_str
-        .replace("&&", "\x00")
-        .replace("||", "\x00")
-        .replace(';', "\x00")
-        .replace('|', "\x00");
-    let segments: Vec<&str> = replaced
-        .split('\x00')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            // Handle subshell: strip leading ( or $( 
-            s.trim_start_matches('(').trim_start_matches("$(").trim()
-        })
-        .collect();
-
-    for seg in segments {
-        let tokens: Vec<&str> = seg.split_whitespace().collect();
-        for token in &tokens {
-            // Skip env var assignments like FOO=bar
-            if token.contains('=') && !token.starts_with('-') {
-                continue;
-            }
-            // Skip sudo/env prefixes
-            if *token == "sudo" || *token == "env" || *token == "nohup" || *token == "time" || *token == "nice" {
-                continue;
-            }
-            // Extract basename from paths like /usr/bin/ls
-            let base = token.rsplit('/').next().unwrap_or(token);
-            if !base.is_empty() && seen.insert(base.to_string()) {
-                result.push(base.to_string());
-            }
-            break;
-        }
-    }
-
-    result
-}
-
-/// Build a `ToolOutput` message with the display name and arguments.
-fn tool_output_msg(ptc: &PendingToolCall, output: String) -> ServerMessage {
-    ServerMessage::ToolOutput {
-        tool_call_id: ptc.tool_call.id.clone(),
-        tool_name: tool_display_name(&ptc.tool_call.name).to_string(),
-        tool_args: ptc.tool_call.arguments.clone(),
-        output,
-    }
-}
-
-/// Map internal tool names to their user-facing display names.
-/// `read_symbol` → `read_file`, `patch_symbol` → `patch_file`.
-/// This ensures auto-approve, tool cards, and "Always approve" all treat
-/// these as the same tool from the user's perspective.
-fn tool_display_name(name: &str) -> &str {
-    match name {
-        "read_symbol" => "read_file",
-        "patch_symbol" => "patch_file",
-        _ => name,
-    }
-}
+// extract_shell_commands, tool_output_msg, tool_display_name imported from bear_core::tools
 
 /// Pop the next tool call from the queue. For most tools, send a ToolRequest
 /// to the client for confirmation. For `user_prompt_options`, skip the
@@ -2499,58 +2327,7 @@ async fn handle_depth_prompt_response(
     }
 }
 
-fn truncate_tool_output(output: &str, max_chars: usize) -> String {
-    if output.len() <= max_chars {
-        return output.to_string();
-    }
-
-    let total_lines = output.bytes().filter(|&b| b == b'\n').count() + 1;
-    let head_budget = max_chars * 60 / 100;
-    let tail_budget = max_chars * 30 / 100;
-
-    // Scan forward: collect head lines within budget
-    let mut head_end = 0;
-    let mut head_lines = 0;
-    for line in output.lines() {
-        let next = head_end + line.len() + 1; // +1 for newline
-        if next > head_budget {
-            break;
-        }
-        head_end = next;
-        head_lines += 1;
-    }
-
-    // Scan backward: find tail start within budget
-    let bytes = output.as_bytes();
-    let mut tail_start = output.len();
-    let mut tail_lines = 0;
-    let mut pos = output.len();
-    while pos > 0 {
-        // Find the start of the previous line
-        let line_end = pos;
-        pos = if pos > 0 {
-            bytes[..pos - 1].iter().rposition(|&b| b == b'\n').map(|p| p + 1).unwrap_or(0)
-        } else {
-            0
-        };
-        let line_len = line_end - pos + 1;
-        if (output.len() - pos) + line_len > tail_budget {
-            break;
-        }
-        tail_start = pos;
-        tail_lines += 1;
-        if pos == 0 {
-            break;
-        }
-    }
-
-    let head = &output[..head_end];
-    let tail = &output[tail_start..];
-
-    format!(
-        "{head}\n[… truncated — {total_lines} lines total, showing first {head_lines} and last {tail_lines} …]\n{tail}",
-    )
-}
+// truncate_tool_output imported from bear_core::tools
 
 async fn append_tool_result(state: &ServerState, session_id: Uuid, tool_name: &str, output: &str) {
     // read_file gets a 4x higher limit — truncating a file the user explicitly

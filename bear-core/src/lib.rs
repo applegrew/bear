@@ -1,6 +1,13 @@
+pub mod config;
+pub mod llm;
+pub mod prompts;
+pub mod tools;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+pub use config::{AppConfig, LlmProvider};
 
 pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:49321";
 
@@ -72,6 +79,43 @@ pub struct ProcessInfo {
 pub struct SlashCommandInfo {
     pub cmd: String,
     pub desc: String,
+}
+
+// ---------------------------------------------------------------------------
+// Session state (shared between bear-core and bear-server)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct UndoEntry {
+    pub path: String,
+    pub previous_content: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TodoItem {
+    pub id: String,
+    pub content: String,
+    pub status: String,   // "pending", "in_progress", "completed"
+    pub priority: String, // "high", "medium", "low"
+}
+
+#[derive(Debug, Clone)]
+pub struct Session {
+    pub info: SessionInfo,
+    pub history: Vec<llm::ChatMessage>,
+    pub undo_stack: Vec<UndoEntry>,
+    pub todo_list: Vec<TodoItem>,
+    /// User input history (shared across all clients connected to this session).
+    pub input_history: Vec<String>,
+    /// Commands auto-approved by any client (shared across all clients).
+    pub auto_approved: std::collections::HashSet<String>,
+    /// Maximum number of concurrent read-only subagents (default 3).
+    pub max_subagents: usize,
+}
+
+pub struct PendingToolCall {
+    pub tool_call: ToolCall,
+    pub cwd: String,
 }
 
 // ---------------------------------------------------------------------------

@@ -282,9 +282,18 @@ dependencies = [
 name = "bear-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "chrono",
+ "futures",
+ "glob",
+ "regex",
+ "reqwest",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
+ "urlencoding",
  "uuid",
 ]
 
@@ -293,6 +302,7 @@ name = "bear-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "bear-core",
  "chrono",

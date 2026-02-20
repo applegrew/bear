@@ -3,6 +3,7 @@ mod lsp;
 mod process;
 mod rtc;
 mod state;
+mod tool_bridge;
 mod tools;
 mod ws;
 
