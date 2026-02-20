@@ -1,10 +1,39 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::state::AppConfig;
+use crate::state::{AppConfig, LlmProvider};
 
 // ---------------------------------------------------------------------------
-// Ollama message types
+// Unified message format for both Ollama and OpenAI
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+// Conversion functions
+impl From<ChatMessage> for OllamaMessage {
+    fn from(msg: ChatMessage) -> Self {
+        OllamaMessage {
+            role: msg.role,
+            content: msg.content,
+        }
+    }
+}
+
+impl From<OllamaMessage> for ChatMessage {
+    fn from(msg: OllamaMessage) -> Self {
+        ChatMessage {
+            role: msg.role,
+            content: msg.content,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ollama message types (for backward compatibility)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,11 +64,57 @@ struct OllamaStreamMessage {
 }
 
 // ---------------------------------------------------------------------------
+// OpenAI message types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAiMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiChatRequest {
+    model: String,
+    messages: Vec<OpenAiMessage>,
+    stream: bool,
+}
+
+/// OpenAI API response for non-streaming calls
+#[derive(Debug, Deserialize)]
+struct OpenAiChatResponse {
+    choices: Vec<OpenAiChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChoice {
+    message: OpenAiMessage,
+}
+
+/// A single chunk from the OpenAI streaming response.
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamChunk {
+    choices: Vec<OpenAiStreamChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamChoice {
+    delta: OpenAiStreamDelta,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamDelta {
+    #[serde(default)]
+    content: String,
+}
+
+// ---------------------------------------------------------------------------
 // Token estimation
 // ---------------------------------------------------------------------------
 
 /// Rough token estimate: ~4 chars per token for English text.
-pub fn estimate_tokens(messages: &[OllamaMessage]) -> usize {
+pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
     messages.iter().map(|m| m.content.len() / 4 + 1).sum()
 }
 
@@ -84,8 +159,218 @@ pub async fn call_ollama_non_streaming(
 }
 
 // ---------------------------------------------------------------------------
-// Context compaction
+// Non-streaming OpenAI call
 // ---------------------------------------------------------------------------
+
+async fn call_openai(
+    http_client: &reqwest::Client,
+    config: &AppConfig,
+    messages: &[ChatMessage],
+) -> anyhow::Result<ChatMessage> {
+    let api_key = config.openai_api_key.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("OpenAI API key not configured"))?;
+
+    let openai_messages: Vec<OpenAiMessage> = messages.iter()
+        .map(|msg| OpenAiMessage {
+            role: msg.role.clone(),
+            content: msg.content.clone(),
+        })
+        .collect();
+
+    let payload = OpenAiChatRequest {
+        model: config.openai_model.clone(),
+        messages: openai_messages,
+        stream: false,
+    };
+
+    #[derive(Debug, serde::Deserialize)]
+    struct Resp { choices: Vec<OpenAiChoice> }
+
+    tracing::info!("openai non-streaming request to {}/v1/chat/completions model={}", config.openai_url, config.openai_model);
+    let response = http_client
+        .post(&format!("{}/v1/chat/completions", config.openai_url))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await?;
+
+    tracing::info!("openai non-streaming response status={}", response.status());
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("OpenAI returned {status}: {body}");
+    }
+
+    let body: OpenAiChatResponse = response.json().await?;
+    let choice = body.choices.first()
+        .ok_or_else(|| anyhow::anyhow!("OpenAI returned no choices"))?;
+
+    Ok(ChatMessage {
+        role: choice.message.role.clone(),
+        content: choice.message.content.clone(),
+    })
+}
+
+/// Public non-streaming OpenAI call.
+pub async fn call_openai_non_streaming(
+    http_client: &reqwest::Client,
+    config: &AppConfig,
+    messages: &[ChatMessage],
+) -> anyhow::Result<ChatMessage> {
+    call_openai(http_client, config, messages).await
+}
+
+// ---------------------------------------------------------------------------
+// Streaming OpenAI API call
+// ---------------------------------------------------------------------------
+
+/// Call OpenAI with streaming enabled. Sends content chunks through `chunk_tx`
+/// as they arrive. Returns the fully assembled ChatMessage when done.
+pub async fn call_openai_streaming(
+    http_client: &reqwest::Client,
+    config: &AppConfig,
+    messages: &[ChatMessage],
+    chunk_tx: &mpsc::Sender<String>,
+) -> anyhow::Result<ChatMessage> {
+    let api_key = config.openai_api_key.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("OpenAI API key not configured"))?;
+
+    let openai_messages: Vec<OpenAiMessage> = messages.iter()
+        .map(|msg| OpenAiMessage {
+            role: msg.role.clone(),
+            content: msg.content.clone(),
+        })
+        .collect();
+
+    let payload = OpenAiChatRequest {
+        model: config.openai_model.clone(),
+        messages: openai_messages,
+        stream: true,
+    };
+
+    tracing::info!("openai streaming request to {}/v1/chat/completions model={}", config.openai_url, config.openai_model);
+    let response = http_client
+        .post(&format!("{}/v1/chat/completions", config.openai_url))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await?;
+
+    tracing::info!("openai streaming response status={}", response.status());
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        tracing::error!("openai returned {status}: {body}");
+        anyhow::bail!("openai returned {status}: {body}");
+    }
+
+    let mut full_content = String::new();
+
+    use futures::StreamExt;
+    let mut bytes_stream = response.bytes_stream();
+
+    let mut raw_byte_count = 0usize;
+    while let Some(chunk_result) = bytes_stream.next().await {
+        let chunk_bytes = chunk_result?;
+        raw_byte_count += chunk_bytes.len();
+        let chunk_str = String::from_utf8_lossy(&chunk_bytes);
+        if raw_byte_count <= 2000 {
+            tracing::info!("openai stream raw ({} bytes): {:?}", chunk_bytes.len(), &chunk_str[..chunk_str.len().min(200)]);
+        }
+
+        // OpenAI streams as SSE (Server-Sent Events) format: "data: {...}\n\n"
+        for line in chunk_str.lines() {
+            let line = line.trim();
+            if line.is_empty() || !line.starts_with("data: ") {
+                continue;
+            }
+
+            let json_str = &line[6..]; // Remove "data: " prefix
+            if json_str == "[DONE]" {
+                tracing::info!("openai stream done: {raw_byte_count} bytes, content len={}", full_content.len());
+                return Ok(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: full_content,
+                });
+            }
+
+            match serde_json::from_str::<OpenAiStreamChunk>(json_str) {
+                Ok(chunk) => {
+                    for choice in chunk.choices {
+                        if !choice.delta.content.is_empty() {
+                            full_content.push_str(&choice.delta.content);
+                            let _ = chunk_tx.send(choice.delta.content).await;
+                        }
+                        if choice.finish_reason.is_some() {
+                            tracing::info!("openai stream done: {raw_byte_count} bytes, content len={}", full_content.len());
+                            return Ok(ChatMessage {
+                                role: "assistant".to_string(),
+                                content: full_content,
+                            });
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!("openai stream JSON parse error: {err}, line: {:?}", &json_str[..json_str.len().min(300)]);
+                }
+            }
+        }
+    }
+
+    tracing::info!("openai stream ended without finish_reason: {raw_byte_count} bytes, content len={}, remaining buffer", full_content.len());
+    Ok(ChatMessage {
+        role: "assistant".to_string(),
+        content: full_content,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Unified LLM interface
+// ---------------------------------------------------------------------------
+
+/// Unified non-streaming LLM call that dispatches to the configured provider.
+pub async fn call_llm_non_streaming(
+    http_client: &reqwest::Client,
+    config: &AppConfig,
+    messages: &[ChatMessage],
+) -> anyhow::Result<ChatMessage> {
+    match config.llm_provider {
+        LlmProvider::Ollama => {
+            let ollama_messages: Vec<OllamaMessage> = messages.iter()
+                .map(|msg| msg.clone().into())
+                .collect();
+            call_ollama(http_client, config, &ollama_messages).await
+                .map(|msg| msg.into())
+        }
+        LlmProvider::OpenAI => {
+            call_openai(http_client, config, messages).await
+        }
+    }
+}
+
+/// Unified streaming LLM call that dispatches to the configured provider.
+pub async fn call_llm_streaming(
+    http_client: &reqwest::Client,
+    config: &AppConfig,
+    messages: &[ChatMessage],
+    chunk_tx: &mpsc::Sender<String>,
+) -> anyhow::Result<ChatMessage> {
+    match config.llm_provider {
+        LlmProvider::Ollama => {
+            let ollama_messages: Vec<OllamaMessage> = messages.iter()
+                .map(|msg| msg.clone().into())
+                .collect();
+            call_ollama_streaming(http_client, config, &ollama_messages, chunk_tx).await
+                .map(|msg| msg.into())
+        }
+        LlmProvider::OpenAI => {
+            call_openai_streaming(http_client, config, messages, chunk_tx).await
+        }
+    }
+}
 
 const COMPACTION_PROMPT: &str = r#"You are a summarization assistant. Summarize the following conversation between a user and an AI coding assistant called Bear. Preserve:
 - The user's original goal and intent
@@ -103,8 +388,11 @@ pub async fn compact_history_if_needed(
     config: &AppConfig,
     history: &mut Vec<OllamaMessage>,
 ) {
+    let chat_messages: Vec<ChatMessage> = history.iter()
+        .map(|msg| msg.clone().into())
+        .collect();
     let budget = config.context_budget;
-    let tokens = estimate_tokens(history);
+    let tokens = estimate_tokens(&chat_messages);
     if tokens <= budget {
         return;
     }
@@ -143,11 +431,11 @@ pub async fn compact_history_if_needed(
     }
 
     let summary_request = vec![
-        OllamaMessage {
+        ChatMessage {
             role: "system".to_string(),
             content: COMPACTION_PROMPT.to_string(),
         },
-        OllamaMessage {
+        ChatMessage {
             role: "user".to_string(),
             content: format!(
                 "Summarize this conversation ({old_count} messages, ~{old_tokens} tokens):\n\n{conversation_text}",
@@ -165,7 +453,7 @@ pub async fn compact_history_if_needed(
         history.extend(recent);
     };
 
-    match call_ollama(http_client, config, &summary_request).await {
+    match call_llm_non_streaming(http_client, config, &summary_request).await {
         Ok(summary_reply) => {
             let summary_msg = OllamaMessage {
                 role: "user".to_string(),
@@ -176,7 +464,7 @@ pub async fn compact_history_if_needed(
             };
             rebuild(history, summary_msg);
 
-            let new_tokens = estimate_tokens(history);
+            let new_tokens = estimate_tokens(&chat_messages);
             tracing::info!(
                 "compaction complete: {} -> {} messages, {} -> {} est. tokens",
                 split_point, history.len(), tokens, new_tokens,
@@ -220,15 +508,21 @@ pub async fn reflective_thinking(
     messages: &[OllamaMessage],
     session_context: &str,
 ) -> anyhow::Result<OllamaMessage> {
-    let mut reflective_messages = vec![OllamaMessage {
+    let chat_messages: Vec<ChatMessage> = messages.iter()
+        .map(|msg| msg.clone().into())
+        .collect();
+
+    let mut reflective_messages = vec![ChatMessage {
         role: "system".to_string(),
         content: format!("{REFLECTION_PROMPT}\n\n{session_context}"),
     }];
     // Skip the original system prompt (messages[0]) to avoid two system messages
-    if messages.len() > 1 {
-        reflective_messages.extend_from_slice(&messages[1..]);
+    if chat_messages.len() > 1 {
+        reflective_messages.extend_from_slice(&chat_messages[1..]);
     }
-    call_ollama(http_client, config, &reflective_messages).await
+
+    let result = call_llm_non_streaming(http_client, config, &reflective_messages).await?;
+    Ok(result.into())
 }
 
 // ---------------------------------------------------------------------------
@@ -269,15 +563,19 @@ pub async fn plan_task(
     messages: &[OllamaMessage],
     session_context: &str,
 ) -> anyhow::Result<String> {
-    let mut planner_messages = vec![OllamaMessage {
+    let chat_messages: Vec<ChatMessage> = messages.iter()
+        .map(|msg| msg.clone().into())
+        .collect();
+
+    let mut planner_messages = vec![ChatMessage {
         role: "system".to_string(),
         content: format!("{PLANNER_PROMPT}\n\n{session_context}"),
     }];
     // Include conversation history (skip original system prompt)
-    if messages.len() > 1 {
-        planner_messages.extend_from_slice(&messages[1..]);
+    if chat_messages.len() > 1 {
+        planner_messages.extend_from_slice(&chat_messages[1..]);
     }
-    let reply = call_ollama(http_client, config, &planner_messages).await?;
+    let reply = call_llm_non_streaming(http_client, config, &planner_messages).await?;
     Ok(reply.content)
 }
 

@@ -78,6 +78,9 @@ Bear is configured via environment variables on the **server**:
 
 | Variable | Default | Description |
 |---|---|---|
+| `BEAR_LLM_PROVIDER` | `ollama` | LLM provider (`ollama` or `openai`) |
+| `BEAR_OPENAI_API_KEY` | `your_key` | OpenAI API key |
+| `BEAR_OPENAI_MODEL` | `gpt-4o` | OpenAI model name |
 | `BEAR_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama API base URL |
 | `BEAR_OLLAMA_MODEL` | `llama3.1` | Ollama model name |
 | `BEAR_MAX_TOOL_DEPTH` | `100` | Max consecutive tool calls before prompting to continue |

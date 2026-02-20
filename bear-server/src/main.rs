@@ -25,7 +25,7 @@ use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
 use llm::OllamaMessage;
-use state::{AppConfig, Session, ServerState, DEFAULT_BIND, SYSTEM_PROMPT};
+use state::{AppConfig, Session, ServerState, DEFAULT_BIND, SYSTEM_PROMPT, LlmProvider};
 
 // ---------------------------------------------------------------------------
 // main
@@ -40,10 +40,15 @@ async fn main() -> anyhow::Result<()> {
     let _lock = acquire_server_lock()?;
 
     let config = AppConfig::load_from_env();
+    let (provider_url, provider_model) = match config.llm_provider {
+        LlmProvider::Ollama => (&config.ollama_url, &config.ollama_model),
+        LlmProvider::OpenAI => (&config.openai_url, &config.openai_model),
+    };
     tracing::info!(
-        "ollama configured: url={} model={}",
-        config.ollama_url,
-        config.ollama_model
+        "{:?} configured: url={} model={}",
+        config.llm_provider,
+        provider_url,
+        provider_model
     );
 
     let state = ServerState {

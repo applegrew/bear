@@ -9,7 +9,7 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, Notify};
 use uuid::Uuid;
 
-use crate::llm::{call_ollama_streaming, compact_history_if_needed, plan_task, reflective_thinking, OllamaMessage};
+use crate::llm::{call_llm_streaming, compact_history_if_needed, plan_task, reflective_thinking, ChatMessage, OllamaMessage};
 use crate::process::{cleanup_session_processes, handle_process_kill, handle_process_input};
 use crate::state::{BusSender, PendingToolCall, SessionBus, ServerState};
 use crate::tools::{execute_tool, parse_tool_calls};
@@ -1545,8 +1545,11 @@ async fn run_subagent(
         }
 
         // Non-streaming LLM call for subagent (simpler than streaming)
-        let reply = match crate::llm::call_ollama_non_streaming(
-            &state.http_client, &state.config, &history,
+        let chat_history: Vec<ChatMessage> = history.iter()
+            .map(|msg| msg.clone().into())
+            .collect();
+        let reply = match crate::llm::call_llm_non_streaming(
+            &state.http_client, &state.config, &chat_history,
         ).await {
             Ok(r) => r,
             Err(err) => {
@@ -1556,10 +1559,9 @@ async fn run_subagent(
         };
 
         full_response = reply.content.clone();
-        history.push(reply.clone());
-
-        // Parse tool calls from the response
+        let reply_for_history = reply.clone().into();
         let tool_calls = parse_tool_calls(&reply.content);
+        history.push(reply_for_history);
         if tool_calls.is_empty() {
             // No more tool calls — subagent is done
             break;
@@ -1809,8 +1811,12 @@ async fn invoke_llm(
                     || err_str.contains("timed out")
                     || err_str.contains("connection")
                 {
+                    let provider_name = match state.config.llm_provider {
+                        crate::state::LlmProvider::Ollama => "Ollama",
+                        crate::state::LlmProvider::OpenAI => "OpenAI",
+                    };
                     bus.send(ServerMessage::Error {
-                        text: format!("Cannot reach Ollama ({}): {err}", state.config.ollama_url),
+                        text: format!("Cannot reach {}: {err}", provider_name),
                     }).await;
                     bus.send(ServerMessage::AssistantTextDone).await;
                     return;
@@ -1826,8 +1832,11 @@ async fn invoke_llm(
 
     let http = state.http_client.clone();
     let cfg = state.config.clone();
+    let history_for_llm: Vec<ChatMessage> = history_for_llm.iter()
+        .map(|msg| msg.clone().into())
+        .collect();
     let llm_handle = tokio::spawn(async move {
-        call_ollama_streaming(&http, &cfg, &history_for_llm, &chunk_tx).await
+        call_llm_streaming(&http, &cfg, &history_for_llm, &chunk_tx).await
     });
 
     // Forward chunks to the bus as AssistantText, but also listen
@@ -1967,7 +1976,7 @@ async fn invoke_llm(
         }
         Ok(Err(err)) => {
             bus.send(ServerMessage::Error {
-                text: format!("ollama request failed: {err}"),
+                text: format!("LLM request failed: {err}"),
             }).await;
         }
         Err(err) => {
