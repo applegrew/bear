@@ -298,7 +298,7 @@ async fn push_undo(state: &ServerState, session_id: Uuid, full_path: &str) {
     }
 }
 
-async fn execute_run_command(
+pub async fn execute_run_command(
     state: &ServerState,
     session_id: Uuid,
     bus: &BusSender,

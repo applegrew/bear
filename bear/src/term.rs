@@ -694,9 +694,10 @@ impl TermState {
 
         // Input line
         let _ = execute!(out, cursor::MoveTo(0, input_row + 1), terminal::Clear(ClearType::CurrentLine));
-        let is_slash = self.input_buf.starts_with('/');
-        let (prompt, prompt_color) = if is_slash {
+        let (prompt, prompt_color) = if self.input_buf.starts_with('/') {
             ("cmd-> ", Color::Yellow)
+        } else if self.input_buf.starts_with('!') {
+            ("shell>", Color::Magenta)
         } else {
             ("bear> ", Color::Cyan)
         };
@@ -742,7 +743,7 @@ impl TermState {
         }
 
         // Dropdown above input box
-        if is_slash {
+        if self.input_buf.starts_with('/') {
             let matches = self.matching_slash_commands(&self.input_buf);
             if !matches.is_empty() {
                 if let Some(idx) = self.dropdown_idx {
@@ -1361,7 +1362,13 @@ impl TermState {
                     self.awaiting_input_echo = false;
                 } else {
                     // Another client submitted this prompt — display it
-                    let prompt = if text.starts_with('/') { "cmd-> " } else { "bear> " };
+                    let prompt = if text.starts_with('/') {
+                        "cmd-> "
+                    } else if text.starts_with('!') {
+                        "shell>"
+                    } else {
+                        "bear> "
+                    };
                     self.push_line(&format!("  {}{}", a_bold(&a_white(prompt)), a_white(&text)));
                     self.full_repaint();
                 }
@@ -1494,7 +1501,13 @@ impl TermState {
         }
 
         // Show submitted line in output
-        let prompt = if text.starts_with('/') { "cmd-> " } else { "bear> " };
+        let prompt = if text.starts_with('/') {
+            "cmd-> "
+        } else if text.starts_with('!') {
+            "shell>"
+        } else {
+            "bear> "
+        };
         self.push_line(&format!("  {}{}", a_bold(&a_white(prompt)), a_white(&text)));
 
         self.input_buf.clear();

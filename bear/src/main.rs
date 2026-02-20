@@ -371,6 +371,20 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                     ].iter().map(|s| s.to_string()));
                     let help = help_lines.join("\n");
                     let _ = render_tx.send(RenderCmd::Notice(help));
+                } else if let Some(cmd) = line.strip_prefix('!') {
+                    // Direct shell execution -> send ShellExec to server
+                    let cmd = cmd.trim().to_string();
+                    if cmd.is_empty() {
+                        let _ = render_tx.send(RenderCmd::Error(
+                            "Usage: !<command>".into(),
+                        ));
+                    } else {
+                        let _ = render_tx.send(RenderCmd::SuppressNextInputEcho);
+                        let payload = serde_json::to_string(
+                            &ClientMessage::ShellExec { command: cmd },
+                        )?;
+                        ws_send!(payload);
+                    }
                 } else {
                     // Regular chat input -> send to server/LLM
                     let _ = render_tx.send(RenderCmd::SuppressNextInputEcho);

@@ -570,6 +570,75 @@ async fn session_worker(
                     text,
                 ).await;
             }
+            ClientMessage::ShellExec { command } => {
+                tracing::info!("session_worker {session_id}: ShellExec received: {command:?}");
+                // Broadcast so other clients see the command
+                bus.send(ServerMessage::UserInput { text: format!("!{command}") }).await;
+                // Record in input history
+                {
+                    let mut sessions = state.sessions.write().await;
+                    if let Some(session) = sessions.get_mut(&session_id) {
+                        let entry = format!("!{command}");
+                        if session.input_history.last().map(|s| s.as_str()) != Some(&entry) {
+                            session.input_history.push(entry);
+                        }
+                    }
+                }
+                // Abort any active subagents
+                abort_subagents(&mut subagent_handles, &budget, &bus).await;
+                pending_queued_prompt = None;
+                tool_depth = 0;
+                depth_limit = state.config.max_tool_depth;
+                bulk_increment = 50;
+                budget.reset(state.config.max_tool_depth);
+                pending_task_plan = None;
+
+                // Get session cwd
+                let cwd = {
+                    let sessions = state.sessions.read().await;
+                    sessions.get(&session_id)
+                        .map(|s| s.info.cwd.clone())
+                        .unwrap_or_else(|| ".".to_string())
+                };
+
+                // Execute the command (same as run_command tool)
+                let output = crate::tools::execute_run_command(
+                    &state, session_id, &bus, &command, &cwd,
+                ).await;
+
+                // Truncate output for LLM context
+                let truncated = truncate_tool_output(
+                    &output,
+                    state.config.max_tool_output_chars,
+                );
+
+                // Inject into session history as a user message so the LLM
+                // knows about the command and its output
+                let history_msg = OllamaMessage {
+                    role: "user".to_string(),
+                    content: format!(
+                        "[The user manually executed a shell command]\n\
+                         Command: {command}\n\
+                         Output:\n{truncated}"
+                    ),
+                };
+                {
+                    let mut sessions = state.sessions.write().await;
+                    if let Some(session) = sessions.get_mut(&session_id) {
+                        session.info.touch();
+                        session.history.push(history_msg);
+                    }
+                }
+
+                // Now invoke the LLM so it can react to the output
+                invoke_llm(
+                    &state, session_id, &bus, &mut client_rx,
+                    &mut pending, &mut pending_prompt,
+                    &mut pending_depth_prompt,
+                    &mut tool_queue, &mut tool_depth,
+                    &mut depth_limit, &mut bulk_increment,
+                ).await;
+            }
             ClientMessage::ToolConfirm { tool_call_id, approved, always } => {
                 // Check if this resolves a queued tool confirm from a subagent
                 if let Some(PendingQueuedPrompt::ToolConfirm { tool_call_id: ref qid, .. }) = pending_queued_prompt {
@@ -1361,6 +1430,13 @@ async fn execute_task_plan(
                                     // Re-queue the input so the session worker main loop picks it up
                                     let _ = client_tx.send(ClientMessage::Input { text }).await;
                                     // Break out of the subagent wait loop
+                                    break;
+                                }
+                                msg @ ClientMessage::ShellExec { .. } => {
+                                    tracing::info!("execute_task_plan: interrupted by ShellExec");
+                                    budget.terminated.store(true, Ordering::SeqCst);
+                                    budget.resume.notify_waiters();
+                                    let _ = client_tx.send(msg).await;
                                     break;
                                 }
                                 ClientMessage::Interrupt => {

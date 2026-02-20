@@ -95,6 +95,9 @@ pub struct TaskItem {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     Input { text: String },
+    /// User manually executed a shell command via the `!` prefix.
+    /// The server runs it like `run_command`, then feeds the output to the LLM.
+    ShellExec { command: String },
     ToolConfirm { tool_call_id: String, approved: bool, #[serde(default)] always: bool },
     UserPromptResponse { prompt_id: String, selected: Vec<usize> },
     ProcessInput { pid: u32, text: String },

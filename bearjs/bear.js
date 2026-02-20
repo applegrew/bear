@@ -256,8 +256,9 @@ export class BearClient {
     // Input line
     this.term.write(`\x1b[${row + 1};1H\x1b[2K`);
     const isSlash = this.inputBuf.startsWith('/');
-    const prompt = isSlash ? 'cmd-> ' : 'bear> ';
-    const promptColor = isSlash ? C.yellow : C.cyan;
+    const isShell = this.inputBuf.startsWith('!');
+    const prompt = isSlash ? 'cmd-> ' : isShell ? 'shell>' : 'bear> ';
+    const promptColor = isSlash ? C.yellow : isShell ? C.magenta : C.cyan;
     const innerW = Math.max(0, w - 4);
     const promptLen = 6;
     const textSpace = Math.max(0, innerW - promptLen);
@@ -842,7 +843,7 @@ export class BearClient {
           this._awaitingInputEcho = false;
         } else {
           // Another client submitted this prompt
-          const uiPrompt = msg.text.startsWith('/') ? 'cmd-> ' : 'bear> ';
+          const uiPrompt = msg.text.startsWith('/') ? 'cmd-> ' : msg.text.startsWith('!') ? 'shell>' : 'bear> ';
           this._pushLine(`  ${C.bold}${C.white}${uiPrompt}${C.reset}${C.white}${msg.text}${C.reset}`);
           this._fullRepaint();
         }
@@ -1387,7 +1388,7 @@ export class BearClient {
     if (!text) { this._drawInputBox(); return; }
 
     // Show submitted line in output
-    const prompt = text.startsWith('/') ? 'cmd-> ' : 'bear> ';
+    const prompt = text.startsWith('/') ? 'cmd-> ' : text.startsWith('!') ? 'shell>' : 'bear> ';
     this._pushLine(`  ${C.bold}${C.white}${prompt}${C.reset}${C.white}${text}${C.reset}`);
 
     if (this.history.length === 0 || this.history[this.history.length - 1] !== text) {
@@ -1425,7 +1426,7 @@ export class BearClient {
     }
 
     // Show submitted line in output
-    const prompt = text.startsWith('/') ? 'cmd-> ' : 'bear> ';
+    const prompt = text.startsWith('/') ? 'cmd-> ' : text.startsWith('!') ? 'shell>' : 'bear> ';
     this._pushLine(`  ${C.bold}${C.white}${prompt}${C.reset}${C.white}${text}${C.reset}`);
 
     if (this.history.length === 0 || this.history[this.history.length - 1] !== text) {
@@ -1514,6 +1515,20 @@ export class BearClient {
 
     if (text.startsWith('/session')) {
       this._pushLine(`${C.red}  Usage: /session name <session name> OR /session workdir <path>${C.reset}`);
+      this._fullRepaint();
+      return;
+    }
+
+    // Shell execution via ! prefix
+    if (text.startsWith('!')) {
+      const cmd = text.slice(1).trim();
+      if (!cmd) {
+        this._pushLine(`${C.red}  Usage: !<command>${C.reset}`);
+        this._fullRepaint();
+        return;
+      }
+      this._awaitingInputEcho = true;
+      this._sendJson({ type: 'shell_exec', command: cmd });
       this._fullRepaint();
       return;
     }
