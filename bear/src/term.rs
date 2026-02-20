@@ -549,6 +549,208 @@ fn a_magenta(s: &str) -> String { format!("\x1b[38;5;141m{s}\x1b[0m") }
 fn a_bold(s: &str) -> String { format!("\x1b[1m{s}\x1b[0m") }
 fn a_dim(s: &str) -> String { format!("\x1b[2m{s}\x1b[0m") }
 
+// ---------------------------------------------------------------------------
+// Markdown → ANSI rendering
+// ---------------------------------------------------------------------------
+
+/// ANSI escape constants for markdown rendering
+const MD_RESET: &str = "\x1b[0m";
+const MD_BOLD: &str = "\x1b[1m";
+const MD_ITALIC: &str = "\x1b[3m";
+const MD_H1: &str = "\x1b[1m\x1b[38;5;80m";       // bold cyan
+const MD_H2: &str = "\x1b[1m\x1b[38;5;114m";      // bold green
+const MD_H3: &str = "\x1b[1m\x1b[38;5;180m";      // bold yellow
+const MD_CODE_INLINE: &str = "\x1b[38;5;222m";     // warm yellow for `code`
+const MD_CODE_BLOCK: &str = "\x1b[38;5;246m";      // light gray for code blocks
+const MD_CODE_LANG: &str = "\x1b[38;5;102m";       // dim gray for language tag
+const MD_BULLET: &str = "\x1b[38;5;80m";           // cyan bullets
+const MD_HRULE: &str = "\x1b[38;5;240m";           // dim horizontal rule
+const MD_LINK: &str = "\x1b[4m\x1b[38;5;75m";     // underline blue for links
+const MD_GREEN: &str = "\x1b[38;5;114m";           // default text green
+
+/// Render a block of markdown text into ANSI-colored lines.
+/// Returns a Vec of already-colored strings (one per output line).
+/// `in_code_block` tracks state across calls for streaming.
+fn render_md_lines(text: &str, in_code_block: &mut bool) -> Vec<String> {
+    let mut result = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+
+        // Code block fences
+        if trimmed.starts_with("```") {
+            if *in_code_block {
+                // Closing fence
+                *in_code_block = false;
+                result.push(format!("{MD_CODE_BLOCK}```{MD_RESET}"));
+            } else {
+                // Opening fence — show language tag if present
+                *in_code_block = true;
+                let lang = trimmed.trim_start_matches('`').trim();
+                if lang.is_empty() {
+                    result.push(format!("{MD_CODE_BLOCK}```{MD_RESET}"));
+                } else {
+                    result.push(format!("{MD_CODE_BLOCK}```{MD_CODE_LANG}{lang}{MD_RESET}"));
+                }
+            }
+            continue;
+        }
+
+        // Inside code block — render as-is in code color, no inline formatting
+        if *in_code_block {
+            result.push(format!("{MD_CODE_BLOCK}{line}{MD_RESET}"));
+            continue;
+        }
+
+        // Horizontal rule
+        if (trimmed.starts_with("---") || trimmed.starts_with("***") || trimmed.starts_with("___"))
+            && trimmed.chars().all(|c| c == '-' || c == '*' || c == '_' || c == ' ')
+            && trimmed.len() >= 3
+        {
+            result.push(format!("{MD_HRULE}─────────────────────────────{MD_RESET}"));
+            continue;
+        }
+
+        // Headers
+        if trimmed.starts_with("### ") {
+            let content = &trimmed[4..];
+            result.push(format!("{MD_H3}{content}{MD_RESET}"));
+            continue;
+        }
+        if trimmed.starts_with("## ") {
+            let content = &trimmed[3..];
+            result.push(format!("{MD_H2}{content}{MD_RESET}"));
+            continue;
+        }
+        if trimmed.starts_with("# ") {
+            let content = &trimmed[2..];
+            result.push(format!("{MD_H1}{content}{MD_RESET}"));
+            continue;
+        }
+
+        // List items: -, *, or numbered (1. 2. etc.)
+        if let Some(rest) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
+            let formatted = render_md_inline(rest);
+            result.push(format!("{MD_BULLET}  • {MD_GREEN}{formatted}{MD_RESET}"));
+            continue;
+        }
+        // Numbered list
+        if let Some(dot_pos) = trimmed.find(". ") {
+            let num_part = &trimmed[..dot_pos];
+            if !num_part.is_empty() && num_part.chars().all(|c| c.is_ascii_digit()) {
+                let rest = &trimmed[dot_pos + 2..];
+                let formatted = render_md_inline(rest);
+                result.push(format!("{MD_BULLET}  {num_part}. {MD_GREEN}{formatted}{MD_RESET}"));
+                continue;
+            }
+        }
+
+        // Regular line — apply inline formatting
+        if trimmed.is_empty() {
+            result.push(String::new());
+        } else {
+            let formatted = render_md_inline(line);
+            result.push(format!("{MD_GREEN}{formatted}{MD_RESET}"));
+        }
+    }
+
+    result
+}
+
+/// Apply inline markdown formatting: **bold**, *italic*, `code`, [links](url)
+fn render_md_inline(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 64);
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        // Bold: **text**
+        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+            if let Some(end) = find_closing(&chars, i + 2, &['*', '*']) {
+                let inner: String = chars[i + 2..end].iter().collect();
+                out.push_str(MD_BOLD);
+                out.push_str(&inner);
+                out.push_str(MD_RESET);
+                out.push_str(MD_GREEN);
+                i = end + 2;
+                continue;
+            }
+        }
+
+        // Italic: *text* (single asterisk, not followed by another)
+        if chars[i] == '*' && (i + 1 >= len || chars[i + 1] != '*') {
+            if let Some(end) = find_closing_single(&chars, i + 1, '*') {
+                let inner: String = chars[i + 1..end].iter().collect();
+                out.push_str(MD_ITALIC);
+                out.push_str(&inner);
+                out.push_str(MD_RESET);
+                out.push_str(MD_GREEN);
+                i = end + 1;
+                continue;
+            }
+        }
+
+        // Inline code: `code`
+        if chars[i] == '`' {
+            if let Some(end) = find_closing_single(&chars, i + 1, '`') {
+                let inner: String = chars[i + 1..end].iter().collect();
+                out.push_str(MD_CODE_INLINE);
+                out.push_str(&inner);
+                out.push_str(MD_RESET);
+                out.push_str(MD_GREEN);
+                i = end + 1;
+                continue;
+            }
+        }
+
+        // Link: [text](url)
+        if chars[i] == '[' {
+            if let Some(close_bracket) = find_closing_single(&chars, i + 1, ']') {
+                if close_bracket + 1 < len && chars[close_bracket + 1] == '(' {
+                    if let Some(close_paren) = find_closing_single(&chars, close_bracket + 2, ')') {
+                        let link_text: String = chars[i + 1..close_bracket].iter().collect();
+                        out.push_str(MD_LINK);
+                        out.push_str(&link_text);
+                        out.push_str(MD_RESET);
+                        out.push_str(MD_GREEN);
+                        i = close_paren + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        out.push(chars[i]);
+        i += 1;
+    }
+
+    out
+}
+
+/// Find closing double-char delimiter (e.g. **) starting from `start`.
+fn find_closing(chars: &[char], start: usize, delim: &[char; 2]) -> Option<usize> {
+    let len = chars.len();
+    let mut j = start;
+    while j + 1 < len {
+        if chars[j] == delim[0] && chars[j + 1] == delim[1] {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Find closing single-char delimiter starting from `start`.
+fn find_closing_single(chars: &[char], start: usize, delim: char) -> Option<usize> {
+    for j in start..chars.len() {
+        if chars[j] == delim {
+            return Some(j);
+        }
+    }
+    None
+}
+
 const DISPLAY_MAX_LINES: usize = 20;
 
 impl TermState {
@@ -1395,15 +1597,20 @@ impl TermState {
     /// Flush current streaming buffer into output lines.
     /// Removes previously written streaming lines and replaces them.
     /// Lines inside `<think>` blocks or starting with `THOUGHT:` are rendered
-    /// in muted gray instead of the normal green.
+    /// in muted gray. Other content is rendered with markdown formatting.
     fn flush_streaming_to_output(&mut self) {
         // Remove any previous streaming lines (marked with a tag)
         while self.output_lines.last().map(|l| l.starts_with("\x01STREAM\x01")).unwrap_or(false) {
             self.output_lines.pop();
         }
-        // Add current streaming content as tagged lines
+
+        // First pass: separate think blocks from normal content so we can
+        // render normal content through the markdown pipeline.
         let mut in_think = false;
-        for (i, line) in self.streaming_buf.lines().enumerate() {
+        let mut in_code_block = false;
+        let raw_lines: Vec<&str> = self.streaming_buf.lines().collect();
+
+        for (i, line) in raw_lines.iter().enumerate() {
             let prefix = if i == 0 { "🐻 " } else { "   " };
             let trimmed = line.trim();
 
@@ -1417,12 +1624,17 @@ impl TermState {
                 || trimmed.starts_with("Thought:")
                 || trimmed.starts_with("thought:");
 
-            let colored = if is_thought {
-                a_gray(line)
+            if is_thought {
+                self.output_lines.push(format!("\x01STREAM\x01  {}{}", prefix, a_gray(line)));
             } else {
-                a_green(line)
-            };
-            self.output_lines.push(format!("\x01STREAM\x01  {}{}", prefix, colored));
+                // Render through markdown pipeline (one line at a time,
+                // but tracking code-block state across lines)
+                let md_lines = render_md_lines(line, &mut in_code_block);
+                for (j, md_line) in md_lines.iter().enumerate() {
+                    let p = if i == 0 && j == 0 { "🐻 " } else { "   " };
+                    self.output_lines.push(format!("\x01STREAM\x01  {}{}", p, md_line));
+                }
+            }
 
             if trimmed.contains("</think>") {
                 in_think = false;

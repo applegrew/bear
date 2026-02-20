@@ -39,6 +39,238 @@ const INPUT_BOX_H = 3; // top border + input + bottom border
 const STATUS_BAR_H = 1;
 const BOTTOM_H = INPUT_BOX_H + STATUS_BAR_H;
 
+// ---------------------------------------------------------------------------
+// Markdown → ANSI rendering
+// ---------------------------------------------------------------------------
+
+const MD = {
+  reset:      '\x1b[0m',
+  bold:       '\x1b[1m',
+  italic:     '\x1b[3m',
+  h1:         '\x1b[1m\x1b[38;5;80m',       // bold cyan
+  h2:         '\x1b[1m\x1b[38;5;114m',      // bold green
+  h3:         '\x1b[1m\x1b[38;5;180m',      // bold yellow
+  codeInline: '\x1b[38;5;222m',             // warm yellow
+  codeBlock:  '\x1b[38;5;246m',             // light gray
+  codeLang:   '\x1b[38;5;102m',             // dim gray
+  bullet:     '\x1b[38;5;80m',              // cyan
+  hrule:      '\x1b[38;5;240m',             // dim
+  link:       '\x1b[4m\x1b[38;5;75m',       // underline blue
+  green:      '\x1b[38;5;114m',             // default text
+};
+
+/**
+ * Render inline markdown: **bold**, *italic*, `code`, [links](url)
+ */
+function renderMdInline(text) {
+  let out = '';
+  const chars = [...text];
+  const len = chars.length;
+  let i = 0;
+
+  while (i < len) {
+    // Bold: **text**
+    if (i + 1 < len && chars[i] === '*' && chars[i + 1] === '*') {
+      const end = findClosingDouble(chars, i + 2, '*', '*');
+      if (end !== -1) {
+        const inner = chars.slice(i + 2, end).join('');
+        out += `${MD.bold}${inner}${MD.reset}${MD.green}`;
+        i = end + 2;
+        continue;
+      }
+    }
+
+    // Italic: *text*
+    if (chars[i] === '*' && (i + 1 >= len || chars[i + 1] !== '*')) {
+      const end = findClosingSingle(chars, i + 1, '*');
+      if (end !== -1) {
+        const inner = chars.slice(i + 1, end).join('');
+        out += `${MD.italic}${inner}${MD.reset}${MD.green}`;
+        i = end + 1;
+        continue;
+      }
+    }
+
+    // Inline code: `code`
+    if (chars[i] === '`') {
+      const end = findClosingSingle(chars, i + 1, '`');
+      if (end !== -1) {
+        const inner = chars.slice(i + 1, end).join('');
+        out += `${MD.codeInline}${inner}${MD.reset}${MD.green}`;
+        i = end + 1;
+        continue;
+      }
+    }
+
+    // Link: [text](url)
+    if (chars[i] === '[') {
+      const closeBracket = findClosingSingle(chars, i + 1, ']');
+      if (closeBracket !== -1 && closeBracket + 1 < len && chars[closeBracket + 1] === '(') {
+        const closeParen = findClosingSingle(chars, closeBracket + 2, ')');
+        if (closeParen !== -1) {
+          const linkText = chars.slice(i + 1, closeBracket).join('');
+          out += `${MD.link}${linkText}${MD.reset}${MD.green}`;
+          i = closeParen + 1;
+          continue;
+        }
+      }
+    }
+
+    out += chars[i];
+    i++;
+  }
+  return out;
+}
+
+function findClosingDouble(chars, start, c1, c2) {
+  for (let j = start; j + 1 < chars.length; j++) {
+    if (chars[j] === c1 && chars[j + 1] === c2) return j;
+  }
+  return -1;
+}
+
+function findClosingSingle(chars, start, delim) {
+  for (let j = start; j < chars.length; j++) {
+    if (chars[j] === delim) return j;
+  }
+  return -1;
+}
+
+/**
+ * Render a single line of markdown to ANSI. `state` tracks code-block across lines.
+ * state = { inCodeBlock: false }
+ * Returns an array of rendered strings (usually 1 element).
+ */
+function renderMdLine(line, state) {
+  const trimmed = line.trim();
+
+  // Code block fences
+  if (trimmed.startsWith('```')) {
+    if (state.inCodeBlock) {
+      state.inCodeBlock = false;
+      return [`${MD.codeBlock}\`\`\`${MD.reset}`];
+    } else {
+      state.inCodeBlock = true;
+      const lang = trimmed.replace(/^`+/, '').trim();
+      if (lang) {
+        return [`${MD.codeBlock}\`\`\`${MD.codeLang}${lang}${MD.reset}`];
+      }
+      return [`${MD.codeBlock}\`\`\`${MD.reset}`];
+    }
+  }
+
+  // Inside code block
+  if (state.inCodeBlock) {
+    return [`${MD.codeBlock}${line}${MD.reset}`];
+  }
+
+  // Horizontal rule
+  if (/^[-*_]{3,}$/.test(trimmed.replace(/ /g, ''))) {
+    if (trimmed.length >= 3) {
+      return [`${MD.hrule}─────────────────────────────${MD.reset}`];
+    }
+  }
+
+  // Headers
+  if (trimmed.startsWith('### ')) {
+    return [`${MD.h3}${trimmed.slice(4)}${MD.reset}`];
+  }
+  if (trimmed.startsWith('## ')) {
+    return [`${MD.h2}${trimmed.slice(3)}${MD.reset}`];
+  }
+  if (trimmed.startsWith('# ')) {
+    return [`${MD.h1}${trimmed.slice(2)}${MD.reset}`];
+  }
+
+  // Unordered list
+  const ulMatch = trimmed.match(/^[-*] (.*)$/);
+  if (ulMatch) {
+    return [`${MD.bullet}  • ${MD.green}${renderMdInline(ulMatch[1])}${MD.reset}`];
+  }
+
+  // Numbered list
+  const olMatch = trimmed.match(/^(\d+)\. (.*)$/);
+  if (olMatch) {
+    return [`${MD.bullet}  ${olMatch[1]}. ${MD.green}${renderMdInline(olMatch[2])}${MD.reset}`];
+  }
+
+  // Empty line
+  if (!trimmed) return [''];
+
+  // Regular line with inline formatting
+  return [`${MD.green}${renderMdInline(line)}${MD.reset}`];
+}
+
+// ---------------------------------------------------------------------------
+// ANSI-aware text wrapping
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute visible length of a string, stripping ANSI escape sequences.
+ */
+function visibleLen(s) {
+  let len = 0;
+  let inEsc = false;
+  for (const c of s) {
+    if (inEsc) {
+      if (/[a-zA-Z]/.test(c)) inEsc = false;
+    } else if (c === '\x1b') {
+      inEsc = true;
+    } else {
+      len++;
+    }
+  }
+  return len;
+}
+
+/**
+ * Wrap a line into multiple visual rows of at most `max` visible characters,
+ * preserving ANSI escape codes across wraps.
+ */
+function wrapVisible(s, max) {
+  if (max <= 0) return [s];
+  const rows = [];
+  let current = '';
+  let vis = 0;
+  let inEsc = false;
+  let activeAnsi = []; // track active ANSI sequences for continuation
+
+  for (const c of s) {
+    if (inEsc) {
+      current += c;
+      if (/[a-zA-Z]/.test(c)) {
+        inEsc = false;
+        // Extract the escape sequence we just finished
+        const escStart = current.lastIndexOf('\x1b');
+        if (escStart !== -1) {
+          const seq = current.slice(escStart);
+          if (seq === '\x1b[0m' || seq === '\x1b[m') {
+            activeAnsi = [];
+          } else {
+            activeAnsi.push(seq);
+          }
+        }
+      }
+    } else if (c === '\x1b') {
+      inEsc = true;
+      current += c;
+    } else {
+      if (vis >= max) {
+        current += '\x1b[0m';
+        rows.push(current);
+        current = activeAnsi.join('');
+        vis = 0;
+      }
+      current += c;
+      vis++;
+    }
+  }
+  if (current || rows.length === 0) {
+    rows.push(current);
+  }
+  return rows;
+}
+
 function matchingSlashCommands(input, commands) {
   if (!input.startsWith('/')) return [];
   const typed = input.trimEnd();
@@ -226,13 +458,25 @@ export class BearClient {
     const total = this._outputLines.length;
     const end = total - this._scrollOffset;
     const start = Math.max(0, end - height);
+    const w = this._cols;
 
+    // Collect wrapped visual rows from the visible output lines
+    const visualRows = [];
+    for (let lineIdx = start; lineIdx < end; lineIdx++) {
+      const line = this._outputLines[lineIdx].replace(/\x00STREAM\x00/g, '');
+      const wrapped = wrapVisible(line, w);
+      for (const wr of wrapped) {
+        visualRows.push(wr);
+      }
+    }
+
+    // Only show the last `height` visual rows (scroll to bottom)
+    const vrStart = Math.max(0, visualRows.length - height);
     for (let row = 0; row < height; row++) {
-      const lineIdx = start + row;
       this.term.write(`\x1b[${row + 1};1H\x1b[2K`); // move to row, clear line
-      if (lineIdx >= 0 && lineIdx < end) {
-        const line = this._outputLines[lineIdx].replace(/\x00STREAM\x00/g, '');
-        this.term.write(line);
+      const vrIdx = vrStart + row;
+      if (vrIdx < visualRows.length) {
+        this.term.write(visualRows[vrIdx]);
       }
     }
 
@@ -950,6 +1194,7 @@ export class BearClient {
     }
     const lines = this._streamBuf.split('\n');
     let inThink = false;
+    const mdState = { inCodeBlock: false };
     for (let i = 0; i < lines.length; i++) {
       const prefix = i === 0 ? '🐻 ' : '   ';
       const trimmed = lines[i].trim();
@@ -964,8 +1209,16 @@ export class BearClient {
         || trimmed.startsWith('Thought:')
         || trimmed.startsWith('thought:');
 
-      const color = isThought ? C.gray : C.green;
-      this._outputLines.push(`${TAG}  ${prefix}${color}${lines[i]}${C.reset}`);
+      if (isThought) {
+        this._outputLines.push(`${TAG}  ${prefix}${C.gray}${lines[i]}${C.reset}`);
+      } else {
+        // Render through markdown pipeline
+        const mdLines = renderMdLine(lines[i], mdState);
+        for (let j = 0; j < mdLines.length; j++) {
+          const p = (i === 0 && j === 0) ? '🐻 ' : '   ';
+          this._outputLines.push(`${TAG}  ${p}${mdLines[j]}`);
+        }
+      }
 
       if (trimmed.includes('</think>')) {
         inThink = false;
