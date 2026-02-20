@@ -220,14 +220,21 @@ pub fn spawn_terminal_thread(
                 state.handle_render(cmd);
             }
 
-            // Advance spinner
-            if state.streaming {
+            // Advance spinner / update warning countdown
+            {
                 let now = std::time::Instant::now();
-                if now.duration_since(state.spinner_last_tick) >= std::time::Duration::from_millis(100) {
-                    state.spinner_frame = (state.spinner_frame + 1) % SPINNER_DOTS.len();
-                    state.spinner_last_tick = now;
-                    state.draw_status_bar();
-                    let _ = io::stdout().flush();
+                let needs_status_redraw = state.interrupt_warning_remaining_ms() > 0;
+                if state.streaming || needs_status_redraw {
+                    if now.duration_since(state.spinner_last_tick) >= std::time::Duration::from_millis(100) {
+                        state.spinner_frame = (state.spinner_frame + 1) % SPINNER_DOTS.len();
+                        state.spinner_last_tick = now;
+                        // Auto-dismiss expired warning
+                        if state.interrupt_warning_start.is_some() && state.interrupt_warning_remaining_ms() == 0 {
+                            state.dismiss_interrupt_warning();
+                        }
+                        state.draw_status_bar();
+                        let _ = io::stdout().flush();
+                    }
                 }
             }
 
@@ -276,9 +283,25 @@ pub fn spawn_terminal_thread(
                     }
 
                     match action {
-                        KeyAction::Char(c) => { state.insert_char(c); state.draw_input_box(); }
-                        KeyAction::Backspace => { state.backspace(); state.draw_input_box(); }
-                        KeyAction::Delete => { state.delete(); state.draw_input_box(); }
+                        KeyAction::Char(c) => {
+                            // Typing dismisses any active interrupt warning
+                            if state.interrupt_pending_text.is_some() {
+                                state.dismiss_interrupt_warning();
+                            }
+                            state.insert_char(c); state.draw_input_box();
+                        }
+                        KeyAction::Backspace => {
+                            if state.interrupt_pending_text.is_some() {
+                                state.dismiss_interrupt_warning();
+                            }
+                            state.backspace(); state.draw_input_box();
+                        }
+                        KeyAction::Delete => {
+                            if state.interrupt_pending_text.is_some() {
+                                state.dismiss_interrupt_warning();
+                            }
+                            state.delete(); state.draw_input_box();
+                        }
                         KeyAction::Left => { state.cursor_left(); state.draw_input_box(); }
                         KeyAction::Right => { state.cursor_right(); state.draw_input_box(); }
                         KeyAction::Home => { state.cursor_pos = 0; state.draw_input_box(); }
@@ -288,16 +311,27 @@ pub fn spawn_terminal_thread(
                         KeyAction::ScrollUp => { state.scroll_up(3); state.full_repaint(); }
                         KeyAction::ScrollDown => { state.scroll_down(3); state.full_repaint(); }
                         KeyAction::Tab => {}
-                        KeyAction::Escape => {
-                            if state.streaming {
-                                state.push_line("  \x1b[90m(type a message and press Enter to interrupt)\x1b[0m");
+                        KeyAction::Escape => {}
+                        KeyAction::Submit => {
+                            // If interrupt warning is active and user presses Enter again, confirm interrupt
+                            if state.interrupt_pending_text.is_some() && state.interrupt_warning_remaining_ms() > 0 {
+                                let text = state.interrupt_pending_text.take().unwrap();
+                                state.interrupt_warning_start = None;
+                                let _ = rt.block_on(event_tx.send(TermEvent::UserLine(text)));
+                                state.full_repaint();
+                            } else if state.streaming && !state.input_buf.trim().is_empty() {
+                                // LLM is busy and user submitted non-empty text: show warning
+                                let text = state.submit();
+                                state.interrupt_pending_text = Some(text);
+                                state.interrupt_warning_start = Some(std::time::Instant::now());
+                                state.draw_status_bar();
+                            } else {
+                                // Normal submit (LLM idle, or empty input)
+                                state.dismiss_interrupt_warning();
+                                let line = state.submit();
+                                let _ = rt.block_on(event_tx.send(TermEvent::UserLine(line)));
                                 state.full_repaint();
                             }
-                        }
-                        KeyAction::Submit => {
-                            let line = state.submit();
-                            let _ = rt.block_on(event_tx.send(TermEvent::UserLine(line)));
-                            state.full_repaint();
                         }
                         KeyAction::Quit => {
                             state.cleanup();
@@ -361,6 +395,12 @@ struct TermState {
     /// Set after this client submits input, cleared when the echo arrives.
     /// Prevents double-rendering of our own prompt.
     awaiting_input_echo: bool,
+
+    /// When the user submits while LLM is busy, the text is buffered here.
+    /// A second Enter within the countdown window will actually send it.
+    interrupt_pending_text: Option<String>,
+    /// When the interrupt warning was first shown (for the 6s countdown).
+    interrupt_warning_start: Option<std::time::Instant>,
 }
 
 /// Format a tool call into human-readable description lines for the card UI.
@@ -540,6 +580,8 @@ impl TermState {
             deferred_cmds: Vec::new(),
             quit_requested: false,
             awaiting_input_echo: false,
+            interrupt_pending_text: None,
+            interrupt_warning_start: None,
         })
     }
 
@@ -744,37 +786,64 @@ impl TermState {
 
         let _ = execute!(out, cursor::MoveTo(0, row), terminal::Clear(ClearType::CurrentLine));
 
-        let spinner = if self.streaming {
-            SPINNER_DOTS[self.spinner_frame % SPINNER_DOTS.len()]
+        // Check if interrupt warning is active
+        let warning_active = self.interrupt_warning_remaining_ms() > 0;
+
+        if warning_active {
+            let remaining_ms = self.interrupt_warning_remaining_ms();
+            let warn_text = "LLM is busy — press Enter again to interrupt";
+            let warn_len = visible_len(warn_text);
+            // Animated underline: full width at 6s, shrinks to 0
+            let bar_max = warn_len;
+            let bar_len = (bar_max as u64 * remaining_ms as u64 / 6000).min(bar_max as u64) as usize;
+
+            let _ = execute!(
+                out,
+                cursor::MoveTo(1, row),
+                SetForegroundColor(Color::Yellow),
+                Print(warn_text),
+                ResetColor,
+            );
+            // Shrinking underline bar: starts full-width, shrinks to 0 over 6 seconds
+            if bar_len > 0 {
+                let bar_start = width.saturating_sub(bar_len + 1);
+                let _ = execute!(
+                    out,
+                    cursor::MoveTo(bar_start as u16, row),
+                    SetForegroundColor(Color::DarkYellow),
+                    Print("▁".repeat(bar_len)),
+                    ResetColor,
+                );
+            }
         } else {
-            "·····"
-        };
+            let spinner = if self.streaming {
+                SPINNER_DOTS[self.spinner_frame % SPINNER_DOTS.len()]
+            } else {
+                "·····"
+            };
 
-        let session = if self.session_name.is_empty() { "bear" } else { &self.session_name };
+            let session = if self.session_name.is_empty() { "bear" } else { &self.session_name };
 
-        // Left: spinner + session
-        let left = format!("{spinner}  {session}");
-        // Right: shortcuts
-        let right = if self.streaming {
-            "esc interrupt                          "
-        } else {
-            "esc interrupt  ↑↓ history  ctrl+c quit"
-        };
+            // Left: spinner + session
+            let left = format!("{spinner}  {session}");
+            // Right: shortcuts
+            let right = "↑↓ history  ctrl+c quit";
 
-        let left_len = visible_len(&left);
-        let right_len = visible_len(right);
-        let gap = width.saturating_sub(left_len + right_len + 2);
+            let left_len = visible_len(&left);
+            let right_len = visible_len(right);
+            let gap = width.saturating_sub(left_len + right_len + 2);
 
-        let _ = execute!(
-            out,
-            SetForegroundColor(Color::DarkGrey),
-            Print(" "),
-            Print(&left),
-            Print(" ".repeat(gap)),
-            Print(right),
-            Print(" "),
-            ResetColor,
-        );
+            let _ = execute!(
+                out,
+                SetForegroundColor(Color::DarkGrey),
+                Print(" "),
+                Print(&left),
+                Print(" ".repeat(gap)),
+                Print(right),
+                Print(" "),
+                ResetColor,
+            );
+        }
 
         // Restore cursor to input box
         let input_row = self.term_height.saturating_sub(BOTTOM_RESERVE) + 1;
@@ -784,6 +853,23 @@ impl TermState {
         let cursor_col = 2 + prompt_len + self.cursor_pos.min(text_space);
         let _ = execute!(out, cursor::MoveTo(cursor_col as u16, input_row), cursor::Show);
         let _ = out.flush();
+    }
+
+    /// Returns remaining milliseconds for the interrupt warning, or 0 if not active.
+    fn interrupt_warning_remaining_ms(&self) -> u64 {
+        match self.interrupt_warning_start {
+            Some(start) => {
+                let elapsed = start.elapsed().as_millis() as u64;
+                if elapsed >= 6000 { 0 } else { 6000 - elapsed }
+            }
+            None => 0,
+        }
+    }
+
+    /// Dismiss the interrupt warning and clear pending text.
+    fn dismiss_interrupt_warning(&mut self) {
+        self.interrupt_pending_text = None;
+        self.interrupt_warning_start = None;
     }
 
     // -----------------------------------------------------------------------
@@ -1180,6 +1266,8 @@ impl TermState {
                     self.streaming_buf.clear();
                     self.push_line("");
                 }
+                // LLM finished — dismiss any pending interrupt warning
+                self.dismiss_interrupt_warning();
                 self.full_repaint();
             }
             RenderCmd::Notice(text) => {

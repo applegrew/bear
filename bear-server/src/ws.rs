@@ -1935,6 +1935,10 @@ async fn invoke_llm(
         *bulk_increment = 50;
         tool_queue.clear();
 
+        let interrupt_note = OllamaMessage {
+            role: "system".to_string(),
+            content: "[The user interrupted your previous response to send a new message. Your last reply was cut short.]".to_string(),
+        };
         let user_msg = OllamaMessage {
             role: "user".to_string(),
             content: new_input,
@@ -1943,6 +1947,7 @@ async fn invoke_llm(
             let mut sessions = state.sessions.write().await;
             if let Some(session) = sessions.get_mut(&session_id) {
                 session.info.touch();
+                session.history.push(interrupt_note);
                 session.history.push(user_msg);
             }
         }

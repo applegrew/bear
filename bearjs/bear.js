@@ -158,6 +158,11 @@ export class BearClient {
     this.userPromptSelected = [];
     this.userPromptRendered = false;
 
+    // Interrupt warning state (double-Enter to interrupt LLM)
+    this._interruptPendingText = null;
+    this._interruptWarningStart = null;
+    this._interruptWarningTimer = null;
+
     // Screen dimensions
     this._cols = term.cols || 80;
     this._rows = term.rows || 24;
@@ -313,19 +318,31 @@ export class BearClient {
 
     this.term.write(`\x1b[${row};1H\x1b[2K`);
 
-    const spinner = this._streaming
-      ? SPINNER[this._spinnerFrame % SPINNER.length]
-      : '·····';
-    const session = this._sessionName || 'bear';
+    const remainingMs = this._interruptWarningRemainingMs();
 
-    const left = `${spinner}  ${session}`;
-    const right = this._streaming
-      ? 'esc interrupt'
-      : 'esc interrupt  ↑↓ history  pgup/pgdn scroll';
+    if (remainingMs > 0) {
+      const warnText = 'LLM is busy \u2014 press Enter again to interrupt';
+      const barMax = warnText.length;
+      const barLen = Math.min(barMax, Math.floor(barMax * remainingMs / 6000));
 
-    const gap = Math.max(1, w - left.length - right.length - 2);
+      this.term.write(`\x1b[${row};2H${C.yellow}${warnText}${C.reset}`);
+      if (barLen > 0) {
+        const barStart = Math.max(1, w - barLen);
+        this.term.write(`\x1b[${row};${barStart}H\x1b[38;5;136m${'▁'.repeat(barLen)}${C.reset}`);
+      }
+    } else {
+      const spinner = this._streaming
+        ? SPINNER[this._spinnerFrame % SPINNER.length]
+        : '·····';
+      const session = this._sessionName || 'bear';
 
-    this.term.write(`${C.gray} ${left}${' '.repeat(gap)}${right} ${C.reset}`);
+      const left = `${spinner}  ${session}`;
+      const right = '↑↓ history  pgup/pgdn scroll  ctrl+c clear';
+
+      const gap = Math.max(1, w - left.length - right.length - 2);
+
+      this.term.write(`${C.gray} ${left}${' '.repeat(gap)}${right} ${C.reset}`);
+    }
 
     // Restore cursor to input box
     const inputRow = this._inputRow() + 2; // 1-indexed, +1 for input line within box
@@ -334,6 +351,21 @@ export class BearClient {
     const textSpace = Math.max(0, innerW - promptLen);
     const cursorCol = 3 + promptLen + Math.min(this.cursorPos, textSpace);
     this.term.write(`\x1b[${inputRow};${cursorCol}H\x1b[?25h`);
+  }
+
+  _interruptWarningRemainingMs() {
+    if (!this._interruptWarningStart) return 0;
+    const elapsed = Date.now() - this._interruptWarningStart;
+    return elapsed >= 6000 ? 0 : 6000 - elapsed;
+  }
+
+  _dismissInterruptWarning() {
+    this._interruptPendingText = null;
+    this._interruptWarningStart = null;
+    if (this._interruptWarningTimer) {
+      clearInterval(this._interruptWarningTimer);
+      this._interruptWarningTimer = null;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -618,6 +650,7 @@ export class BearClient {
     this._stopIcePoll();
     this._stopSpinner();
     this._stopHeartbeat();
+    this._dismissInterruptWarning();
     if (this.dc) { try { this.dc.close(); } catch {} this.dc = null; }
     if (this.pc) { try { this.pc.close(); } catch {} this.pc = null; }
     if (this.ws) { this.ws.close(); this.ws = null; }
@@ -675,6 +708,7 @@ export class BearClient {
           this._pushLine('');
           this._stopSpinner();
         }
+        this._dismissInterruptWarning();
         this._fullRepaint();
         break;
 
@@ -970,10 +1004,7 @@ export class BearClient {
 
         // Bare Esc
         if (code === 27) {
-          if (this._streaming) {
-            this._pushLine(`${C.gray}  (type a message and press Enter to interrupt)${C.reset}`);
-            this._fullRepaint();
-          } else if (this._dropdownActive()) {
+          if (this._dropdownActive()) {
             this.inputBuf = '';
             this.cursorPos = 0;
             this._dropdownIdx = -1;
@@ -998,6 +1029,22 @@ export class BearClient {
             this._drawInputBox();
             continue;
           }
+          // Double-Enter interrupt: if warning is active, confirm the interrupt
+          if (this._interruptPendingText !== null && this._interruptWarningRemainingMs() > 0) {
+            const text = this._interruptPendingText;
+            this._dismissInterruptWarning();
+            this._awaitingInputEcho = true;
+            this._sendJson({ type: 'input', text });
+            this._fullRepaint();
+            continue;
+          }
+          // If LLM is busy and user typed non-empty text, show warning instead of sending
+          if (this._streaming && this.inputBuf.trim()) {
+            this._submitInputToWarning();
+            continue;
+          }
+          // Normal submit
+          this._dismissInterruptWarning();
           this._submitInput();
           continue;
         }
@@ -1005,6 +1052,7 @@ export class BearClient {
         // Backspace
         if (code === 127 || code === 8) {
           this._dropdownIdx = -1;
+          if (this._interruptPendingText !== null) this._dismissInterruptWarning();
           this._backspace();
           continue;
         }
@@ -1031,6 +1079,7 @@ export class BearClient {
         // Printable
         if (code >= 32) {
           this._dropdownIdx = -1;
+          if (this._interruptPendingText !== null) this._dismissInterruptWarning();
           this.inputBuf = this.inputBuf.slice(0, this.cursorPos) + ch + this.inputBuf.slice(this.cursorPos);
           this.cursorPos++;
           this._drawInputBox();
@@ -1309,6 +1358,41 @@ export class BearClient {
   // -------------------------------------------------------------------------
   // Submit
   // -------------------------------------------------------------------------
+
+  _submitInputToWarning() {
+    this._dropdownIdx = -1;
+    this._dropdownLines = 0;
+    const text = this.inputBuf.trim();
+    this.inputBuf = '';
+    this.cursorPos = 0;
+
+    if (!text) { this._drawInputBox(); return; }
+
+    // Show submitted line in output
+    const prompt = text.startsWith('/') ? 'cmd-> ' : 'bear> ';
+    this._pushLine(`  ${C.bold}${C.white}${prompt}${C.reset}${C.white}${text}${C.reset}`);
+
+    if (this.history.length === 0 || this.history[this.history.length - 1] !== text) {
+      this.history.push(text);
+    }
+    this.historyIdx = -1;
+    this.savedInput = '';
+
+    // Buffer the text and start the warning countdown
+    this._interruptPendingText = text;
+    this._interruptWarningStart = Date.now();
+
+    // Tick the warning bar every 100ms, auto-dismiss at 0
+    this._interruptWarningTimer = setInterval(() => {
+      if (this._interruptWarningRemainingMs() <= 0) {
+        this._dismissInterruptWarning();
+      }
+      this._drawStatusBar();
+    }, 100);
+
+    this._drawInputBox();
+    this._drawStatusBar();
+  }
 
   _submitInput() {
     this._dropdownIdx = -1;
