@@ -64,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
             .expect("failed to build HTTP client"),
         rtc_peers: rtc::new_rtc_peers(),
         lsp_manager: Arc::new(lsp::LspManager::new()),
+        workspace_store: Arc::new(bear_core::workspace::WorkspaceStore::new()),
     };
 
     let app = Router::new()
@@ -144,6 +145,9 @@ async fn create_session(
         system_content.push_str(&readme);
     }
 
+    // Load persisted auto-approved set from .bear/ before moving cwd
+    let auto_approved = state.workspace_store.load_auto_approved(&cwd).await;
+
     let session = Session {
         info: bear_core::SessionInfo {
             id: Uuid::new_v4(),
@@ -160,9 +164,16 @@ async fn create_session(
         undo_stack: Vec::new(),
         todo_list: Vec::new(),
         input_history: Vec::new(),
-        auto_approved: std::collections::HashSet::new(),
+        auto_approved,
         max_subagents: 3,
     };
+
+    if !session.auto_approved.is_empty() {
+        tracing::info!(
+            "loaded {} auto-approved entries from .bear/",
+            session.auto_approved.len()
+        );
+    }
 
     let info = session.info.clone();
     state.sessions.write().await.insert(info.id, session);

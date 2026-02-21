@@ -2,6 +2,7 @@ pub mod config;
 pub mod llm;
 pub mod prompts;
 pub mod tools;
+pub mod workspace;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

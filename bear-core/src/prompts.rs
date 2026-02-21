@@ -99,35 +99,50 @@ Execute JavaScript code in a sandboxed environment and return the result.
 Arguments: {"code": "string"}
 Auto-approved (no user confirmation needed). Use for arithmetic, data processing, JSON manipulation, string operations, or any computation you need to perform precisely. No filesystem or network access — pure ECMAScript only. The last expression's value is returned as the result.
 You MUST invoke this tool using the [TOOL_CALL] format like any other tool — do NOT write code blocks or simulate output.
+
+### 16. js_script_save
+Save a reusable JavaScript script to the workspace's `.bear/scripts/` directory.
+Arguments: {"name": "string", "description": "string", "args": [{"name": "string", "description": "string"}, ...], "code": "string"}
+Auto-approved. Script names must match [a-z0-9_-]+. The code runs in the same sandboxed boa engine as js_eval. Use this to save utility scripts that are useful for the current workspace and can be reused later. Arguments define named parameters that will be injected as `const` declarations when the script is run.
+
+### 17. js_script_list
+List all saved reusable scripts in the current workspace.
+Arguments: {}
+Auto-approved. Returns name, description, and argument definitions for each saved script.
+
+### 18. js_script
+Run a previously saved reusable script by name, passing arguments.
+Arguments: {"name": "string", "args": {"arg_name": value, ...}}
+Auto-approved. Loads the script from `.bear/scripts/<name>.json`, injects argument values, and executes it in the sandboxed boa engine. Use js_script_list first to discover available scripts.
 "#;
 
 const SYSTEM_PROMPT_LSP_TOOLS: &str = r#"
-### 16. lsp_diagnostics
+### 19. lsp_diagnostics
 Get compiler errors and warnings for a file (requires language server).
 Arguments: {"path": "string"}
 Auto-approved (no user confirmation needed). Lazily spawns the appropriate language server.
 
-### 17. lsp_hover
+### 20. lsp_hover
 Get type information and documentation for a symbol at a position.
 Arguments: {"path": "string", "line": number, "character": number}
 Line and character are 1-indexed. Auto-approved.
 
-### 18. lsp_references
+### 21. lsp_references
 Find all references to a symbol at a position.
 Arguments: {"path": "string", "line": number, "character": number}
 Line and character are 1-indexed. Auto-approved.
 
-### 19. lsp_symbols
+### 22. lsp_symbols
 Get a structured outline of a file (functions, structs, classes with line ranges).
 Arguments: {"path": "string"}
 Auto-approved. Use to understand file structure without reading the entire file.
 
-### 20. read_symbol
+### 23. read_symbol
 Read just one symbol (function, struct, impl block, class, etc.) from a file using LSP.
 Arguments: {"path": "string", "symbol": "string"}
 Auto-approved. Returns the symbol's source code with line numbers. Much more efficient than read_file for large files — prefer this when you only need one function or type definition. Use lsp_symbols first to discover available symbol names.
 
-### 21. patch_symbol
+### 24. patch_symbol
 Replace an entire symbol (function, struct, etc.) with new content using LSP to locate it.
 Arguments: {"path": "string", "symbol": "string", "content": "string"}
 The content should be the complete new source for the symbol (including signature, body, etc.). The old symbol is replaced entirely. Supports undo. Use when rewriting a function/struct — avoids the need for precise old_text matching in edit_file.

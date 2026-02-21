@@ -568,6 +568,7 @@ async fn session_worker(
                                             session.auto_approved.insert(display.to_string());
                                         }
                                     }
+                                    persist_auto_approved(&state, session_id).await;
                                 }
                                 // Execute the tool and send output
                                 let output = execute_tool(&state, session_id, &bus, &ptc).await;
@@ -1267,6 +1268,7 @@ async fn execute_task_plan(
                                                                 session.auto_approved.insert(display.to_string());
                                                             }
                                                         }
+                                                        persist_auto_approved(state, session_id).await;
                                                     }
                                                     let output = execute_tool(state, session_id, bus, &ptc).await;
                                                     bus.send(tool_output_msg(&ptc, output.clone())).await;
@@ -2038,7 +2040,7 @@ async fn present_next_tool(
     const AUTO_APPROVED_TOOLS: &[&str] = &[
         "todo_write", "todo_read", "web_fetch", "web_search",
         "lsp_diagnostics", "lsp_hover", "lsp_references", "lsp_symbols",
-        "js_eval",
+        "js_eval", "js_script_save", "js_script_list", "js_script",
     ];
     if AUTO_APPROVED_TOOLS.contains(&ptc.tool_call.name.as_str()) {
         let mut display_tc = ptc.tool_call.clone();
@@ -2175,6 +2177,7 @@ async fn handle_tool_confirm(
                 }
             }
         }
+        persist_auto_approved(state, session_id).await;
         bus.send(ServerMessage::Notice {
             text: format!("'{}' will be auto-approved for this session.", label),
         }).await;
@@ -2334,6 +2337,20 @@ async fn handle_depth_prompt_response(
 }
 
 // truncate_tool_output imported from bear_core::tools
+
+/// Persist the session's auto_approved set to `.bear/auto_approved.json`.
+async fn persist_auto_approved(state: &ServerState, session_id: Uuid) {
+    let (cwd, set) = {
+        let sessions = state.sessions.read().await;
+        match sessions.get(&session_id) {
+            Some(s) => (s.info.cwd.clone(), s.auto_approved.clone()),
+            None => return,
+        }
+    };
+    if let Err(e) = state.workspace_store.save_auto_approved(&cwd, &set).await {
+        tracing::warn!("failed to persist auto_approved: {e}");
+    }
+}
 
 async fn append_tool_result(state: &ServerState, session_id: Uuid, tool_name: &str, output: &str) {
     // read_file gets a 4x higher limit — truncating a file the user explicitly

@@ -38,3 +38,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 urlencoding = "2"
 webrtc = "0.17"
 lsp-types = "0.97"
+tempfile = "3"

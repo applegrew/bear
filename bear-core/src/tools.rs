@@ -134,6 +134,14 @@ pub trait ToolContext: Send + Sync {
     async fn register_process(&self, session_id: Uuid, pid: u32, command: String, stdin_tx: mpsc::Sender<String>);
     async fn mark_process_exited(&self, pid: u32);
 
+    // Workspace (.bear/) persistence
+    async fn load_workspace_auto_approved(&self, cwd: &str) -> std::collections::HashSet<String>;
+    async fn save_workspace_auto_approved(&self, cwd: &str, set: &std::collections::HashSet<String>);
+    async fn reset_session_auto_approved(&self, session_id: Uuid, new_set: std::collections::HashSet<String>);
+    async fn save_script(&self, cwd: &str, script: &crate::workspace::SavedScript) -> Result<(), String>;
+    async fn load_script(&self, cwd: &str, name: &str) -> Result<crate::workspace::SavedScript, String>;
+    async fn list_scripts(&self, cwd: &str) -> Vec<crate::workspace::SavedScript>;
+
     // LSP access
     async fn lsp_diagnostics(&self, file_path: &str, workspace_root: &str) -> Result<String, String>;
     async fn lsp_hover(&self, file_path: &str, line: u32, character: u32, workspace_root: &str) -> Result<String, String>;
@@ -261,6 +269,9 @@ async fn execute_tool_inner(
         "read_symbol" => execute_read_symbol(ctx, session_id, ptc).await,
         "patch_symbol" => execute_patch_symbol(ctx, session_id, ptc).await,
         "js_eval" => execute_js_eval(ptc).await,
+        "js_script_save" => execute_js_script_save(ctx, session_id, ptc).await,
+        "js_script_list" => execute_js_script_list(ctx, session_id).await,
+        "js_script" => execute_js_script(ctx, session_id, ptc).await,
         other => format!("Unknown tool: {other}"),
     }
 }
@@ -312,7 +323,16 @@ pub fn validate_tool_path(path: &str, cwd: &str) -> Result<String, String> {
             path, full, cwd
         ));
     }
+    // Block access to .bear/ directory — managed exclusively by the server
+    if is_bear_dir_path(&full) {
+        return Err("Error: the .bear/ directory is managed by Bear and cannot be accessed directly.".to_string());
+    }
     Ok(full)
+}
+
+/// Check if a resolved path falls inside a `.bear/` directory.
+fn is_bear_dir_path(path: &str) -> bool {
+    path.contains("/.bear/") || path.ends_with("/.bear")
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +367,11 @@ async fn execute_session_workdir(
                 return "Error: failed to resolve working directory".to_string();
             }
             ctx.set_session_cwd(session_id, new_cwd.clone()).await;
+
+            // Load fresh workspace state from the new directory's .bear/
+            let new_auto_approved = ctx.load_workspace_auto_approved(&new_cwd).await;
+            ctx.reset_session_auto_approved(session_id, new_auto_approved).await;
+
             bus.send(ServerMessage::Notice {
                 text: format!("Working directory set to: {new_cwd}"),
             }).await;
@@ -375,6 +400,11 @@ pub async fn execute_run_command(
     cmd_str: &str,
     cwd: &str,
 ) -> String {
+    // Block shell commands that reference the .bear/ directory
+    if cmd_str.contains(".bear") {
+        return "Error: the .bear/ directory is managed by Bear and cannot be accessed via shell commands.".to_string();
+    }
+
     let mut child = match Command::new("sh")
         .arg("-c")
         .arg(cmd_str)
@@ -2182,6 +2212,166 @@ async fn execute_js_eval(ptc: &PendingToolCall) -> String {
                 Err(err) => {
                     format!("Error: {err}")
                 }
+            }
+        }),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(output)) => output,
+        Ok(Err(join_err)) => format!("Error: JS execution panicked: {join_err}"),
+        Err(_timeout) => "Error: JS execution timed out (5 second limit)".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// js_script_save / js_script_list / js_script — reusable workspace scripts
+// ---------------------------------------------------------------------------
+
+async fn execute_js_script_save(
+    ctx: &dyn ToolContext,
+    session_id: Uuid,
+    ptc: &PendingToolCall,
+) -> String {
+    let name = match ptc.tool_call.arguments["name"].as_str() {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return "Error: js_script_save requires a 'name' argument.".to_string(),
+    };
+
+    // Validate name: [a-z0-9_-]+ only
+    let name_re = regex::Regex::new(r"^[a-z0-9_-]+$").unwrap();
+    if !name_re.is_match(&name) {
+        return "Error: script name must match [a-z0-9_-]+ (lowercase, digits, hyphens, underscores only).".to_string();
+    }
+
+    let description = ptc.tool_call.arguments["description"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let code = match ptc.tool_call.arguments["code"].as_str() {
+        Some(c) if !c.is_empty() => c.to_string(),
+        _ => return "Error: js_script_save requires a 'code' argument.".to_string(),
+    };
+
+    let args: Vec<crate::workspace::ScriptArg> = ptc.tool_call.arguments["args"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    let name = v["name"].as_str()?.to_string();
+                    let description = v["description"].as_str().unwrap_or("").to_string();
+                    Some(crate::workspace::ScriptArg { name, description })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let cwd = match ctx.get_session_cwd(session_id).await {
+        Some(c) => c,
+        None => return "Error: session not found".to_string(),
+    };
+
+    let script = crate::workspace::SavedScript {
+        name: name.clone(),
+        description,
+        args,
+        code,
+    };
+
+    match ctx.save_script(&cwd, &script).await {
+        Ok(()) => format!("Script '{name}' saved to .bear/scripts/{name}.json"),
+        Err(e) => format!("Error saving script: {e}"),
+    }
+}
+
+async fn execute_js_script_list(
+    ctx: &dyn ToolContext,
+    session_id: Uuid,
+) -> String {
+    let cwd = match ctx.get_session_cwd(session_id).await {
+        Some(c) => c,
+        None => return "Error: session not found".to_string(),
+    };
+
+    let scripts = ctx.list_scripts(&cwd).await;
+    if scripts.is_empty() {
+        return "No saved scripts in this workspace.".to_string();
+    }
+
+    let mut out = String::new();
+    for s in &scripts {
+        out.push_str(&format!("### {}\n", s.name));
+        if !s.description.is_empty() {
+            out.push_str(&format!("{}\n", s.description));
+        }
+        if !s.args.is_empty() {
+            out.push_str("Arguments:\n");
+            for a in &s.args {
+                if a.description.is_empty() {
+                    out.push_str(&format!("  - {}\n", a.name));
+                } else {
+                    out.push_str(&format!("  - {}: {}\n", a.name, a.description));
+                }
+            }
+        }
+        out.push('\n');
+    }
+    out.trim_end().to_string()
+}
+
+async fn execute_js_script(
+    ctx: &dyn ToolContext,
+    session_id: Uuid,
+    ptc: &PendingToolCall,
+) -> String {
+    let name = match ptc.tool_call.arguments["name"].as_str() {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return "Error: js_script requires a 'name' argument.".to_string(),
+    };
+
+    let cwd = match ctx.get_session_cwd(session_id).await {
+        Some(c) => c,
+        None => return "Error: session not found".to_string(),
+    };
+
+    let script = match ctx.load_script(&cwd, &name).await {
+        Ok(s) => s,
+        Err(e) => return format!("Error: {e}"),
+    };
+
+    // Build argument injection preamble
+    let args_obj = &ptc.tool_call.arguments["args"];
+    let mut preamble = String::new();
+    for arg_def in &script.args {
+        let val = &args_obj[&arg_def.name];
+        if val.is_null() {
+            // Inject undefined if not provided
+            preamble.push_str(&format!("const {} = undefined;\n", arg_def.name));
+        } else if let Some(s) = val.as_str() {
+            // String value — JSON-encode to get proper escaping
+            preamble.push_str(&format!("const {} = {};\n", arg_def.name, serde_json::to_string(s).unwrap_or_else(|_| format!("\"{}\"", s))));
+        } else {
+            // Number, bool, object, array — use JSON representation
+            preamble.push_str(&format!("const {} = {};\n", arg_def.name, val));
+        }
+    }
+
+    let full_code = format!("{preamble}{}", script.code);
+
+    // Reuse the same boa execution logic as js_eval
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || {
+            use boa_engine::{Context, Source};
+
+            let mut context = Context::default();
+            match context.eval(Source::from_bytes(&full_code)) {
+                Ok(value) => {
+                    value.to_string(&mut context)
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_else(|e| format!("Error converting result: {e}"))
+                }
+                Err(err) => format!("Error: {err}"),
             }
         }),
     )

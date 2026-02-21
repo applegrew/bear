@@ -1,5 +1,9 @@
 # Bear
 
+<p align="center">
+  <img src="logo.png" alt="Bear Logo" width="120" height="120">
+</p>
+
 Bear is a Rust-based "claude code"-style coding assistant with persistent sessions backed by a single `bear-server` process. Multiple clients (native terminal and browser) can connect to the same session simultaneously, and sessions persist even after client terminals close.
 
 ## Features
@@ -10,19 +14,28 @@ Bear is a Rust-based "claude code"-style coding assistant with persistent sessio
 - **Multi-client sync** — multiple clients can connect to the same session; prompts are broadcast to all clients and dismissed everywhere when any client responds
 - **Interactive session picker** on connect (create new or resume existing)
 
-### Tools (21)
+### Tools (24)
 - **File I/O** — `read_file`, `write_file`, `edit_file`, `patch_file` (unified diff), `list_files`, `search_text`
 - **LSP-powered** — `read_symbol`, `patch_symbol`, `lsp_diagnostics`, `lsp_hover`, `lsp_references`, `lsp_symbols`
 - **Shell** — `run_command` (with live streaming output)
 - **Web** — `web_fetch`, `web_search` (DDG → Google → Brave fallback chain)
 - **Computation** — `js_eval` (sandboxed JavaScript REPL via boa_engine)
+- **Reusable scripts** — `js_script_save`, `js_script_list`, `js_script` (LLM-authored workspace scripts persisted in `.bear/`)
 - **Session** — `session_workdir`, `undo` (up to 10 steps)
 - **Planning** — `todo_write`, `todo_read`
 - **User interaction** — `user_prompt_options`
 
+### Workspace persistence (`.bear/` folder)
+- A `.bear/` folder per working directory stores persistent workspace state
+- **Auto-approved tools/commands** — "Always approve" choices are saved to `.bear/auto_approved.json` and restored when a new session starts in the same directory
+- **Reusable scripts** — The LLM can save JS utility scripts to `.bear/scripts/` and invoke them later via `js_script`
+- On `session_workdir` change, the session loads fresh state from the new directory's `.bear/`
+- The `.bear/` directory is **protected** — the LLM cannot read, modify, or access it via file tools or shell commands
+- Write serialization per directory prevents race conditions across concurrent sessions
+
 ### Tool confirmations
 - **Picker-based** — Approve / Deny / Always approve for each tool call
-- **Auto-approve** — server-side per-session allowlist; "Always approve" applies to all agents in the session
+- **Auto-approve** — server-side per-session allowlist; "Always approve" applies to all agents in the session and persists to `.bear/`
 - Unified diff output shown for file mutations (`write_file`, `edit_file`, `patch_file`, `patch_symbol`)
 
 ### Task plans & subagents

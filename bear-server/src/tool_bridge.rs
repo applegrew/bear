@@ -120,6 +120,35 @@ impl ToolContext for ServerState {
         }
     }
 
+    async fn load_workspace_auto_approved(&self, cwd: &str) -> std::collections::HashSet<String> {
+        self.workspace_store.load_auto_approved(cwd).await
+    }
+
+    async fn save_workspace_auto_approved(&self, cwd: &str, set: &std::collections::HashSet<String>) {
+        if let Err(e) = self.workspace_store.save_auto_approved(cwd, set).await {
+            tracing::warn!("failed to persist auto_approved: {e}");
+        }
+    }
+
+    async fn reset_session_auto_approved(&self, session_id: Uuid, new_set: std::collections::HashSet<String>) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(&session_id) {
+            session.auto_approved = new_set;
+        }
+    }
+
+    async fn save_script(&self, cwd: &str, script: &bear_core::workspace::SavedScript) -> Result<(), String> {
+        self.workspace_store.save_script(cwd, script).await
+    }
+
+    async fn load_script(&self, cwd: &str, name: &str) -> Result<bear_core::workspace::SavedScript, String> {
+        self.workspace_store.load_script(cwd, name).await
+    }
+
+    async fn list_scripts(&self, cwd: &str) -> Vec<bear_core::workspace::SavedScript> {
+        self.workspace_store.list_scripts(cwd).await
+    }
+
     async fn lsp_diagnostics(
         &self,
         file_path: &str,

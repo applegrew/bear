@@ -136,6 +136,7 @@ pub struct ServerState {
     pub http_client: reqwest::Client,
     pub rtc_peers: crate::rtc::RtcPeers,
     pub lsp_manager: Arc<crate::lsp::LspManager>,
+    pub workspace_store: Arc<bear_core::workspace::WorkspaceStore>,
 }
 
 #[derive(Debug, Clone)]
