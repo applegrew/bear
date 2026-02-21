@@ -2041,6 +2041,11 @@ async fn present_next_tool(
         "js_eval",
     ];
     if AUTO_APPROVED_TOOLS.contains(&ptc.tool_call.name.as_str()) {
+        let mut display_tc = ptc.tool_call.clone();
+        display_tc.name = tool_display_name(&ptc.tool_call.name).to_string();
+        bus.send(ServerMessage::ToolAutoApproved {
+            tool_call: display_tc,
+        }).await;
         let output = execute_tool(state, session_id, bus, &ptc).await;
         bus.send(tool_output_msg(&ptc, output.clone())).await;
         append_tool_result(state, session_id, &ptc.tool_call.name, &output).await;
