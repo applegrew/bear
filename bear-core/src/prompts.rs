@@ -98,6 +98,7 @@ Default max_results=5. Returns title, URL, and snippet for each result.
 Execute JavaScript code in a sandboxed environment and return the result.
 Arguments: {"code": "string"}
 Auto-approved (no user confirmation needed). Use for arithmetic, data processing, JSON manipulation, string operations, or any computation you need to perform precisely. No filesystem or network access — pure ECMAScript only. The last expression's value is returned as the result.
+You MUST invoke this tool using the [TOOL_CALL] format like any other tool — do NOT write code blocks or simulate output.
 "#;
 
 const SYSTEM_PROMPT_LSP_TOOLS: &str = r#"
@@ -159,11 +160,13 @@ const SYSTEM_PROMPT_GUIDELINES_PRE: &str = r#"
 
 12. **Use web tools when needed.** Use web_search to find documentation, APIs, or solutions. Use web_fetch to read specific web pages. Prefer authoritative sources.
 
-13. **Use js_eval for computation.** For any non-trivial arithmetic, data transformation, JSON processing, or computation, use js_eval instead of attempting it in natural language. It's faster and more reliable.
+13. **Use js_eval for computation.** For any non-trivial arithmetic, data transformation, JSON processing, or computation, use js_eval instead of attempting it in natural language. It's faster and more reliable. Always invoke it as a proper [TOOL_CALL] — never write code blocks or simulate its output.
+
+14. **Never simulate tool output.** Always use the [TOOL_CALL] format to invoke tools. Never fake, simulate, or imagine what a tool would return. If you need a tool's result, call it.
 "#;
 
 const SYSTEM_PROMPT_GUIDELINES_LSP: &str = r#"
-14. **Use LSP tools for code intelligence.** After editing code, use lsp_diagnostics to check for errors before running a full build. Use lsp_symbols to understand file structure without reading the entire file. Use lsp_hover to inspect types and lsp_references to find usages. Use read_symbol to read specific functions instead of entire files. Use patch_symbol to rewrite an entire function or struct.
+15. **Use LSP tools for code intelligence.** After editing code, use lsp_diagnostics to check for errors before running a full build. Use lsp_symbols to understand file structure without reading the entire file. Use lsp_hover to inspect types and lsp_references to find usages. Use read_symbol to read specific functions instead of entire files. Use patch_symbol to rewrite an entire function or struct.
 "#;
 
 /// Build the subagent system prompt, conditionally including LSP tool definitions.

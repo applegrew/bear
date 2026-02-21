@@ -22,10 +22,24 @@ pub fn parse_tool_calls(text: &str) -> Vec<ParsedToolCall> {
     let mut calls = Vec::new();
 
     // Format 1: [TOOL_CALL]{"name": "tool", "arguments": {…}}[/TOOL_CALL]
+    // Also handles malformed variant: [TOOL_CALL{"name": ...}[/TOOL_CALL] (missing ] after TOOL_CALL)
     {
         let mut pos = 0;
-        while let Some(start) = text[pos..].find("[TOOL_CALL]") {
-            let json_start = pos + start + "[TOOL_CALL]".len();
+        let markers: &[&str] = &["[TOOL_CALL]", "[TOOL_CALL"];
+        while pos < text.len() {
+            // Find the earliest occurrence of either marker
+            let mut best: Option<(usize, usize)> = None; // (abs_start, json_start)
+            for marker in markers {
+                if let Some(offset) = text[pos..].find(marker) {
+                    let abs = pos + offset;
+                    let js = abs + marker.len();
+                    if best.is_none() || abs < best.unwrap().0 {
+                        best = Some((abs, js));
+                    }
+                }
+            }
+            let Some((_abs_start, json_start)) = best else { break };
+
             if let Some(end) = text[json_start..].find("[/TOOL_CALL]") {
                 let json_str = &text[json_start..json_start + end];
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
@@ -2035,6 +2049,16 @@ impl ToolCallFilter {
                 };
 
                 let after_bracket = &self.buf[bracket + 1..];
+
+                // Handle malformed [TOOL_CALL{ (missing ] after TOOL_CALL)
+                if after_bracket.starts_with("TOOL_CALL{") || after_bracket.starts_with("TOOL_CALL {") {
+                    output.push_str(&self.buf[..bracket]);
+                    self.close_tag = "[/TOOL_CALL]".to_string();
+                    self.buf = after_bracket["TOOL_CALL".len()..].to_string();
+                    self.inside = true;
+                    continue;
+                }
+
                 let Some(close_bracket) = after_bracket.find(']') else {
                     output.push_str(&self.buf[..bracket]);
                     self.buf = self.buf[bracket..].to_string();

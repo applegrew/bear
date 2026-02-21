@@ -2616,6 +2616,31 @@ mod tests {
         assert!(!out.contains("read_file"));
     }
 
+    // -- ToolCallFilter malformed [TOOL_CALL{ regression ----------------------
+
+    #[test]
+    fn filter_strips_malformed_tool_call_missing_bracket() {
+        let mut f = ToolCallFilter::new();
+        let input = r#"Some text [TOOL_CALL{"name":"js_eval","arguments":{"code":"2+3"}}[/TOOL_CALL] more"#;
+        let mut out = f.feed(input);
+        out.push_str(&f.flush());
+        assert_eq!(out.trim(), "Some text  more");
+        assert!(!out.contains("js_eval"));
+        assert!(!out.contains("TOOL_CALL"));
+    }
+
+    #[test]
+    fn filter_strips_malformed_tool_call_across_chunks() {
+        let mut f = ToolCallFilter::new();
+        let mut out = String::new();
+        out.push_str(&f.feed("Hello [TOOL_CALL{\"name\""));
+        out.push_str(&f.feed(":\"js_eval\"}[/TOOL_CALL] end"));
+        out.push_str(&f.flush());
+        assert!(out.contains("Hello"));
+        assert!(out.contains("end"));
+        assert!(!out.contains("js_eval"));
+    }
+
     // -- extract_shell_commands tests ----------------------------------------
 
     #[test]

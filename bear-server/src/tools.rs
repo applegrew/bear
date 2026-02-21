@@ -182,6 +182,36 @@ Then the second:
         assert_eq!(calls[0].arguments["path"], "a.json");
     }
 
+    // -- parse_tool_calls malformed [TOOL_CALL{ (missing ]) ----------------
+
+    #[test]
+    fn parse_malformed_tool_call_missing_bracket() {
+        // LLM omits the ] after TOOL_CALL — should still parse
+        let text = r#"[TOOL_CALL{"name": "js_eval", "arguments": {"code": "2+3+5"}}[/TOOL_CALL]"#;
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "js_eval");
+        assert_eq!(calls[0].arguments["code"], "2+3+5");
+    }
+
+    #[test]
+    fn parse_malformed_tool_call_with_space() {
+        // LLM puts a space: [TOOL_CALL {
+        let text = r#"[TOOL_CALL {"name": "read_file", "arguments": {"path": "a.rs"}}[/TOOL_CALL]"#;
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+    }
+
+    #[test]
+    fn parse_well_formed_still_works() {
+        // Ensure the well-formed variant still works after the fix
+        let text = r#"[TOOL_CALL]{"name": "js_eval", "arguments": {"code": "1+1"}}[/TOOL_CALL]"#;
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "js_eval");
+    }
+
     // -- strip_html_tags ----------------------------------------------------
 
     #[test]
