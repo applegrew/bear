@@ -23,6 +23,18 @@ impl ToolContext for ServerState {
         self.config.max_tool_output_chars
     }
 
+    fn google_api_key(&self) -> Option<&str> {
+        self.config.google_api_key.as_deref()
+    }
+
+    fn google_cx(&self) -> Option<&str> {
+        self.config.google_cx.as_deref()
+    }
+
+    fn brave_api_key(&self) -> Option<&str> {
+        self.config.brave_api_key.as_deref()
+    }
+
     async fn get_session_cwd(&self, session_id: Uuid) -> Option<String> {
         let sessions = self.sessions.read().await;
         sessions.get(&session_id).map(|s| s.info.cwd.clone())

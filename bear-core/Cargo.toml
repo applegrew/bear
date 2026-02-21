@@ -11,6 +11,7 @@ boa_engine = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 glob = { workspace = true }
+html-to-markdown-rs = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

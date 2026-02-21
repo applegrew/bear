@@ -115,6 +115,11 @@ pub trait ToolContext: Send + Sync {
     fn http_client(&self) -> &reqwest::Client;
     fn max_tool_output_chars(&self) -> usize;
 
+    // Web search fallback keys
+    fn google_api_key(&self) -> Option<&str>;
+    fn google_cx(&self) -> Option<&str>;
+    fn brave_api_key(&self) -> Option<&str>;
+
     // Session state access
     async fn get_session_cwd(&self, session_id: Uuid) -> Option<String>;
     async fn push_undo(&self, session_id: Uuid, path: &str, previous_content: String);
@@ -1308,8 +1313,7 @@ async fn execute_web_fetch(
         Err(err) => return format!("Error reading response body: {err}"),
     };
 
-    let text = strip_html_tags(&body);
-    let text = collapse_whitespace(&text);
+    let text = html_to_markdown(&body);
 
     if text.len() > max_chars {
         let mut end = max_chars;
@@ -1319,6 +1323,14 @@ async fn execute_web_fetch(
         format!("{}\n\n[... truncated at {end} bytes, total {} bytes]", &text[..end], text.len())
     } else {
         text
+    }
+}
+
+/// Convert HTML to Markdown using html-to-markdown-rs. Falls back to strip_html_tags on error.
+pub fn html_to_markdown(html: &str) -> String {
+    match html_to_markdown_rs::convert(html, None) {
+        Ok(md) => collapse_whitespace(&md),
+        Err(_) => collapse_whitespace(&strip_html_tags(html)),
     }
 }
 
@@ -1470,25 +1482,94 @@ async fn execute_web_search(
         .as_u64()
         .unwrap_or(5) as usize;
 
-    let encoded_query = urlencoding::encode(&query);
+    // Fallback chain: DDG → Google → Brave → error
+    let mut last_error;
+
+    // 1. Try DuckDuckGo (no API key needed)
+    match search_ddg(ctx.http_client(), &query, max_results).await {
+        Ok(results) => return results,
+        Err(err) => {
+            last_error = format!("DuckDuckGo: {err}");
+        }
+    }
+
+    // 2. Try Google Custom Search (if keys present)
+    if let (Some(api_key), Some(cx)) = (ctx.google_api_key(), ctx.google_cx()) {
+        match search_google(ctx.http_client(), api_key, cx, &query, max_results).await {
+            Ok(results) => return results,
+            Err(err) => {
+                last_error = format!("Google: {err}");
+            }
+        }
+    }
+
+    // 3. Try Brave Search (if key present)
+    if let Some(api_key) = ctx.brave_api_key() {
+        match search_brave(ctx.http_client(), api_key, &query, max_results).await {
+            Ok(results) => return results,
+            Err(err) => {
+                last_error = format!("Brave: {err}");
+            }
+        }
+    }
+
+    format!("Error: web search is temporarily unavailable. Last error: {last_error}")
+}
+
+// ---------------------------------------------------------------------------
+// DuckDuckGo HTML search
+// ---------------------------------------------------------------------------
+
+const DDG_USER_AGENTS: &[&str] = &[
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+];
+
+async fn search_ddg(
+    client: &reqwest::Client,
+    query: &str,
+    max_results: usize,
+) -> Result<String, String> {
+    let encoded_query = urlencoding::encode(query);
     let url = format!("https://html.duckduckgo.com/html/?q={encoded_query}");
 
-    let response = match ctx.http_client()
-        .get(&url)
-        .header("User-Agent", "Bear/1.0 (AI coding assistant)")
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(err) => return format!("Error searching: {err}"),
-    };
+    // Try with different User-Agents to reduce CAPTCHA rate
+    for ua in DDG_USER_AGENTS {
+        let response = client
+            .get(&url)
+            .header("User-Agent", *ua)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
 
-    let body = match response.text().await {
-        Ok(t) => t,
-        Err(err) => return format!("Error reading search response: {err}"),
-    };
+        let status = response.status();
 
-    parse_ddg_results(&body, max_results)
+        // DDG returns 202 for CAPTCHA/bot detection — try next UA
+        if status.as_u16() == 202 {
+            continue;
+        }
+
+        if !status.is_success() {
+            return Err(format!("HTTP {status}"));
+        }
+
+        let body = response.text().await
+            .map_err(|e| format!("body read failed: {e}"))?;
+
+        // Detect CAPTCHA even on 200 (DDG sometimes returns 200 with CAPTCHA)
+        if body.contains("anomaly-modal") || body.contains("Please complete the following challenge") {
+            continue;
+        }
+
+        let parsed = parse_ddg_results(&body, max_results);
+        if parsed == "No search results found." {
+            return Err("no results (possibly rate-limited)".to_string());
+        }
+        return Ok(parsed);
+    }
+
+    Err("rate-limited by DuckDuckGo (CAPTCHA on all attempts)".to_string())
 }
 
 /// Parse DuckDuckGo HTML search results page.
@@ -1502,7 +1583,8 @@ fn parse_ddg_results(html: &str, max_results: usize) -> String {
         let abs_pos = pos + marker_pos;
 
         let search_back_start = if abs_pos > 200 { abs_pos - 200 } else { 0 };
-        let href = extract_href(&html[search_back_start..abs_pos + marker.len() + 200]);
+        let href_end = (abs_pos + marker.len() + 200).min(html.len());
+        let href = extract_href(&html[search_back_start..href_end]);
 
         let after_marker = abs_pos + marker.len();
         let title_start = html[after_marker..].find('>').map(|p| after_marker + p + 1);
@@ -1561,6 +1643,119 @@ fn extract_href(fragment: &str) -> String {
         }
     }
     String::new()
+}
+
+// ---------------------------------------------------------------------------
+// Google Custom Search API
+// ---------------------------------------------------------------------------
+
+async fn search_google(
+    client: &reqwest::Client,
+    api_key: &str,
+    cx: &str,
+    query: &str,
+    max_results: usize,
+) -> Result<String, String> {
+    let num = max_results.min(10); // Google CSE max is 10 per request
+    let url = format!(
+        "https://www.googleapis.com/customsearch/v1?key={}&cx={}&q={}&num={}",
+        urlencoding::encode(api_key),
+        urlencoding::encode(cx),
+        urlencoding::encode(query),
+        num,
+    );
+
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+
+    let status = response.status();
+    if status.as_u16() == 429 {
+        return Err("rate-limited (HTTP 429)".to_string());
+    }
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+
+    let body: serde_json::Value = response.json().await
+        .map_err(|e| format!("JSON parse failed: {e}"))?;
+
+    let items = body["items"].as_array();
+    let Some(items) = items else {
+        return Err("no results in response".to_string());
+    };
+
+    let mut results = Vec::new();
+    for (i, item) in items.iter().enumerate().take(max_results) {
+        let title = item["title"].as_str().unwrap_or("(no title)");
+        let link = item["link"].as_str().unwrap_or("(no url)");
+        let snippet = item["snippet"].as_str().unwrap_or("(no snippet)");
+        results.push(format!("{}. {}\n   {}\n   {}", i + 1, title, link, snippet));
+    }
+
+    if results.is_empty() {
+        Err("no results".to_string())
+    } else {
+        Ok(results.join("\n\n"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Brave Search API
+// ---------------------------------------------------------------------------
+
+async fn search_brave(
+    client: &reqwest::Client,
+    api_key: &str,
+    query: &str,
+    max_results: usize,
+) -> Result<String, String> {
+    let count = max_results.min(20); // Brave max is 20
+    let url = format!(
+        "https://api.search.brave.com/res/v1/web/search?q={}&count={}",
+        urlencoding::encode(query),
+        count,
+    );
+
+    let response = client
+        .get(&url)
+        .header("X-Subscription-Token", api_key)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+
+    let status = response.status();
+    if status.as_u16() == 429 {
+        return Err("rate-limited (HTTP 429)".to_string());
+    }
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+
+    let body: serde_json::Value = response.json().await
+        .map_err(|e| format!("JSON parse failed: {e}"))?;
+
+    let results_arr = body["web"]["results"].as_array();
+    let Some(items) = results_arr else {
+        return Err("no results in response".to_string());
+    };
+
+    let mut results = Vec::new();
+    for (i, item) in items.iter().enumerate().take(max_results) {
+        let title = item["title"].as_str().unwrap_or("(no title)");
+        let link = item["url"].as_str().unwrap_or("(no url)");
+        let snippet = item["description"].as_str().unwrap_or("(no snippet)");
+        results.push(format!("{}. {}\n   {}\n   {}", i + 1, title, link, snippet));
+    }
+
+    if results.is_empty() {
+        Err("no results".to_string())
+    } else {
+        Ok(results.join("\n\n"))
+    }
 }
 
 // ---------------------------------------------------------------------------

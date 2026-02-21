@@ -20,6 +20,10 @@ pub struct AppConfig {
     pub max_tool_output_chars: usize,
     pub context_budget: usize,
     pub keep_recent: usize,
+    // Web search fallback keys
+    pub google_api_key: Option<String>,
+    pub google_cx: Option<String>,
+    pub brave_api_key: Option<String>,
 }
 
 impl AppConfig {
@@ -52,6 +56,9 @@ impl AppConfig {
             max_tool_output_chars: env_or("BEAR_MAX_TOOL_OUTPUT_CHARS", 32_000),
             context_budget: env_or("BEAR_CONTEXT_BUDGET", 16_000),
             keep_recent: env_or("BEAR_KEEP_RECENT", 20),
+            google_api_key: std::env::var("BEAR_GOOGLE_API_KEY").ok(),
+            google_cx: std::env::var("BEAR_GOOGLE_CX").ok(),
+            brave_api_key: std::env::var("BEAR_BRAVE_API_KEY").ok(),
         }
     }
 }
