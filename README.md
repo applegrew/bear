@@ -1,7 +1,7 @@
 # Bear
 
 <p align="center">
-  <img src="logo.png" alt="Bear Logo" width="120" height="120">
+  <img src="Logo.png" alt="Bear Logo" width="360" height="360">
 </p>
 
 Bear is a Rust-based "claude code"-style coding assistant with persistent sessions backed by a single `bear-server` process. Multiple clients (native terminal and browser) can connect to the same session simultaneously, and sessions persist even after client terminals close.
