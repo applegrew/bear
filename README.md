@@ -10,11 +10,12 @@ Bear is a Rust-based "claude code"-style coding assistant with persistent sessio
 - **Multi-client sync** — multiple clients can connect to the same session; prompts are broadcast to all clients and dismissed everywhere when any client responds
 - **Interactive session picker** on connect (create new or resume existing)
 
-### Tools (20)
+### Tools (21)
 - **File I/O** — `read_file`, `write_file`, `edit_file`, `patch_file` (unified diff), `list_files`, `search_text`
 - **LSP-powered** — `read_symbol`, `patch_symbol`, `lsp_diagnostics`, `lsp_hover`, `lsp_references`, `lsp_symbols`
 - **Shell** — `run_command` (with live streaming output)
-- **Web** — `web_fetch`, `web_search`
+- **Web** — `web_fetch`, `web_search` (DDG → Google → Brave fallback chain)
+- **Computation** — `js_eval` (sandboxed JavaScript REPL via boa_engine)
 - **Session** — `session_workdir`, `undo` (up to 10 steps)
 - **Planning** — `todo_write`, `todo_read`
 - **User interaction** — `user_prompt_options`
@@ -88,6 +89,9 @@ Bear is configured via environment variables on the **server**:
 | `BEAR_MAX_TOOL_OUTPUT_CHARS` | `32000` | Truncation limit for tool output |
 | `BEAR_CONTEXT_BUDGET` | `16000` | Context window budget (characters) for conversation history |
 | `BEAR_KEEP_RECENT` | `20` | Number of recent messages always kept in context |
+| `BEAR_GOOGLE_API_KEY` | *(none)* | Google Custom Search API key (web_search fallback) |
+| `BEAR_GOOGLE_CX` | *(none)* | Google Custom Search engine ID |
+| `BEAR_BRAVE_API_KEY` | *(none)* | Brave Search API key (web_search fallback) |
 | `BEAR_LSP_<LANG>` | *(per-language defaults)* | Override LSP server command for a language |
 
 Examples:
@@ -111,7 +115,7 @@ Open `html/index.html` in a browser to use the xterm.js-based terminal client (`
 
 ```
 bear/
-├── bear-core/      # Shared types (ClientMessage, ServerMessage, etc.)
+├── bear-core/      # Core logic: LLM, tools, prompts, config, shared types
 ├── bear-server/    # Server: session management, LLM, tools, LSP, WebRTC
 ├── bear/           # Native terminal client (crossterm TUI)
 ├── bearjs/         # Browser client (xterm.js TUI)
