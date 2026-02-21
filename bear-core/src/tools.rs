@@ -241,6 +241,7 @@ async fn execute_tool_inner(
         "lsp_symbols" => execute_lsp_symbols(ctx, session_id, ptc).await,
         "read_symbol" => execute_read_symbol(ctx, session_id, ptc).await,
         "patch_symbol" => execute_patch_symbol(ctx, session_id, ptc).await,
+        "js_eval" => execute_js_eval(ptc).await,
         other => format!("Unknown tool: {other}"),
     }
 }
@@ -1942,6 +1943,49 @@ pub fn truncate_tool_output(output: &str, max_chars: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// js_eval — sandboxed JavaScript execution via boa_engine
+// ---------------------------------------------------------------------------
+
+async fn execute_js_eval(ptc: &PendingToolCall) -> String {
+    let code = ptc.tool_call.arguments["code"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    if code.trim().is_empty() {
+        return "Error: code must not be empty".to_string();
+    }
+
+    // Run boa in a blocking thread with a timeout
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || {
+            use boa_engine::{Context, Source};
+
+            let mut context = Context::default();
+            match context.eval(Source::from_bytes(&code)) {
+                Ok(value) => {
+                    // Convert the result to a display string
+                    value.to_string(&mut context)
+                        .map(|s| s.to_std_string_escaped())
+                        .unwrap_or_else(|e| format!("Error converting result: {e}"))
+                }
+                Err(err) => {
+                    format!("Error: {err}")
+                }
+            }
+        }),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(output)) => output,
+        Ok(Err(join_err)) => format!("Error: JS execution panicked: {join_err}"),
+        Err(_timeout) => "Error: JS execution timed out (5 second limit)".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ToolCallFilter — strips tool-call markup from streamed LLM chunks
 // ---------------------------------------------------------------------------
 
@@ -2035,10 +2079,125 @@ impl ToolCallFilter {
 pub const AUTO_APPROVED_TOOLS: &[&str] = &[
     "todo_write", "todo_read", "web_fetch", "web_search",
     "lsp_diagnostics", "lsp_hover", "lsp_references", "lsp_symbols",
+    "js_eval",
 ];
 
 /// Tools that subagents are allowed to use (read-only).
 pub const SUBAGENT_ALLOWED_TOOLS: &[&str] = &[
     "read_file", "list_files", "search_text", "web_fetch", "web_search",
     "lsp_diagnostics", "lsp_hover", "lsp_references", "lsp_symbols", "read_symbol",
+    "js_eval",
 ];
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{PendingToolCall, ToolCall};
+
+    fn make_js_eval_ptc(code: &str) -> PendingToolCall {
+        PendingToolCall {
+            tool_call: ToolCall {
+                id: "test".to_string(),
+                name: "js_eval".to_string(),
+                arguments: serde_json::json!({ "code": code }),
+            },
+            cwd: "/tmp".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn js_eval_arithmetic() {
+        let ptc = make_js_eval_ptc("1 + 2 * 3");
+        let result = execute_js_eval(&ptc).await;
+        assert_eq!(result, "7");
+    }
+
+    #[tokio::test]
+    async fn js_eval_string_operations() {
+        let ptc = make_js_eval_ptc("'hello'.toUpperCase()");
+        let result = execute_js_eval(&ptc).await;
+        assert_eq!(result, "HELLO");
+    }
+
+    #[tokio::test]
+    async fn js_eval_json_stringify() {
+        let ptc = make_js_eval_ptc("JSON.stringify({a: 1, b: [2, 3]})");
+        let result = execute_js_eval(&ptc).await;
+        assert_eq!(result, r#"{"a":1,"b":[2,3]}"#);
+    }
+
+    #[tokio::test]
+    async fn js_eval_json_parse() {
+        let ptc = make_js_eval_ptc(r#"JSON.parse('{"x": 42}').x"#);
+        let result = execute_js_eval(&ptc).await;
+        assert_eq!(result, "42");
+    }
+
+    #[tokio::test]
+    async fn js_eval_array_methods() {
+        let ptc = make_js_eval_ptc("[3,1,4,1,5].sort().join(',')");
+        let result = execute_js_eval(&ptc).await;
+        assert_eq!(result, "1,1,3,4,5");
+    }
+
+    #[tokio::test]
+    async fn js_eval_math_functions() {
+        let ptc = make_js_eval_ptc("Math.sqrt(144)");
+        let result = execute_js_eval(&ptc).await;
+        assert_eq!(result, "12");
+    }
+
+    #[tokio::test]
+    async fn js_eval_multiline_code() {
+        let ptc = make_js_eval_ptc("let sum = 0;\nfor (let i = 1; i <= 10; i++) sum += i;\nsum");
+        let result = execute_js_eval(&ptc).await;
+        assert_eq!(result, "55");
+    }
+
+    #[tokio::test]
+    async fn js_eval_syntax_error() {
+        let ptc = make_js_eval_ptc("function {{{");
+        let result = execute_js_eval(&ptc).await;
+        assert!(result.starts_with("Error:"), "Expected error, got: {result}");
+    }
+
+    #[tokio::test]
+    async fn js_eval_runtime_error() {
+        let ptc = make_js_eval_ptc("undefinedVariable.property");
+        let result = execute_js_eval(&ptc).await;
+        assert!(result.starts_with("Error:"), "Expected error, got: {result}");
+    }
+
+    #[tokio::test]
+    async fn js_eval_empty_code() {
+        let ptc = make_js_eval_ptc("");
+        let result = execute_js_eval(&ptc).await;
+        assert!(result.contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn js_eval_undefined_result() {
+        let ptc = make_js_eval_ptc("undefined");
+        let result = execute_js_eval(&ptc).await;
+        assert_eq!(result, "undefined");
+    }
+
+    #[tokio::test]
+    async fn js_eval_no_filesystem_access() {
+        // require() doesn't exist in boa — should error
+        let ptc = make_js_eval_ptc("require('fs')");
+        let result = execute_js_eval(&ptc).await;
+        assert!(result.starts_with("Error:"), "Expected error, got: {result}");
+    }
+
+    #[tokio::test]
+    async fn js_eval_no_process_access() {
+        let ptc = make_js_eval_ptc("process.exit(1)");
+        let result = execute_js_eval(&ptc).await;
+        assert!(result.starts_with("Error:"), "Expected error, got: {result}");
+    }
+}

@@ -93,35 +93,40 @@ Default max_chars=10000. Use for reading documentation, APIs, web pages.
 Search the web and return results.
 Arguments: {"query": "string", "max_results?": number}
 Default max_results=5. Returns title, URL, and snippet for each result.
+
+### 15. js_eval
+Execute JavaScript code in a sandboxed environment and return the result.
+Arguments: {"code": "string"}
+Auto-approved (no user confirmation needed). Use for arithmetic, data processing, JSON manipulation, string operations, or any computation you need to perform precisely. No filesystem or network access — pure ECMAScript only. The last expression's value is returned as the result.
 "#;
 
 const SYSTEM_PROMPT_LSP_TOOLS: &str = r#"
-### 15. lsp_diagnostics
+### 16. lsp_diagnostics
 Get compiler errors and warnings for a file (requires language server).
 Arguments: {"path": "string"}
 Auto-approved (no user confirmation needed). Lazily spawns the appropriate language server.
 
-### 16. lsp_hover
+### 17. lsp_hover
 Get type information and documentation for a symbol at a position.
 Arguments: {"path": "string", "line": number, "character": number}
 Line and character are 1-indexed. Auto-approved.
 
-### 17. lsp_references
+### 18. lsp_references
 Find all references to a symbol at a position.
 Arguments: {"path": "string", "line": number, "character": number}
 Line and character are 1-indexed. Auto-approved.
 
-### 18. lsp_symbols
+### 19. lsp_symbols
 Get a structured outline of a file (functions, structs, classes with line ranges).
 Arguments: {"path": "string"}
 Auto-approved. Use to understand file structure without reading the entire file.
 
-### 19. read_symbol
+### 20. read_symbol
 Read just one symbol (function, struct, impl block, class, etc.) from a file using LSP.
 Arguments: {"path": "string", "symbol": "string"}
 Auto-approved. Returns the symbol's source code with line numbers. Much more efficient than read_file for large files — prefer this when you only need one function or type definition. Use lsp_symbols first to discover available symbol names.
 
-### 20. patch_symbol
+### 21. patch_symbol
 Replace an entire symbol (function, struct, etc.) with new content using LSP to locate it.
 Arguments: {"path": "string", "symbol": "string", "content": "string"}
 The content should be the complete new source for the symbol (including signature, body, etc.). The old symbol is replaced entirely. Supports undo. Use when rewriting a function/struct — avoids the need for precise old_text matching in edit_file.
@@ -153,10 +158,12 @@ const SYSTEM_PROMPT_GUIDELINES_PRE: &str = r#"
 11. **Track your work.** For complex multi-step tasks, use todo_write to create a plan and update item statuses as you complete them. Use todo_read to review your progress.
 
 12. **Use web tools when needed.** Use web_search to find documentation, APIs, or solutions. Use web_fetch to read specific web pages. Prefer authoritative sources.
+
+13. **Use js_eval for computation.** For any non-trivial arithmetic, data transformation, JSON processing, or computation, use js_eval instead of attempting it in natural language. It's faster and more reliable.
 "#;
 
 const SYSTEM_PROMPT_GUIDELINES_LSP: &str = r#"
-13. **Use LSP tools for code intelligence.** After editing code, use lsp_diagnostics to check for errors before running a full build. Use lsp_symbols to understand file structure without reading the entire file. Use lsp_hover to inspect types and lsp_references to find usages. Use read_symbol to read specific functions instead of entire files. Use patch_symbol to rewrite an entire function or struct.
+14. **Use LSP tools for code intelligence.** After editing code, use lsp_diagnostics to check for errors before running a full build. Use lsp_symbols to understand file structure without reading the entire file. Use lsp_hover to inspect types and lsp_references to find usages. Use read_symbol to read specific functions instead of entire files. Use patch_symbol to rewrite an entire function or struct.
 "#;
 
 /// Build the subagent system prompt, conditionally including LSP tool definitions.
@@ -197,26 +204,31 @@ Arguments: {"url": "string", "max_chars?": number}
 ### 5. web_search
 Search the web and return results.
 Arguments: {"query": "string", "max_results?": number}
+
+### 6. js_eval
+Execute JavaScript code in a sandboxed environment and return the result.
+Arguments: {"code": "string"}
+Use for arithmetic, data processing, JSON manipulation, or any computation. No filesystem or network access.
 "#;
 
 const SUBAGENT_PROMPT_LSP_TOOLS: &str = r#"
-### 6. lsp_diagnostics
+### 7. lsp_diagnostics
 Get compiler errors and warnings for a file.
 Arguments: {"path": "string"}
 
-### 7. lsp_hover
+### 8. lsp_hover
 Get type information for a symbol at a position.
 Arguments: {"path": "string", "line": number, "character": number}
 
-### 8. lsp_references
+### 9. lsp_references
 Find all references to a symbol at a position.
 Arguments: {"path": "string", "line": number, "character": number}
 
-### 9. lsp_symbols
+### 10. lsp_symbols
 Get a structured outline of a file.
 Arguments: {"path": "string"}
 
-### 10. read_symbol
+### 11. read_symbol
 Read just one symbol (function, struct, impl block, class, etc.) from a file using LSP.
 Arguments: {"path": "string", "symbol": "string"}
 Much more efficient than read_file for large files. Use lsp_symbols first to discover symbol names.

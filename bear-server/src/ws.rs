@@ -2038,6 +2038,7 @@ async fn present_next_tool(
     const AUTO_APPROVED_TOOLS: &[&str] = &[
         "todo_write", "todo_read", "web_fetch", "web_search",
         "lsp_diagnostics", "lsp_hover", "lsp_references", "lsp_symbols",
+        "js_eval",
     ];
     if AUTO_APPROVED_TOOLS.contains(&ptc.tool_call.name.as_str()) {
         let output = execute_tool(state, session_id, bus, &ptc).await;
