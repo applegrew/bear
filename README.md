@@ -14,10 +14,11 @@ Bear is a Rust-based "claude code"-style coding assistant with persistent sessio
 - **Multi-client sync** — multiple clients can connect to the same session; prompts are broadcast to all clients and dismissed everywhere when any client responds
 - **Interactive session picker** on connect (create new or resume existing)
 
-### Tools (24)
+### Tools (25)
 - **File I/O** — `read_file`, `write_file`, `edit_file`, `patch_file` (unified diff), `list_files`, `search_text`
 - **LSP-powered** — `read_symbol`, `patch_symbol`, `lsp_diagnostics`, `lsp_hover`, `lsp_references`, `lsp_symbols`
 - **Shell** — `run_command` (with live streaming output)
+- **Git** — `git_commit` (stages all changes, commits with co-author trailer)
 - **Web** — `web_fetch`, `web_search` (DDG → Google → Brave fallback chain)
 - **Computation** — `js_eval` (sandboxed JavaScript REPL via boa_engine)
 - **Reusable scripts** — `js_script_save`, `js_script_list`, `js_script` (LLM-authored workspace scripts persisted in `.bear/`)

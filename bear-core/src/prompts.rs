@@ -114,35 +114,40 @@ Auto-approved. Returns name, description, and argument definitions for each save
 Run a previously saved reusable script by name, passing arguments.
 Arguments: {"name": "string", "args": {"arg_name": value, ...}}
 Auto-approved. Loads the script from `.bear/scripts/<name>.json`, injects argument values, and executes it in the sandboxed boa engine. Use js_script_list first to discover available scripts.
+
+### 19. git_commit
+Commit all staged and unstaged changes to git with a message.
+Arguments: {"message": "string"}
+Stages all changes (git add -A) and commits with the given message. A Co-authored-by trailer is automatically appended — do NOT include one yourself. Use this instead of run_command for git commits.
 "#;
 
 const SYSTEM_PROMPT_LSP_TOOLS: &str = r#"
-### 19. lsp_diagnostics
+### 20. lsp_diagnostics
 Get compiler errors and warnings for a file (requires language server).
 Arguments: {"path": "string"}
 Auto-approved (no user confirmation needed). Lazily spawns the appropriate language server.
 
-### 20. lsp_hover
+### 21. lsp_hover
 Get type information and documentation for a symbol at a position.
 Arguments: {"path": "string", "line": number, "character": number}
 Line and character are 1-indexed. Auto-approved.
 
-### 21. lsp_references
+### 22. lsp_references
 Find all references to a symbol at a position.
 Arguments: {"path": "string", "line": number, "character": number}
 Line and character are 1-indexed. Auto-approved.
 
-### 22. lsp_symbols
+### 23. lsp_symbols
 Get a structured outline of a file (functions, structs, classes with line ranges).
 Arguments: {"path": "string"}
 Auto-approved. Use to understand file structure without reading the entire file.
 
-### 23. read_symbol
+### 24. read_symbol
 Read just one symbol (function, struct, impl block, class, etc.) from a file using LSP.
 Arguments: {"path": "string", "symbol": "string"}
 Auto-approved. Returns the symbol's source code with line numbers. Much more efficient than read_file for large files — prefer this when you only need one function or type definition. Use lsp_symbols first to discover available symbol names.
 
-### 24. patch_symbol
+### 25. patch_symbol
 Replace an entire symbol (function, struct, etc.) with new content using LSP to locate it.
 Arguments: {"path": "string", "symbol": "string", "content": "string"}
 The content should be the complete new source for the symbol (including signature, body, etc.). The old symbol is replaced entirely. Supports undo. Use when rewriting a function/struct — avoids the need for precise old_text matching in edit_file.
@@ -178,10 +183,12 @@ const SYSTEM_PROMPT_GUIDELINES_PRE: &str = r#"
 13. **Use js_eval for computation.** For any non-trivial arithmetic, data transformation, JSON processing, or computation, use js_eval instead of attempting it in natural language. It's faster and more reliable. Always invoke it as a proper [TOOL_CALL] — never write code blocks or simulate its output.
 
 14. **Never simulate tool output.** Always use the [TOOL_CALL] format to invoke tools. Never fake, simulate, or imagine what a tool would return. If you need a tool's result, call it.
+
+15. **Offer to commit.** After completing a significant change (feature, bug fix, refactor), proactively offer to commit the changes using git_commit. Propose a concise, conventional commit message based on what was done, and let the user confirm or edit it via the tool confirmation prompt.
 "#;
 
 const SYSTEM_PROMPT_GUIDELINES_LSP: &str = r#"
-15. **Use LSP tools for code intelligence.** After editing code, use lsp_diagnostics to check for errors before running a full build. Use lsp_symbols to understand file structure without reading the entire file. Use lsp_hover to inspect types and lsp_references to find usages. Use read_symbol to read specific functions instead of entire files. Use patch_symbol to rewrite an entire function or struct.
+16. **Use LSP tools for code intelligence.** After editing code, use lsp_diagnostics to check for errors before running a full build. Use lsp_symbols to understand file structure without reading the entire file. Use lsp_hover to inspect types and lsp_references to find usages. Use read_symbol to read specific functions instead of entire files. Use patch_symbol to rewrite an entire function or struct.
 "#;
 
 /// Build the subagent system prompt, conditionally including LSP tool definitions.

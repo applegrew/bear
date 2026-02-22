@@ -272,6 +272,7 @@ async fn execute_tool_inner(
         "js_script_save" => execute_js_script_save(ctx, session_id, ptc).await,
         "js_script_list" => execute_js_script_list(ctx, session_id).await,
         "js_script" => execute_js_script(ctx, session_id, ptc).await,
+        "git_commit" => execute_git_commit(ptc).await,
         other => format!("Unknown tool: {other}"),
     }
 }
@@ -2221,6 +2222,58 @@ async fn execute_js_eval(ptc: &PendingToolCall) -> String {
         Ok(Ok(output)) => output,
         Ok(Err(join_err)) => format!("Error: JS execution panicked: {join_err}"),
         Err(_timeout) => "Error: JS execution timed out (5 second limit)".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// git_commit
+// ---------------------------------------------------------------------------
+
+async fn execute_git_commit(ptc: &PendingToolCall) -> String {
+    let message = match ptc.tool_call.arguments["message"].as_str() {
+        Some(m) if !m.is_empty() => m,
+        _ => return "Error: git_commit requires a non-empty 'message' argument.".to_string(),
+    };
+
+    // Stage all changes
+    let add_out = match Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(&ptc.cwd)
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => return format!("Error running git add: {e}"),
+    };
+    if !add_out.status.success() {
+        let stderr = String::from_utf8_lossy(&add_out.stderr).trim().to_string();
+        return format!("Error: git add -A failed: {stderr}");
+    }
+
+    // Append co-author trailer
+    let full_message = format!(
+        "{message}\n\nCo-authored-by: Bear <applegrew+bear@gmail.com>"
+    );
+
+    // Commit
+    let commit_out = match Command::new("git")
+        .args(["commit", "-m", &full_message])
+        .current_dir(&ptc.cwd)
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => return format!("Error running git commit: {e}"),
+    };
+
+    let stdout = String::from_utf8_lossy(&commit_out.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&commit_out.stderr).trim().to_string();
+
+    if commit_out.status.success() {
+        if stderr.is_empty() { stdout } else { format!("{stdout}\n{stderr}") }
+    } else {
+        let combined = if stdout.is_empty() { stderr } else { format!("{stdout}\n{stderr}") };
+        format!("Error: git commit failed: {combined}")
     }
 }
 
