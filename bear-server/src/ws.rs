@@ -261,66 +261,148 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
 
     // Main relay loop: forward between WebSocket and session bus
     let (mut ws_sink, mut ws_stream) = socket.split();
+
+    // When an interactive prompt (ToolRequest, UserPrompt, TaskPlan) is sent
+    // to the client, the consumer pauses — it stops advancing its offset so
+    // subsequent messages stay in the topic log (the log IS the buffer).
+    // Only prompt-resolution messages are forwarded while paused.
+    // When the prompt is resolved (by this client or another), the consumer
+    // resumes and drains all unconsumed messages.
+    let mut prompt_active = false;
+    // How far we have scanned in the log during prompt-active mode (to avoid
+    // busy-looping when peeked messages contain no resolution).
+    let mut scanned_len: usize = 0;
+
     loop {
-        tokio::select! {
-            // Messages from the session worker → forward to WebSocket client
-            batch = consumer.next_batch() => {
-                let mut send_failed = false;
-                for msg in batch {
-                    let payload = match serde_json::to_string(&msg) {
-                        Ok(p) => p,
-                        Err(_) => continue,
-                    };
-                    if SinkExt::send(&mut ws_sink, Message::Text(payload)).await.is_err() {
-                        tracing::info!("ws: client disconnected from session {session_id} (send failed)");
-                        send_failed = true;
-                        break;
-                    }
-                }
-                if send_failed { break; }
-            }
-            // Messages from WebSocket client → forward to session worker
-            ws_msg = ws_stream.next() => {
-                match ws_msg {
-                    Some(Ok(Message::Text(text))) => {
-                        match serde_json::from_str::<ClientMessage>(&text) {
-                            Ok(ClientMessage::Ping) => {
-                                // Handle ping directly, don't forward to worker
-                                let payload = serde_json::to_string(&ServerMessage::Pong).unwrap_or_default();
-                                let _ = SinkExt::send(&mut ws_sink, Message::Text(payload)).await;
+        if prompt_active {
+            // Prompt-active: only watch for resolution messages in the log
+            // or a client response.  The consumer offset is NOT advanced for
+            // non-resolution messages — the topic log holds them.
+            tokio::select! {
+                _ = consumer.wait_changed(scanned_len) => {
+                    // New messages arrived — peek for a resolution
+                    let peeked = consumer.peek().await;
+                    scanned_len = consumer.offset() + peeked.len();
+                    if let Some(pos) = peeked.iter().position(|m| m.is_prompt_resolution()) {
+                        // Forward everything up to and including the resolution
+                        let mut send_failed = false;
+                        for msg in &peeked[..=pos] {
+                            if ws_send_sm(&mut ws_sink, msg).await.is_err() {
+                                send_failed = true;
+                                break;
                             }
-                            Ok(client_msg) => {
+                        }
+                        consumer.advance(pos + 1);
+                        if send_failed { break; }
+                        prompt_active = false;
+                        // Continue draining unconsumed messages in normal mode
+                        if let Err(_) = ws_drain_unconsumed(
+                            &mut consumer, &mut ws_sink, &mut prompt_active,
+                        ).await {
+                            break;
+                        }
+                        if prompt_active {
+                            scanned_len = consumer.offset();
+                        }
+                    }
+                    // else: no resolution yet — loop back and wait for more
+                }
+                ws_msg = ws_stream.next() => {
+                    match ws_msg {
+                        Some(Ok(Message::Text(text))) => {
+                            if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
+                                if matches!(client_msg, ClientMessage::Ping) {
+                                    let payload = serde_json::to_string(&ServerMessage::Pong).unwrap_or_default();
+                                    let _ = SinkExt::send(&mut ws_sink, Message::Text(payload)).await;
+                                    continue;
+                                }
+                                let resolves = matches!(
+                                    client_msg,
+                                    ClientMessage::ToolConfirm { .. }
+                                        | ClientMessage::UserPromptResponse { .. }
+                                        | ClientMessage::TaskPlanResponse { .. }
+                                );
                                 tracing::info!("ws: forwarding {client_msg:?} to session {session_id}");
-                                match client_tx.try_send(client_msg) {
-                                    Ok(()) => {}
-                                    Err(mpsc::error::TrySendError::Full(msg)) => {
-                                        tracing::warn!("ws: client_tx full for session {session_id}, dropping {msg:?}");
-                                        let payload = serde_json::to_string(&ServerMessage::Error {
-                                            text: "Server busy — please try again in a moment.".to_string(),
-                                        }).unwrap_or_default();
-                                        let _ = SinkExt::send(&mut ws_sink, Message::Text(payload)).await;
+                                let _ = client_tx.try_send(client_msg);
+                                if resolves {
+                                    prompt_active = false;
+                                    if let Err(_) = ws_drain_unconsumed(
+                                        &mut consumer, &mut ws_sink, &mut prompt_active,
+                                    ).await {
+                                        break;
                                     }
-                                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                                        tracing::warn!("ws: client_tx closed for session {session_id}");
+                                    if prompt_active {
+                                        scanned_len = consumer.offset();
                                     }
                                 }
                             }
-                            Err(err) => {
-                                let payload = serde_json::to_string(&ServerMessage::Error {
-                                    text: format!("invalid message: {err}"),
-                                }).unwrap_or_default();
-                                let _ = SinkExt::send(&mut ws_sink, Message::Text(payload)).await;
-                            }
                         }
+                        Some(Ok(Message::Ping(data))) => {
+                            let _ = SinkExt::send(&mut ws_sink, Message::Pong(data)).await;
+                        }
+                        Some(Ok(Message::Close(_))) | None => {
+                            tracing::info!("client disconnected from session {session_id}");
+                            break;
+                        }
+                        _ => {}
                     }
-                    Some(Ok(Message::Ping(data))) => {
-                        let _ = SinkExt::send(&mut ws_sink, Message::Pong(data)).await;
-                    }
-                    Some(Ok(Message::Close(_))) | None => {
-                        tracing::info!("client disconnected from session {session_id}");
+                }
+            }
+        } else {
+            // Normal mode: peek, forward, advance — one message at a time
+            // so we never consume past an interactive prompt.
+            tokio::select! {
+                _peeked = consumer.wait_peek() => {
+                    if let Err(_) = ws_drain_unconsumed(
+                        &mut consumer, &mut ws_sink, &mut prompt_active,
+                    ).await {
                         break;
                     }
-                    _ => {}
+                    if prompt_active {
+                        scanned_len = consumer.offset();
+                    }
+                }
+                ws_msg = ws_stream.next() => {
+                    match ws_msg {
+                        Some(Ok(Message::Text(text))) => {
+                            match serde_json::from_str::<ClientMessage>(&text) {
+                                Ok(ClientMessage::Ping) => {
+                                    let payload = serde_json::to_string(&ServerMessage::Pong).unwrap_or_default();
+                                    let _ = SinkExt::send(&mut ws_sink, Message::Text(payload)).await;
+                                }
+                                Ok(client_msg) => {
+                                    tracing::info!("ws: forwarding {client_msg:?} to session {session_id}");
+                                    match client_tx.try_send(client_msg) {
+                                        Ok(()) => {}
+                                        Err(mpsc::error::TrySendError::Full(msg)) => {
+                                            tracing::warn!("ws: client_tx full for session {session_id}, dropping {msg:?}");
+                                            let payload = serde_json::to_string(&ServerMessage::Error {
+                                                text: "Server busy — please try again in a moment.".to_string(),
+                                            }).unwrap_or_default();
+                                            let _ = SinkExt::send(&mut ws_sink, Message::Text(payload)).await;
+                                        }
+                                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                                            tracing::warn!("ws: client_tx closed for session {session_id}");
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    let payload = serde_json::to_string(&ServerMessage::Error {
+                                        text: format!("invalid message: {err}"),
+                                    }).unwrap_or_default();
+                                    let _ = SinkExt::send(&mut ws_sink, Message::Text(payload)).await;
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Ping(data))) => {
+                            let _ = SinkExt::send(&mut ws_sink, Message::Pong(data)).await;
+                        }
+                        Some(Ok(Message::Close(_))) | None => {
+                            tracing::info!("client disconnected from session {session_id}");
+                            break;
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -2378,6 +2460,38 @@ async fn append_tool_result(state: &ServerState, session_id: Uuid, tool_name: &s
 async fn ws_send(socket: &mut WebSocket, message: &ServerMessage) -> anyhow::Result<()> {
     let payload = serde_json::to_string(message)?;
     socket.send(Message::Text(payload)).await?;
+    Ok(())
+}
+
+/// Send a ServerMessage to the sink half of a split WebSocket.
+async fn ws_send_sm(
+    sink: &mut futures::stream::SplitSink<WebSocket, Message>,
+    message: &ServerMessage,
+) -> Result<(), axum::Error> {
+    let payload = serde_json::to_string(message).map_err(|e| axum::Error::new(e))?;
+    SinkExt::send(sink, Message::Text(payload)).await
+}
+
+/// Peek unconsumed messages from the consumer and forward them to the
+/// WebSocket sink, advancing the offset one-by-one.  Stops (and sets
+/// `prompt_active = true`) as soon as an interactive prompt is forwarded,
+/// leaving subsequent messages unconsumed in the topic log.
+async fn ws_drain_unconsumed(
+    consumer: &mut crate::state::TopicConsumer,
+    sink: &mut futures::stream::SplitSink<WebSocket, Message>,
+    prompt_active: &mut bool,
+) -> Result<(), axum::Error> {
+    let peeked = consumer.peek().await;
+    for msg in peeked.iter() {
+        if msg.is_interactive_prompt() {
+            *prompt_active = true;
+        }
+        ws_send_sm(sink, msg).await?;
+        consumer.advance(1);
+        if *prompt_active {
+            break;
+        }
+    }
     Ok(())
 }
 

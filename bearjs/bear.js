@@ -393,9 +393,6 @@ export class BearClient {
     // Active subagent tracking
     this._activeSubagents = new Set();
 
-    // Deferred messages: queued when a picker is active, drained after picker resolves
-    this._deferredMsgs = [];
-
     // Interrupt warning state (double-Enter to interrupt LLM)
     this._interruptPendingText = null;
     this._interruptWarningStart = null;
@@ -772,6 +769,8 @@ export class BearClient {
     this.toolConfirmCall = null;
     this.toolConfirmIdx = 0;
     this.toolConfirmRendered = false;
+    this.inUserPrompt = false;
+    this._activeSubagents = new Set();
 
     this._cleanup();
 
@@ -916,18 +915,6 @@ export class BearClient {
            (this.ws && this.ws.readyState === WebSocket.OPEN);
   }
 
-  _hasActivePicker() {
-    return this.inToolConfirm || this.inUserPrompt || this.inSessionPicker;
-  }
-
-  _drainDeferredMsgs() {
-    while (this._deferredMsgs.length > 0) {
-      if (this._hasActivePicker()) break;
-      const deferred = this._deferredMsgs.shift();
-      this._handleServerMessage(deferred);
-    }
-  }
-
   // -------------------------------------------------------------------------
   // Server message dispatch
   // -------------------------------------------------------------------------
@@ -979,11 +966,6 @@ export class BearClient {
         break;
 
       case 'tool_request': {
-        // Defer if another picker is already active
-        if (this._hasActivePicker()) {
-          this._deferredMsgs.push(msg);
-          break;
-        }
         const tc = msg.tool_call;
         this._lastToolName = tc.name;
         this._lastToolArgs = tc.arguments;
@@ -1085,7 +1067,6 @@ export class BearClient {
           this._pushLine(label);
           this._pushLine('');
           this._fullRepaint();
-          this._drainDeferredMsgs();
         }
         break;
 
@@ -1104,7 +1085,6 @@ export class BearClient {
           this._pushLine(`${C.gray}  (resolved by another client)${C.reset}`);
           this._pushLine('');
           this._fullRepaint();
-          this._drainDeferredMsgs();
         }
         break;
       }
@@ -1143,11 +1123,6 @@ export class BearClient {
         break;
 
       case 'user_prompt':
-        // Defer if another picker is already active
-        if (this._hasActivePicker()) {
-          this._deferredMsgs.push(msg);
-          break;
-        }
         this.inUserPrompt = true;
         this.userPromptId = msg.prompt_id;
         this.userPromptOptions = msg.options;
@@ -1162,11 +1137,6 @@ export class BearClient {
         break;
 
       case 'task_plan': {
-        // Defer if another picker is already active
-        if (this._hasActivePicker()) {
-          this._deferredMsgs.push(msg);
-          break;
-        }
         // Show proposed task plan and enter confirmation mode
         this._pushLine('');
         this._pushLine(`${C.bold}${C.cyan}  📋 Proposed task plan:${C.reset}`);
@@ -1508,7 +1478,6 @@ export class BearClient {
       this._sendJson({ type: 'user_prompt_response', prompt_id: this.userPromptId, selected });
     }
     this._fullRepaint();
-    this._drainDeferredMsgs();
   }
 
   // -------------------------------------------------------------------------
@@ -1572,7 +1541,6 @@ export class BearClient {
 
     this._sendJson({ type: 'tool_confirm', tool_call_id: tc.id, approved, always });
     this._fullRepaint();
-    this._drainDeferredMsgs();
   }
 
   _extractBaseCommand(toolCall) {

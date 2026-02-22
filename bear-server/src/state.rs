@@ -52,6 +52,11 @@ impl TopicLog {
         let msgs = log[start..end].to_vec();
         (msgs, end)
     }
+
+    /// Current length of the log.
+    async fn len(&self) -> usize {
+        self.messages.lock().await.len()
+    }
 }
 
 /// Per-client consumer that tracks its own offset into the topic log.
@@ -64,12 +69,10 @@ pub struct TopicConsumer {
 impl TopicConsumer {
     /// Wait for the next batch of messages. Returns one or more messages
     /// that the consumer hasn't seen yet. Blocks until at least one is
-    /// available.
+    /// available.  Advances the offset past the returned messages.
+    #[allow(dead_code)] // used by tests
     pub async fn next_batch(&mut self) -> Vec<ServerMessage> {
         loop {
-            // Register interest in notifications BEFORE reading the log.
-            // This prevents a race where the producer pushes + notifies
-            // between our read and our await (the "lost wakeup" problem).
             let notified = self.log.notify.notified();
             tokio::pin!(notified);
 
@@ -78,7 +81,56 @@ impl TopicConsumer {
                 self.offset = new_offset;
                 return msgs;
             }
-            // Nothing new — wait for the producer to wake us.
+            notified.await;
+        }
+    }
+
+    /// Peek at unconsumed messages without advancing the offset.
+    /// Returns an empty vec if no new messages are available.
+    pub async fn peek(&self) -> Vec<ServerMessage> {
+        let (msgs, _) = self.log.read_from(self.offset).await;
+        msgs
+    }
+
+    /// Wait until at least one unconsumed message is available, then peek
+    /// without consuming.  Like `next_batch` but non-destructive.
+    pub async fn wait_peek(&self) -> Vec<ServerMessage> {
+        loop {
+            let notified = self.log.notify.notified();
+            tokio::pin!(notified);
+
+            let (msgs, _) = self.log.read_from(self.offset).await;
+            if !msgs.is_empty() {
+                return msgs;
+            }
+            notified.await;
+        }
+    }
+
+    /// Advance the consumer offset by `n` messages.  The caller is
+    /// responsible for ensuring `n` does not exceed the number of
+    /// unconsumed messages (typically after a `peek` / `wait_peek`).
+    pub fn advance(&mut self, n: usize) {
+        self.offset += n;
+    }
+
+    /// Current consumer offset (for computing scanned-length).
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    /// Block until the topic log has more than `known_len` messages.
+    /// Used to avoid busy-looping after a `peek` found no actionable
+    /// messages — the caller passes the log length from the last peek
+    /// and waits for the producer to append something new.
+    pub async fn wait_changed(&self, known_len: usize) {
+        loop {
+            let notified = self.log.notify.notified();
+            tokio::pin!(notified);
+
+            if self.log.len().await > known_len {
+                return;
+            }
             notified.await;
         }
     }

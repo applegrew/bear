@@ -237,3 +237,25 @@ pub enum ServerMessage {
     Thinking,
     Pong,
 }
+
+impl ServerMessage {
+    /// Returns `true` if this message is an interactive prompt that requires
+    /// a client response (tool confirm, user prompt, task plan approval).
+    pub fn is_interactive_prompt(&self) -> bool {
+        matches!(
+            self,
+            ServerMessage::ToolRequest { .. }
+                | ServerMessage::UserPrompt { .. }
+                | ServerMessage::TaskPlan { .. }
+        )
+    }
+
+    /// Returns `true` if this message resolves an interactive prompt
+    /// (another client approved/denied a tool or answered a prompt).
+    pub fn is_prompt_resolution(&self) -> bool {
+        matches!(
+            self,
+            ServerMessage::ToolResolved { .. } | ServerMessage::PromptResolved { .. }
+        )
+    }
+}

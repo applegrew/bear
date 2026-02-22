@@ -361,64 +361,142 @@ async fn handle_data_channel(
         })
     }));
 
+    // When an interactive prompt (ToolRequest, UserPrompt, TaskPlan) is sent
+    // to the client, the consumer pauses — it stops advancing its offset so
+    // subsequent messages stay in the topic log (the log IS the buffer).
+    // Only prompt-resolution messages are forwarded while paused.
+    let mut prompt_active = false;
+    let mut scanned_len: usize = 0;
+
     // Main relay loop
     loop {
-        tokio::select! {
-            // Messages from session worker → forward to DataChannel
-            batch = consumer.next_batch() => {
-                for msg in &batch {
-                    if let Err(e) = dc_send_msg(&dc, msg).await {
-                        tracing::warn!("rtc: send failed for session {session_id}: {e}");
-                        // Don't break — the DataChannel may still be usable
-                        // for smaller messages. Only break on close event.
+        if prompt_active {
+            tokio::select! {
+                _ = consumer.wait_changed(scanned_len) => {
+                    let peeked = consumer.peek().await;
+                    scanned_len = consumer.offset() + peeked.len();
+                    if let Some(pos) = peeked.iter().position(|m| m.is_prompt_resolution()) {
+                        for msg in &peeked[..=pos] {
+                            let _ = dc_send_msg(&dc, msg).await;
+                        }
+                        consumer.advance(pos + 1);
+                        prompt_active = false;
+                        dc_drain_unconsumed(&mut consumer, &dc, &mut prompt_active).await;
+                        if prompt_active {
+                            scanned_len = consumer.offset();
+                        }
                     }
                 }
-            }
-            // Messages from DataChannel → forward to session worker
-            dc_text = dc_msg_rx.recv() => {
-                match dc_text {
-                    Some(text) => {
-                        match serde_json::from_str::<ClientMessage>(&text) {
-                            Ok(ClientMessage::Ping) => {
-                                let _ = dc_send_msg(&dc, &ServerMessage::Pong).await;
-                            }
-                            Ok(client_msg) => {
+                dc_text = dc_msg_rx.recv() => {
+                    match dc_text {
+                        Some(text) => {
+                            if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
+                                if matches!(client_msg, ClientMessage::Ping) {
+                                    let _ = dc_send_msg(&dc, &ServerMessage::Pong).await;
+                                    continue;
+                                }
+                                let resolves = matches!(
+                                    client_msg,
+                                    ClientMessage::ToolConfirm { .. }
+                                        | ClientMessage::UserPromptResponse { .. }
+                                        | ClientMessage::TaskPlanResponse { .. }
+                                );
                                 tracing::info!("rtc: forwarding {client_msg:?} to session {session_id}");
-                                match client_tx.try_send(client_msg) {
-                                    Ok(()) => {}
-                                    Err(mpsc::error::TrySendError::Full(msg)) => {
-                                        tracing::warn!("rtc: client_tx full for session {session_id}, dropping {msg:?}");
-                                        let _ = dc_send_msg(&dc, &ServerMessage::Error {
-                                            text: "Server busy — please try again in a moment.".to_string(),
-                                        }).await;
-                                    }
-                                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                                        tracing::warn!("rtc: client_tx closed for session {session_id}");
+                                let _ = client_tx.try_send(client_msg);
+                                if resolves {
+                                    prompt_active = false;
+                                    dc_drain_unconsumed(&mut consumer, &dc, &mut prompt_active).await;
+                                    if prompt_active {
+                                        scanned_len = consumer.offset();
                                     }
                                 }
                             }
-                            Err(err) => {
-                                let _ = dc_send_msg(&dc, &ServerMessage::Error {
-                                    text: format!("invalid message: {err}"),
-                                }).await;
-                            }
+                        }
+                        None => {
+                            tracing::info!("rtc: dc_msg channel closed for session {session_id}");
+                            break;
                         }
                     }
-                    None => {
-                        tracing::info!("rtc: dc_msg channel closed for session {session_id}");
-                        break;
-                    }
+                }
+                _ = close_rx.recv() => {
+                    tracing::info!("rtc: DataChannel closed for session {session_id}");
+                    break;
                 }
             }
-            // DataChannel closed
-            _ = close_rx.recv() => {
-                tracing::info!("rtc: DataChannel closed for session {session_id}");
-                break;
+        } else {
+            tokio::select! {
+                _peeked = consumer.wait_peek() => {
+                    dc_drain_unconsumed(&mut consumer, &dc, &mut prompt_active).await;
+                    if prompt_active {
+                        scanned_len = consumer.offset();
+                    }
+                }
+                dc_text = dc_msg_rx.recv() => {
+                    match dc_text {
+                        Some(text) => {
+                            match serde_json::from_str::<ClientMessage>(&text) {
+                                Ok(ClientMessage::Ping) => {
+                                    let _ = dc_send_msg(&dc, &ServerMessage::Pong).await;
+                                }
+                                Ok(client_msg) => {
+                                    tracing::info!("rtc: forwarding {client_msg:?} to session {session_id}");
+                                    match client_tx.try_send(client_msg) {
+                                        Ok(()) => {}
+                                        Err(mpsc::error::TrySendError::Full(msg)) => {
+                                            tracing::warn!("rtc: client_tx full for session {session_id}, dropping {msg:?}");
+                                            let _ = dc_send_msg(&dc, &ServerMessage::Error {
+                                                text: "Server busy — please try again in a moment.".to_string(),
+                                            }).await;
+                                        }
+                                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                                            tracing::warn!("rtc: client_tx closed for session {session_id}");
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    let _ = dc_send_msg(&dc, &ServerMessage::Error {
+                                        text: format!("invalid message: {err}"),
+                                    }).await;
+                                }
+                            }
+                        }
+                        None => {
+                            tracing::info!("rtc: dc_msg channel closed for session {session_id}");
+                            break;
+                        }
+                    }
+                }
+                _ = close_rx.recv() => {
+                    tracing::info!("rtc: DataChannel closed for session {session_id}");
+                    break;
+                }
             }
         }
     }
 
     tracing::info!("rtc: DataChannel relay ended for session {session_id}, worker continues");
+}
+
+/// Peek unconsumed messages from the consumer and forward them to the
+/// DataChannel, advancing the offset one-by-one.  Stops (and sets
+/// `prompt_active = true`) as soon as an interactive prompt is forwarded,
+/// leaving subsequent messages unconsumed in the topic log.
+async fn dc_drain_unconsumed(
+    consumer: &mut crate::state::TopicConsumer,
+    dc: &Arc<RTCDataChannel>,
+    prompt_active: &mut bool,
+) {
+    let peeked = consumer.peek().await;
+    for msg in peeked.iter() {
+        if msg.is_interactive_prompt() {
+            *prompt_active = true;
+        }
+        let _ = dc_send_msg(dc, msg).await;
+        consumer.advance(1);
+        if *prompt_active {
+            break;
+        }
+    }
 }
 
 /// Maximum payload size per DataChannel message.
