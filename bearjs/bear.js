@@ -390,6 +390,12 @@ export class BearClient {
     this.userPromptSelected = [];
     this.userPromptRendered = false;
 
+    // Active subagent tracking
+    this._activeSubagents = new Set();
+
+    // Deferred messages: queued when a picker is active, drained after picker resolves
+    this._deferredMsgs = [];
+
     // Interrupt warning state (double-Enter to interrupt LLM)
     this._interruptPendingText = null;
     this._interruptWarningStart = null;
@@ -581,7 +587,10 @@ export class BearClient {
         : '·····';
       const session = this._sessionName || 'bear';
 
-      const left = `${spinner}  ${session}`;
+      const subagentInfo = this._activeSubagents.size > 0
+        ? `  🔍${this._activeSubagents.size}`
+        : '';
+      const left = `${spinner}  ${session}${subagentInfo}`;
       const right = '↑↓ history  pgup/pgdn scroll  ctrl+c clear';
 
       const gap = Math.max(1, w - left.length - right.length - 2);
@@ -907,6 +916,18 @@ export class BearClient {
            (this.ws && this.ws.readyState === WebSocket.OPEN);
   }
 
+  _hasActivePicker() {
+    return this.inToolConfirm || this.inUserPrompt || this.inSessionPicker;
+  }
+
+  _drainDeferredMsgs() {
+    while (this._deferredMsgs.length > 0) {
+      if (this._hasActivePicker()) break;
+      const deferred = this._deferredMsgs.shift();
+      this._handleServerMessage(deferred);
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Server message dispatch
   // -------------------------------------------------------------------------
@@ -958,6 +979,11 @@ export class BearClient {
         break;
 
       case 'tool_request': {
+        // Defer if another picker is already active
+        if (this._hasActivePicker()) {
+          this._deferredMsgs.push(msg);
+          break;
+        }
         const tc = msg.tool_call;
         this._lastToolName = tc.name;
         this._lastToolArgs = tc.arguments;
@@ -1059,6 +1085,7 @@ export class BearClient {
           this._pushLine(label);
           this._pushLine('');
           this._fullRepaint();
+          this._drainDeferredMsgs();
         }
         break;
 
@@ -1077,6 +1104,7 @@ export class BearClient {
           this._pushLine(`${C.gray}  (resolved by another client)${C.reset}`);
           this._pushLine('');
           this._fullRepaint();
+          this._drainDeferredMsgs();
         }
         break;
       }
@@ -1115,6 +1143,11 @@ export class BearClient {
         break;
 
       case 'user_prompt':
+        // Defer if another picker is already active
+        if (this._hasActivePicker()) {
+          this._deferredMsgs.push(msg);
+          break;
+        }
         this.inUserPrompt = true;
         this.userPromptId = msg.prompt_id;
         this.userPromptOptions = msg.options;
@@ -1129,6 +1162,11 @@ export class BearClient {
         break;
 
       case 'task_plan': {
+        // Defer if another picker is already active
+        if (this._hasActivePicker()) {
+          this._deferredMsgs.push(msg);
+          break;
+        }
         // Show proposed task plan and enter confirmation mode
         this._pushLine('');
         this._pushLine(`${C.bold}${C.cyan}  📋 Proposed task plan:${C.reset}`);
@@ -1166,6 +1204,12 @@ export class BearClient {
       }
 
       case 'subagent_update': {
+        // Track active subagent count
+        if (msg.status === 'running') {
+          this._activeSubagents.add(msg.subagent_id);
+        } else if (msg.status === 'completed' || msg.status === 'failed') {
+          this._activeSubagents.delete(msg.subagent_id);
+        }
         const icons = { running: '🔍', completed: '✓', failed: '✗' };
         const colors = { running: C.cyan, completed: C.green, failed: C.red };
         const icon = icons[msg.status] || '·';
@@ -1464,6 +1508,7 @@ export class BearClient {
       this._sendJson({ type: 'user_prompt_response', prompt_id: this.userPromptId, selected });
     }
     this._fullRepaint();
+    this._drainDeferredMsgs();
   }
 
   // -------------------------------------------------------------------------
@@ -1527,6 +1572,7 @@ export class BearClient {
 
     this._sendJson({ type: 'tool_confirm', tool_call_id: tc.id, approved, always });
     this._fullRepaint();
+    this._drainDeferredMsgs();
   }
 
   _extractBaseCommand(toolCall) {

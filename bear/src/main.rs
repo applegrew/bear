@@ -562,8 +562,9 @@ fn dispatch_server_msg(
                 detail: detail.clone(),
             });
         }
-        ServerMessage::SubagentUpdate { description, status, detail, .. } => {
+        ServerMessage::SubagentUpdate { subagent_id, description, status, detail } => {
             let _ = render_tx.send(RenderCmd::SubagentUpdate {
+                subagent_id: subagent_id.clone(),
                 description: description.clone(),
                 status: status.clone(),
                 detail: detail.clone(),

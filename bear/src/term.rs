@@ -49,6 +49,7 @@ pub enum RenderCmd {
         detail: Option<String>,
     },
     SubagentUpdate {
+        subagent_id: String,
         description: String,
         status: String,
         detail: Option<String>,
@@ -401,6 +402,9 @@ struct TermState {
     interrupt_pending_text: Option<String>,
     /// When the interrupt warning was first shown (for the 6s countdown).
     interrupt_warning_start: Option<std::time::Instant>,
+
+    /// Track active subagent count by subagent_id.
+    active_subagents: std::collections::HashSet<String>,
 }
 
 /// Format a tool call into human-readable description lines for the card UI.
@@ -784,6 +788,7 @@ impl TermState {
             awaiting_input_echo: false,
             interrupt_pending_text: None,
             interrupt_warning_start: None,
+            active_subagents: std::collections::HashSet::new(),
         })
     }
 
@@ -1027,8 +1032,13 @@ impl TermState {
 
             let session = if self.session_name.is_empty() { "bear" } else { &self.session_name };
 
-            // Left: spinner + session
-            let left = format!("{spinner}  {session}");
+            // Left: spinner + session + subagent count
+            let subagent_info = if self.active_subagents.is_empty() {
+                String::new()
+            } else {
+                format!("  🔍{}", self.active_subagents.len())
+            };
+            let left = format!("{spinner}  {session}{subagent_info}");
             // Right: shortcuts
             let right = "↑↓ history  ctrl+c quit";
 
@@ -1541,7 +1551,13 @@ impl TermState {
                 self.push_line(&format!("  {} {}", color_fn(&format!("{icon} Task {task_id}")), a_gray(&detail_str)));
                 self.full_repaint();
             }
-            RenderCmd::SubagentUpdate { description, status, detail } => {
+            RenderCmd::SubagentUpdate { subagent_id, description, status, detail } => {
+                // Track active subagent count
+                match status.as_str() {
+                    "running" => { self.active_subagents.insert(subagent_id); }
+                    "completed" | "failed" => { self.active_subagents.remove(&subagent_id); }
+                    _ => {}
+                }
                 let icon = match status.as_str() {
                     "running" => "🔍",
                     "completed" => "✓",
