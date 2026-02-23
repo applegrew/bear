@@ -5,6 +5,14 @@
 const DEFAULT_HOST = '127.0.0.1:49321';
 const SERVER_URL = `http://${DEFAULT_HOST}`;
 
+// Remote relay mode: set these globals (e.g. from the public server) to enable
+// signaling via the relay instead of direct HTTP to bear-server.
+// When all three are set, bear.js uses relay signaling.
+const RELAY_URL = (typeof BEAR_RELAY_URL !== 'undefined') ? BEAR_RELAY_URL : null;
+const RELAY_JWT = (typeof BEAR_RELAY_JWT !== 'undefined') ? BEAR_RELAY_JWT : null;
+const RELAY_ROOM = (typeof BEAR_ROOM_ID !== 'undefined') ? BEAR_ROOM_ID : null;
+const IS_REMOTE = !!(RELAY_URL && RELAY_JWT && RELAY_ROOM);
+
 // STUN servers for NAT traversal
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -816,15 +824,25 @@ export class BearClient {
 
     this.pc.onicecandidate = (event) => {
       if (event.candidate && this._connId) {
-        fetch(`${SERVER_URL}/rtc/${sid}/ice/${this._connId}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            candidate: event.candidate.candidate,
-            sdp_mid: event.candidate.sdpMid,
-            sdp_mline_index: event.candidate.sdpMLineIndex,
-          }),
-        }).catch(() => {});
+        if (IS_REMOTE) {
+          // Remote mode: POST ICE candidates to relay
+          fetch(`${RELAY_URL}/room/${RELAY_ROOM}/ice/${this._connId}/client`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${RELAY_JWT}` },
+            body: JSON.stringify({ candidates: [event.candidate.candidate] }),
+          }).catch(() => {});
+        } else {
+          // Local mode: POST ICE candidates to bear-server
+          fetch(`${SERVER_URL}/rtc/${sid}/ice/${this._connId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              candidate: event.candidate.candidate,
+              sdp_mid: event.candidate.sdpMid,
+              sdp_mline_index: event.candidate.sdpMLineIndex,
+            }),
+          }).catch(() => {});
+        }
       }
     };
 
@@ -840,6 +858,9 @@ export class BearClient {
   }
 
   async _doSignaling(sid) {
+    if (IS_REMOTE) {
+      return this._doRelaySignaling();
+    }
     try {
       const offer = await this.pc.createOffer();
       await this.pc.setLocalDescription(offer);
@@ -870,6 +891,51 @@ export class BearClient {
     }
   }
 
+  async _doRelaySignaling() {
+    try {
+      const offer = await this.pc.createOffer();
+      await this.pc.setLocalDescription(offer);
+
+      // POST offer to relay
+      const offerRes = await fetch(`${RELAY_URL}/room/${RELAY_ROOM}/offer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${RELAY_JWT}` },
+        body: JSON.stringify({ sdp: offer.sdp }),
+      });
+
+      if (!offerRes.ok) {
+        this._pushLine(`${C.red}  Relay signaling failed: ${offerRes.status}${C.reset}`);
+        this._fullRepaint();
+        return;
+      }
+
+      const offerData = await offerRes.json();
+      this._connId = offerData.conn_id;
+
+      // Poll for answer from bear-server (via relay)
+      const deadline = Date.now() + 30000;
+      while (Date.now() < deadline) {
+        const ansRes = await fetch(`${RELAY_URL}/room/${RELAY_ROOM}/answer/${this._connId}`, {
+          headers: { 'Authorization': `Bearer ${RELAY_JWT}` },
+        });
+        if (ansRes.status === 200) {
+          const ansData = await ansRes.json();
+          await this.pc.setRemoteDescription(
+            new RTCSessionDescription({ type: 'answer', sdp: ansData.sdp })
+          );
+          this._startRelayIcePoll();
+          return;
+        }
+        await new Promise(r => setTimeout(r, 500));
+      }
+      this._pushLine(`${C.red}  Relay signaling timeout: no answer received${C.reset}`);
+      this._fullRepaint();
+    } catch (e) {
+      this._pushLine(`${C.red}  Relay signaling error: ${e.message}${C.reset}`);
+      this._fullRepaint();
+    }
+  }
+
   _startIcePoll(sid) {
     this._stopIcePoll();
     this._icePollTimer = setInterval(async () => {
@@ -886,6 +952,26 @@ export class BearClient {
             sdpMid: c.sdp_mid || null,
             sdpMLineIndex: c.sdp_mline_index ?? null,
           }));
+        }
+      } catch { /* ignore */ }
+    }, 200);
+    setTimeout(() => this._stopIcePoll(), 30000);
+  }
+
+  _startRelayIcePoll() {
+    this._stopIcePoll();
+    this._icePollTimer = setInterval(async () => {
+      if (!this._connId) return;
+      try {
+        const res = await fetch(`${RELAY_URL}/room/${RELAY_ROOM}/ice/${this._connId}/server`, {
+          headers: { 'Authorization': `Bearer ${RELAY_JWT}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        for (const c of data.candidates || []) {
+          if (typeof c === 'string') {
+            await this.pc.addIceCandidate(new RTCIceCandidate({ candidate: c }));
+          }
         }
       } catch { /* ignore */ }
     }, 200);

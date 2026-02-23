@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub use config::{AppConfig, ConfigFile, LlmProvider, config_path};
+pub use config::{AppConfig, ConfigFile, LlmProvider, RelayConfig, config_path, relay_path, server_pid_path};
 
 pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:49321";
 
@@ -154,6 +154,10 @@ pub enum ClientMessage {
     Interrupt,
     /// User approves or rejects a proposed task plan.
     TaskPlanResponse { plan_id: String, approved: bool },
+    /// Native client tells server to (re-)read relay.json and start polling.
+    RelayStart,
+    /// Native client tells server to stop relay polling for this run.
+    RelayStop,
     Ping,
 }
 
@@ -235,6 +239,13 @@ pub enum ServerMessage {
     Notice { text: String },
     Error { text: String },
     Thinking,
+    /// Relay health status broadcast to all connected clients.
+    RelayStatus {
+        /// One of: "connected", "backoff", "failed", "revoked", "disabled"
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
     Pong,
 }
 

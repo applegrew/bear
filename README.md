@@ -125,13 +125,131 @@ BEAR_LLM_PROVIDER=openai BEAR_OPENAI_URL=http://localhost:1234 BEAR_OPENAI_MODEL
 
 Open `html/index.html` in a browser to use the xterm.js-based terminal client (`bearjs/bear.js`). It connects to `bear-server` via WebRTC DataChannels with HTTP signaling, enabling NAT traversal.
 
+## Remote access (relay)
+
+Bear supports remote browser access via a three-tier signaling architecture:
+
+```
+                         Public Internet
+                              │
+Browser ◄──login──► Public Server ◄──HTTPS──► bear-server
+  (bear.js)        (auth + JWT)               (user's machine)
+                        │                          │
+                   internal net              HTTPS (JWT-gated)
+                        │                          │
+                        └─────► Relay ◄──────────┘
+                              (Docker)
+                           SQLite + HTTP
+                           mailbox
+```
+
+**Three tiers:**
+1. **Relay** (`bear-relay/`, built by us) — stateless HTTP signaling mailbox with SQLite persistence for rooms/signing keys. Dockerized.
+2. **Public server** (external, not built here) — user auth, invite codes, serves `bear.js`, mints JWTs.
+3. **Bear ecosystem** — native client (`bear`), `bear-server`, `bear.js`.
+
+Once signaling completes, the WebRTC DataChannel is **peer-to-peer** (browser ↔ bear-server) — the relay is only involved during signaling + ICE exchange.
+
+### Relay deployment
+
+```bash
+cd bear-relay
+
+# Docker Compose (recommended)
+docker compose up -d
+
+# Or manual Docker
+docker build -t bear-relay .
+docker run -d \
+  -p 8080:8080 \
+  -p 8081:8081 \
+  -v /path/on/host:/data \
+  -e PORT=8080 \
+  -e INTERNAL_PORT=8081 \
+  bear-relay
+```
+
+| Env var | Default | Description |
+|---|---|---|
+| `PORT` | `8080` | External API port (internet-facing, JWT-gated) |
+| `INTERNAL_PORT` | `8081` | Internal API port (no auth, internal network only) |
+| `DB_PATH` | `/data/relay.db` | SQLite database path |
+
+**Important:** The internal port (`8081`) must only be accessible from your internal network. The public server uses it to query signing keys and manage rooms.
+
+### Relay API reference
+
+**External routes** (JWT-gated, internet-facing on `PORT`):
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/pair` | Register a new room: `{ room_id, signing_key, invite_code }` |
+| `DELETE` | `/room/:room_id` | Revoke a room (requires Bearer JWT) |
+| `POST` | `/room/:room_id/offer` | Browser posts SDP offer → returns `{ conn_id }` |
+| `GET` | `/room/:room_id/offer` | Bear-server polls for pending offers |
+| `POST` | `/room/:room_id/answer/:conn_id` | Bear-server posts SDP answer |
+| `GET` | `/room/:room_id/answer/:conn_id` | Browser polls for the answer |
+| `POST` | `/room/:room_id/ice/:conn_id/:side` | Post ICE candidates (`side` = `server` or `client`) |
+| `GET` | `/room/:room_id/ice/:conn_id/:side` | Poll ICE candidates |
+
+**Internal routes** (no auth, on `INTERNAL_PORT`):
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/internal/rooms` | List all rooms (with pagination) |
+| `GET` | `/internal/room/:room_id` | Get room details including signing key |
+| `DELETE` | `/internal/room/:room_id` | Revoke a room (admin) |
+| `POST` | `/internal/invites` | Push invite codes: `{ codes: [...] }` |
+| `GET` | `/internal/invites` | List invite codes with status |
+
+### Public server contract
+
+The public server is an **external dependency** not built in this repo. It must:
+
+1. **Authenticate users** (accounts, login, sessions)
+2. **Generate invite codes** and push them to the relay via `POST /internal/invites`
+3. **Mint JWTs** for authenticated browser sessions by querying `GET /internal/room/:room_id` for the signing key, then signing a JWT with `{ room_id, iat }` using HS256
+4. **Serve `bear.js`** with relay config injected (e.g. `BEAR_RELAY_URL`, `BEAR_RELAY_JWT`, `BEAR_ROOM_ID` globals)
+5. **Provide a UI** for pairing status, invite code generation, and revocation
+
+### Remote access setup
+
+```bash
+# 1. Get an invite code from the public server
+# 2. Pair your bear-server with the relay
+bear --relay-pair <invite_code>
+
+# Subsequent starts: relay polling is automatic
+
+# Manage relay
+bear --disable-relay    # Persistently disable relay
+bear --enable-relay     # Re-enable relay
+bear --relay-revoke     # Revoke pairing
+```
+
+### Server control
+
+```bash
+bear --stop             # Stop the running bear-server
+bear --restart          # Restart the bear-server
+```
+
+| Flag | Stops server? | Starts server? | Launches client? |
+|---|---|---|---|
+| `--stop` | Yes | No | No |
+| `--restart` | Yes (if running) | Yes | No |
+| `--disable-relay` | Prompts if running | No | No |
+| `--enable-relay` | Prompts if running | No | No |
+| *(no flag)* | No | Auto-launch if needed | Yes |
+
 ## Project structure
 
 ```
 bear/
 ├── bear-core/      # Core logic: LLM, tools, prompts, config, shared types
-├── bear-server/    # Server: session management, LLM, tools, LSP, WebRTC
+├── bear-server/    # Server: session management, LLM, tools, LSP, WebRTC, relay polling
 ├── bear/           # Native terminal client (crossterm TUI)
-├── bearjs/         # Browser client (xterm.js TUI)
+├── bear-relay/     # Relay server (Deno + SQLite, Dockerized)
+├── bearjs/         # Browser client (xterm.js TUI, dual-mode signaling)
 └── html/           # Browser client HTML entry point
 ```

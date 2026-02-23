@@ -189,6 +189,7 @@ pub struct ServerState {
     pub rtc_peers: crate::rtc::RtcPeers,
     pub lsp_manager: Arc<crate::lsp::LspManager>,
     pub workspace_store: Arc<bear_core::workspace::WorkspaceStore>,
+    pub relay_controller: Arc<crate::relay::RelayController>,
 }
 
 #[derive(Debug, Clone)]

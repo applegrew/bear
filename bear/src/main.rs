@@ -27,6 +27,25 @@ struct Cli {
     session: Option<Uuid>,
     #[arg(long)]
     new_session: bool,
+
+    /// Stop the running bear-server (does not launch a client session)
+    #[arg(long)]
+    stop: bool,
+    /// Restart the bear-server (does not launch a client session)
+    #[arg(long)]
+    restart: bool,
+    /// Persistently disable relay polling
+    #[arg(long)]
+    disable_relay: bool,
+    /// Re-enable relay polling
+    #[arg(long)]
+    enable_relay: bool,
+    /// Pair with a relay server using an invite code
+    #[arg(long)]
+    relay_pair: Option<String>,
+    /// Revoke the current relay pairing
+    #[arg(long)]
+    relay_revoke: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -38,6 +57,34 @@ enum SessionResult {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // --- Signal flags: handle and exit early (no client session) ---
+
+    if cli.stop {
+        return server::stop_server().await;
+    }
+
+    if cli.restart {
+        return server::restart_server().await;
+    }
+
+    if cli.disable_relay {
+        let mut cfg = bear_core::ConfigFile::load();
+        cfg.relay_disabled = Some(true);
+        cfg.save().context("failed to save config")?;
+        eprintln!("  Relay disabled.");
+        server::prompt_restart_if_running().await?;
+        return Ok(());
+    }
+
+    if cli.enable_relay {
+        let mut cfg = bear_core::ConfigFile::load();
+        cfg.relay_disabled = None;
+        cfg.save().context("failed to save config")?;
+        eprintln!("  Relay enabled.");
+        server::prompt_restart_if_running().await?;
+        return Ok(());
+    }
 
     // Setup wizard (first-time only) + auto-launch server
     setup::ensure_config()?;
@@ -348,6 +395,26 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                             "Usage: /session name <session name> OR /session workdir <path>".into(),
                         ));
                     }
+                } else if line == "/relay" {
+                    // Local-only slash command — show relay status
+                    let relay_exists = bear_core::RelayConfig::exists();
+                    let cfg = bear_core::ConfigFile::load();
+                    let disabled = cfg.relay_disabled == Some(true);
+                    let status_msg = if disabled {
+                        "Relay: disabled (use `bear --enable-relay` to re-enable)".to_string()
+                    } else if relay_exists {
+                        if let Some(rc) = bear_core::RelayConfig::load() {
+                            format!(
+                                "Relay: configured\n  URL: {}\n  Room: {}\n  Use `bear --disable-relay` to disable",
+                                rc.relay_url, rc.room_id
+                            )
+                        } else {
+                            "Relay: relay.json exists but is invalid".to_string()
+                        }
+                    } else {
+                        "Relay: not configured (use `bear --relay-pair <invite_code>` to set up)".to_string()
+                    };
+                    let _ = render_tx.send(RenderCmd::Notice(status_msg));
                 } else if line == "/help" {
                     let command_lines = if slash_commands.is_empty() {
                         vec!["  (commands not loaded yet)".to_string()]
@@ -358,6 +425,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                     };
                     let mut help_lines = vec!["Commands:".to_string()];
                     help_lines.extend(command_lines);
+                    help_lines.push(format!("  {:<20} {}", "/relay", "Show relay status and config"));
                     help_lines.extend([
                         "",
                         "Tool confirmations:  (interactive picker)",
@@ -590,6 +658,13 @@ fn dispatch_server_msg(
         }
         ServerMessage::UserInput { text } => {
             let _ = render_tx.send(RenderCmd::UserInput { text: text.clone() });
+        }
+        ServerMessage::RelayStatus { status, detail } => {
+            let msg = match detail {
+                Some(d) => format!("Relay: {} ({})", status, d),
+                None => format!("Relay: {}", status),
+            };
+            let _ = render_tx.send(RenderCmd::Notice(msg));
         }
         ServerMessage::Pong => {}
     }

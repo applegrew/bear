@@ -46,11 +46,71 @@ pub struct ConfigFile {
     pub google_api_key: Option<String>,
     pub google_cx: Option<String>,
     pub brave_api_key: Option<String>,
+    pub relay_disabled: Option<bool>,
 }
 
 /// Returns the path to `~/.bear/config.json`.
 pub fn config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".bear").join("config.json"))
+}
+
+/// Returns the path to `~/.bear/relay.json`.
+pub fn relay_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".bear").join("relay.json"))
+}
+
+/// Returns the path to `~/.bear/server.pid`.
+pub fn server_pid_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".bear").join("server.pid"))
+}
+
+/// On-disk representation of `~/.bear/relay.json` — relay pairing credentials.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayConfig {
+    pub relay_url: String,
+    pub room_id: String,
+    pub signing_key: String,
+    pub jwt: String,
+}
+
+impl RelayConfig {
+    /// Read relay config from disk. Returns `None` if the file doesn't exist or is invalid.
+    pub fn load() -> Option<Self> {
+        let path = relay_path()?;
+        let contents = std::fs::read_to_string(&path).ok()?;
+        serde_json::from_str(&contents).ok()
+    }
+
+    /// Write relay config to disk, creating `~/.bear/` if needed.
+    pub fn save(&self) -> std::io::Result<()> {
+        let Some(path) = relay_path() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "could not determine home directory",
+            ));
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        std::fs::write(&path, json)
+    }
+
+    /// Delete the relay config file from disk.
+    pub fn delete() -> std::io::Result<()> {
+        if let Some(path) = relay_path() {
+            if path.exists() {
+                std::fs::remove_file(&path)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns true if the relay config file exists on disk.
+    pub fn exists() -> bool {
+        relay_path().map(|p| p.exists()).unwrap_or(false)
+    }
 }
 
 impl ConfigFile {

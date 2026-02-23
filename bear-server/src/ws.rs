@@ -834,6 +834,14 @@ async fn session_worker(
             ClientMessage::Ping => {
                 // Handled directly in handle_socket, should not reach here
             }
+            ClientMessage::RelayStart => {
+                tracing::info!("relay: start requested by client");
+                state.relay_controller.start(state.clone());
+            }
+            ClientMessage::RelayStop => {
+                tracing::info!("relay: stop requested by client");
+                state.relay_controller.stop();
+            }
         }
     }
 

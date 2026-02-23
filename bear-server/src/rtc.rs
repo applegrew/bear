@@ -289,6 +289,16 @@ pub async fn rtc_get_candidates(
 // DataChannel relay — mirrors handle_socket logic from ws.rs
 // ---------------------------------------------------------------------------
 
+/// Public entry point for relay module to hand off a DataChannel.
+pub async fn handle_relay_data_channel(
+    state: ServerState,
+    session_id: Uuid,
+    info: bear_core::SessionInfo,
+    dc: Arc<RTCDataChannel>,
+) {
+    handle_data_channel(state, session_id, info, dc).await;
+}
+
 async fn handle_data_channel(
     state: ServerState,
     session_id: Uuid,

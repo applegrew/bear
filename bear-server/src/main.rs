@@ -1,6 +1,7 @@
 mod llm;
 mod lsp;
 mod process;
+mod relay;
 mod rtc;
 mod state;
 mod tool_bridge;
@@ -39,6 +40,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let _lock = acquire_server_lock()?;
+    write_pid_file();
 
     let config = AppConfig::load();
     let (provider_url, provider_model) = match config.llm_provider {
@@ -65,7 +67,19 @@ async fn main() -> anyhow::Result<()> {
         rtc_peers: rtc::new_rtc_peers(),
         lsp_manager: Arc::new(lsp::LspManager::new()),
         workspace_store: Arc::new(bear_core::workspace::WorkspaceStore::new()),
+        relay_controller: Arc::new(relay::RelayController::new()),
     };
+
+    // Auto-start relay polling if relay.json exists and relay is not disabled
+    if bear_core::RelayConfig::exists() {
+        let cfg = bear_core::ConfigFile::load();
+        if cfg.relay_disabled != Some(true) {
+            tracing::info!("relay.json found — starting relay polling");
+            state.relay_controller.start(state.clone());
+        } else {
+            tracing::info!("relay.json found but relay is disabled in config");
+        }
+    }
 
     let app = Router::new()
         .route("/sessions", get(list_sessions).post(create_session))
@@ -81,9 +95,46 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("default client url: {DEFAULT_SERVER_URL}");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
 
+    // Graceful shutdown on SIGTERM/SIGINT: delete PID file, then exit
+    let server = axum::serve(listener, app);
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())?;
+        let mut sigint = signal(SignalKind::interrupt())?;
+        let graceful = server.with_graceful_shutdown(async move {
+            tokio::select! {
+                _ = sigterm.recv() => {},
+                _ = sigint.recv() => {},
+            }
+            tracing::info!("shutting down gracefully...");
+            cleanup_pid_file();
+        });
+        graceful.await?;
+    }
+    #[cfg(not(unix))]
+    {
+        server.await?;
+    }
+
+    cleanup_pid_file();
     Ok(())
+}
+
+fn write_pid_file() {
+    if let Some(path) = bear_core::server_pid_path() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, std::process::id().to_string());
+    }
+}
+
+fn cleanup_pid_file() {
+    if let Some(path) = bear_core::server_pid_path() {
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 fn acquire_server_lock() -> anyhow::Result<std::fs::File> {
