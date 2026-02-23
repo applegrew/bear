@@ -1,4 +1,6 @@
 mod menu;
+mod server;
+mod setup;
 mod term;
 
 use anyhow::Context;
@@ -36,6 +38,11 @@ enum SessionResult {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // Setup wizard (first-time only) + auto-launch server
+    setup::ensure_config()?;
+    server::ensure_server_running().await?;
+
     let server_url = cli
         .server_url
         .or_else(|| std::env::var("BEAR_SERVER_URL").ok())

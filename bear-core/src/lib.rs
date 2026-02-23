@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub use config::{AppConfig, LlmProvider};
+pub use config::{AppConfig, ConfigFile, LlmProvider, config_path};
 
 pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:49321";
 
