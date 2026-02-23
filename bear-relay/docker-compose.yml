@@ -4,8 +4,8 @@ services:
   bear-relay:
     build: .
     ports:
-      - "8080:8080"   # External API (internet-facing)
-      - "8081:8081"   # Internal API (internal network only)
+      - "8090:8080"   # External API (internet-facing)
+      - "8091:8081"   # Internal API (internal network only)
     volumes:
       - relay-data:/data
     environment:
