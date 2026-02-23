@@ -80,7 +80,14 @@ fn launch_server() -> Result<()> {
     let stderr_file = log_file.try_clone()
         .context("failed to clone log file handle")?;
 
-    let mut cmd = Command::new("bear-server");
+    // Resolve bear-server as a sibling of the current executable first,
+    // falling back to bare PATH lookup.
+    let server_bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("bear-server")))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| "bear-server".into());
+    let mut cmd = Command::new(server_bin);
     cmd.stdout(log_file).stderr(stderr_file);
 
     // On Unix, start a new session so the server survives client exit
