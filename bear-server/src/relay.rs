@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bear_core::{ConfigFile, RelayConfig, ServerMessage};
+use sha2::{Digest, Sha256};
 use tokio::sync::{watch, Mutex};
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
@@ -132,10 +133,27 @@ async fn relay_poll_loop(state: ServerState, mut cmd_rx: watch::Receiver<bool>) 
             break;
         }
 
+        // Build HTTP client: use pinned client if relay_tls_pin is set
+        let http_client = if let Some(ref pin) = relay_cfg.relay_tls_pin {
+            match crate::tls_pin::build_pinned_client(pin) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!("relay: failed to build pinned HTTP client: {e}");
+                    broadcast_all_sessions(
+                        &state,
+                        relay_status("error", Some(format!("TLS pin setup failed: {e}"))),
+                    )
+                    .await;
+                    break;
+                }
+            }
+        } else {
+            state.http_client.clone()
+        };
+
         // Poll for offers
         let poll_url = format!("{}/room/{}/offer", relay_cfg.relay_url, relay_cfg.room_id);
-        let result = state
-            .http_client
+        let result = http_client
             .get(&poll_url)
             .header("Authorization", format!("Bearer {}", relay_cfg.jwt))
             .timeout(Duration::from_secs(10))
@@ -200,6 +218,28 @@ async fn relay_poll_loop(state: ServerState, mut cmd_rx: watch::Receiver<bool>) 
                 }
             }
             Err(e) => {
+                let err_str = format!("{e}");
+
+                // Detect TLS SPKI pin mismatch — fatal disconnect
+                if err_str.contains("SPKI pin mismatch") {
+                    tracing::error!("relay: TLS certificate pin mismatch — disconnecting");
+                    broadcast_all_sessions(
+                        &state,
+                        relay_status(
+                            "pin_mismatch",
+                            Some(
+                                "The relay server's TLS certificate has changed. \
+                                 This could indicate a security issue. \
+                                 Re-pair with --relay-pair to accept the new certificate, \
+                                 or contact the relay operator."
+                                    .into(),
+                            ),
+                        ),
+                    )
+                    .await;
+                    break;
+                }
+
                 backoff_count = backoff_count.saturating_add(1);
                 let delay = backoff_delay(backoff_count, default_interval, max_backoff);
                 tracing::warn!(
@@ -256,6 +296,35 @@ async fn broadcast_all_sessions(state: &ServerState, msg: ServerMessage) {
     for bus in buses.values() {
         bus.topic.push(msg.clone()).await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// SAS verification code from DTLS fingerprints
+// ---------------------------------------------------------------------------
+
+fn extract_fingerprint(sdp: &str) -> Option<String> {
+    for line in sdp.lines() {
+        if let Some(rest) = line.strip_prefix("a=fingerprint:sha-256 ") {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
+}
+
+fn compute_sas(offer_sdp: &str, answer_sdp: &str) -> Option<String> {
+    let fp_offer = extract_fingerprint(offer_sdp)?;
+    let fp_answer = extract_fingerprint(answer_sdp)?;
+    let mut fps = [fp_offer, fp_answer];
+    fps.sort();
+    let input = format!("{}:{}", fps[0], fps[1]);
+    let hash = Sha256::digest(input.as_bytes());
+    // First 3 bytes → 6 hex chars, uppercase
+    Some(
+        hash.iter()
+            .take(3)
+            .map(|b| format!("{b:02X}"))
+            .collect::<String>(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -347,12 +416,21 @@ async fn handle_relay_offer(
     // When the remote peer creates a DataChannel, start relaying
     let relay_state = state.clone();
     let relay_info = info.clone();
+    let notify_conn_id = conn_id.clone();
     pc.on_data_channel(Box::new(move |dc| {
         let state = relay_state.clone();
         let sid = session_id;
         let info = relay_info.clone();
+        let cid = notify_conn_id.clone();
         Box::pin(async move {
             tracing::info!("relay: data channel '{}' opened for session {sid}", dc.label());
+            broadcast_all_sessions(
+                &state,
+                ServerMessage::Notice {
+                    text: format!("New remote browser connected ({})", cid),
+                },
+            )
+            .await;
             tokio::spawn(async move {
                 crate::rtc::handle_relay_data_channel(state, sid, info, dc).await;
             });
@@ -360,7 +438,7 @@ async fn handle_relay_offer(
     }));
 
     // Set remote description (browser's offer)
-    let offer = RTCSessionDescription::offer(sdp_offer).unwrap();
+    let offer = RTCSessionDescription::offer(sdp_offer.clone()).unwrap();
     if let Err(e) = pc.set_remote_description(offer).await {
         tracing::error!("relay: set_remote_description failed: {e}");
         return;
@@ -379,6 +457,18 @@ async fn handle_relay_offer(
     if let Err(e) = pc.set_local_description(answer).await {
         tracing::error!("relay: set_local_description failed: {e}");
         return;
+    }
+
+    // Compute and broadcast SAS verification code
+    if let Some(sas) = compute_sas(&sdp_offer, &sdp_answer) {
+        tracing::info!("relay: verification code {sas} (conn_id={conn_id})");
+        broadcast_all_sessions(
+            &state,
+            ServerMessage::Notice {
+                text: format!("Verification: {sas} (conn_id={conn_id})"),
+            },
+        )
+        .await;
     }
 
     // POST answer to relay

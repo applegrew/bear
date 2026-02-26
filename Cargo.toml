@@ -39,3 +39,11 @@ urlencoding = "2"
 webrtc = "0.17"
 lsp-types = "0.97"
 tempfile = "3"
+rsa = { version = "0.9", features = ["sha2"] }
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+pkcs8 = { version = "0.10", features = ["pem"] }
+rustls = "0.23"
+rustls-pki-types = "1"
+webpki-roots = "1"

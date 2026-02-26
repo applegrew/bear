@@ -4,6 +4,7 @@ mod process;
 mod relay;
 mod rtc;
 mod state;
+mod tls_pin;
 mod tool_bridge;
 mod tools;
 mod ws;
@@ -16,7 +17,7 @@ use axum::{
     Json, Router,
 };
 use bear_core::{
-    CreateSessionRequest, CreateSessionResponse, SessionListResponse, SessionStatus,
+    CreateSessionRequest, CreateSessionResponse, RelayConfig, SessionListResponse, SessionStatus,
     DEFAULT_SERVER_URL,
 };
 use chrono::Utc;
@@ -25,6 +26,12 @@ use std::{collections::HashMap, env, fs::OpenOptions, net::SocketAddr, sync::Arc
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
+
+use base64::Engine as _;
+use pkcs8::{EncodePrivateKey, EncodePublicKey};
+use rsa::pkcs1v15::SigningKey;
+use rsa::signature::{Signer, SignatureEncoding};
+use sha2::{Digest, Sha256};
 
 use llm::OllamaMessage;
 use state::{AppConfig, Session, ServerState, DEFAULT_BIND, LlmProvider};
@@ -87,6 +94,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/rtc/:session_id/offer", post(rtc::rtc_offer))
         .route("/rtc/:session_id/ice/:conn_id", post(rtc::rtc_add_ice))
         .route("/rtc/:session_id/candidates/:conn_id", post(rtc::rtc_get_candidates))
+        .route("/relay/pair", post(handle_relay_pair))
+        .route("/relay/revoke", post(handle_relay_revoke))
         .with_state(state)
         .layer(CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any));
 
@@ -156,6 +165,196 @@ fn acquire_server_lock() -> anyhow::Result<std::fs::File> {
         .map_err(|_| anyhow::anyhow!("bear-server already running (lock held)"))?;
 
     Ok(file)
+}
+
+// ---------------------------------------------------------------------------
+// Relay pairing handlers
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct RelayPairRequest {
+    relay_url: String,
+    invite_code: String,
+}
+
+async fn handle_relay_pair(
+    State(state): State<ServerState>,
+    Json(payload): Json<RelayPairRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match do_relay_pair(&state, payload).await {
+        Ok(room_id) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "room_id": room_id })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+async fn do_relay_pair(
+    state: &ServerState,
+    payload: RelayPairRequest,
+) -> anyhow::Result<String> {
+    // 1-3. Generate RSA-2048 keypair, export public key, hash invite code
+    //      (done in spawn_blocking because RSA keygen is CPU-heavy and
+    //       rsa types are not Send across await points)
+    let invite_code = payload.invite_code.clone();
+    let (pub_pem, priv_pem, room_id, hash_hex, jwt) =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let mut rng = rand::thread_rng();
+            let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048)
+                .map_err(|e| anyhow::anyhow!("RSA keygen failed: {e}"))?;
+            let public_key = private_key.to_public_key();
+
+            let pub_pem = public_key
+                .to_public_key_pem(pkcs8::LineEnding::LF)
+                .map_err(|e| anyhow::anyhow!("public key PEM export failed: {e}"))?;
+
+            let hash_hex = hex_sha256(invite_code.as_bytes());
+            let room_id = Uuid::new_v4().to_string();
+            let jwt = mint_rs256_jwt(&private_key, &room_id)?;
+
+            let priv_pem = private_key
+                .to_pkcs8_pem(pkcs8::LineEnding::LF)
+                .map_err(|e| anyhow::anyhow!("private key PEM export failed: {e}"))?;
+
+            Ok((pub_pem, priv_pem.to_string(), room_id, hash_hex, jwt))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("keygen task panicked: {e}"))??;
+
+    // 4. Capture relay TLS SPKI pin (only for HTTPS relays)
+    let relay_tls_pin = if payload.relay_url.starts_with("https://") {
+        match tls_pin::capture_spki_pin(&payload.relay_url).await {
+            Ok(pin) => {
+                tracing::info!("relay: captured TLS SPKI pin: {pin}");
+                Some(pin)
+            }
+            Err(e) => {
+                tracing::warn!("relay: failed to capture TLS pin (proceeding without): {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // 5. Call relay POST /pair
+    let pair_url = format!("{}/pair", payload.relay_url.trim_end_matches('/'));
+    let pair_body = serde_json::json!({
+        "room_id": room_id,
+        "signing_key": pub_pem,
+        "invite_code": hash_hex,
+    });
+    let resp = state
+        .http_client
+        .post(&pair_url)
+        .json(&pair_body)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("relay /pair request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("relay /pair returned {status}: {body}"));
+    }
+
+    // 6. Save relay.json
+    let relay_cfg = RelayConfig {
+        relay_url: payload.relay_url,
+        room_id: room_id.clone(),
+        private_key_pem: priv_pem,
+        jwt,
+        relay_tls_pin,
+    };
+    relay_cfg
+        .save()
+        .map_err(|e| anyhow::anyhow!("failed to save relay.json: {e}"))?;
+
+    // 6. Start relay polling
+    tracing::info!("relay: paired successfully, room_id={room_id}");
+    state.relay_controller.start(state.clone());
+
+    Ok(room_id)
+}
+
+fn hex_sha256(data: &[u8]) -> String {
+    let hash = Sha256::digest(data);
+    hash.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn mint_rs256_jwt(
+    private_key: &rsa::RsaPrivateKey,
+    room_id: &str,
+) -> anyhow::Result<String> {
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let header = serde_json::json!({ "alg": "RS256", "typ": "JWT" });
+    let header_b64 = b64.encode(serde_json::to_vec(&header)?);
+
+    let now = chrono::Utc::now().timestamp();
+    let payload = serde_json::json!({ "room_id": room_id, "iat": now });
+    let payload_b64 = b64.encode(serde_json::to_vec(&payload)?);
+
+    let signing_input = format!("{header_b64}.{payload_b64}");
+
+    let signing_key = SigningKey::<Sha256>::new(private_key.clone());
+    let signature = signing_key.sign(signing_input.as_bytes());
+    let sig_b64 = b64.encode(signature.to_bytes());
+
+    Ok(format!("{signing_input}.{sig_b64}"))
+}
+
+async fn handle_relay_revoke(
+    State(state): State<ServerState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match do_relay_revoke(&state).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+async fn do_relay_revoke(state: &ServerState) -> anyhow::Result<()> {
+    let relay_cfg = RelayConfig::load()
+        .ok_or_else(|| anyhow::anyhow!("no relay.json found — not currently paired"))?;
+
+    // Call relay POST /room/:room_id/revoke with JWT auth
+    let revoke_url = format!(
+        "{}/room/{}/revoke",
+        relay_cfg.relay_url.trim_end_matches('/'),
+        relay_cfg.room_id
+    );
+    let resp = state
+        .http_client
+        .post(&revoke_url)
+        .header("Authorization", format!("Bearer {}", relay_cfg.jwt))
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("relay /revoke request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        tracing::warn!("relay: revoke returned {status}: {body} — deleting local config anyway");
+    }
+
+    // Delete relay.json and stop polling
+    let _ = RelayConfig::delete();
+    state.relay_controller.stop();
+    tracing::info!("relay: pairing revoked");
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

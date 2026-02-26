@@ -2,8 +2,7 @@
 // Two HTTP listeners: external (JWT-gated) and internal (no auth)
 
 import { DB } from "https://deno.land/x/sqlite@v3.9.1/mod.ts";
-import { create, verify } from "https://deno.land/x/djwt@v3.0.2/mod.ts";
-import { decode } from "https://deno.land/x/djwt@v3.0.2/mod.ts";
+// djwt removed — RS256 verification uses native crypto.subtle
 
 // ---------------------------------------------------------------------------
 // Config
@@ -33,9 +32,9 @@ db.execute(`
 `);
 db.execute(`
   CREATE TABLE IF NOT EXISTS invite_codes (
-    code        TEXT PRIMARY KEY,
+    code_hash   TEXT PRIMARY KEY,
     created_at  INTEGER NOT NULL,
-    used        INTEGER NOT NULL DEFAULT 0
+    expires_at  INTEGER NOT NULL
   )
 `);
 
@@ -73,6 +72,12 @@ setInterval(() => {
   }
 }, 10_000);
 
+// Periodic cleanup of expired invite codes
+setInterval(() => {
+  const now = Math.floor(Date.now() / 1000);
+  db.query("DELETE FROM invite_codes WHERE expires_at < ?", [now]);
+}, 60_000);
+
 // Periodic room pruning (30 days no poll)
 setInterval(() => {
   const cutoff = Math.floor(Date.now() / 1000) - ROOM_PRUNE_DAYS * 86400;
@@ -105,29 +110,44 @@ function recordAuthFailure(ip) {
 // JWT helpers
 // ---------------------------------------------------------------------------
 
-async function importKey(signingKeyBase64) {
-  const raw = Uint8Array.from(atob(signingKeyBase64), (c) => c.charCodeAt(0));
-  return await crypto.subtle.importKey(
-    "raw",
-    raw,
-    { name: "HMAC", hash: "SHA-256" },
+async function importPublicKey(publicKeyPem) {
+  const pemBody = publicKeyPem
+    .replace(/-----BEGIN PUBLIC KEY-----/, "")
+    .replace(/-----END PUBLIC KEY-----/, "")
+    .replace(/\s/g, "");
+  const der = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
+  return crypto.subtle.importKey(
+    "spki",
+    der,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
     false,
-    ["sign", "verify"]
+    ["verify"]
   );
+}
+
+function base64UrlDecode(str) {
+  const padded = str.replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(padded), (c) => c.charCodeAt(0));
 }
 
 async function verifyJwt(authHeader, roomId) {
   if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
   const token = authHeader.slice(7);
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
 
   // Look up room
   const rows = db.query("SELECT signing_key FROM rooms WHERE room_id = ?", [roomId]);
   if (rows.length === 0) return null;
-  const signingKeyBase64 = rows[0][0];
+  const publicKeyPem = rows[0][0];
 
   try {
-    const key = await importKey(signingKeyBase64);
-    const payload = await verify(token, key);
+    const key = await importPublicKey(publicKeyPem);
+    const data = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
+    const sig = base64UrlDecode(parts[2]);
+    const valid = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, sig, data);
+    if (!valid) return null;
+    const payload = JSON.parse(new TextDecoder().decode(base64UrlDecode(parts[1])));
     if (payload.room_id !== roomId) return null;
     return payload;
   } catch {
@@ -224,21 +244,21 @@ async function handlePair(req) {
     return text("missing required fields: room_id, signing_key, invite_code", 400);
   }
 
-  // Validate invite code
+  // Validate invite code (must exist and not expired)
+  const now = Math.floor(Date.now() / 1000);
   const rows = db.query(
-    "SELECT used FROM invite_codes WHERE code = ?",
-    [invite_code]
+    "SELECT 1 FROM invite_codes WHERE code_hash = ? AND expires_at > ?",
+    [invite_code, now]
   );
-  if (rows.length === 0) return json({ error: "invalid invite code" }, 403);
-  if (rows[0][0] === 1) return json({ error: "invite code already used" }, 403);
+  if (rows.length === 0) return json({ error: "invalid or expired invite code" }, 403);
 
-  // Consume invite code and create room (transaction)
+  // Burn invite code and create room (transaction)
   db.execute("BEGIN");
   try {
-    db.query("UPDATE invite_codes SET used = 1 WHERE code = ?", [invite_code]);
+    db.query("DELETE FROM invite_codes WHERE code_hash = ?", [invite_code]);
     db.query(
       "INSERT OR REPLACE INTO rooms (room_id, signing_key, created_at) VALUES (?, ?, ?)",
-      [room_id, signing_key, Math.floor(Date.now() / 1000)]
+      [room_id, signing_key, now]
     );
     db.execute("COMMIT");
   } catch (e) {
@@ -467,12 +487,13 @@ async function handlePushInvites(req) {
   }
 
   const now = Math.floor(Date.now() / 1000);
+  const expires_at = now + 600; // 10 minutes TTL
   db.execute("BEGIN");
   try {
     for (const code of codes) {
       db.query(
-        "INSERT OR IGNORE INTO invite_codes (code, created_at) VALUES (?, ?)",
-        [String(code), now]
+        "INSERT OR IGNORE INTO invite_codes (code_hash, created_at, expires_at) VALUES (?, ?, ?)",
+        [String(code), now, expires_at]
       );
     }
     db.execute("COMMIT");
@@ -488,13 +509,13 @@ function handleListInvites(url) {
   const limit = parseInt(url.searchParams.get("limit") ?? "100");
   const offset = parseInt(url.searchParams.get("offset") ?? "0");
   const rows = db.query(
-    "SELECT code, created_at, used FROM invite_codes ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    "SELECT code_hash, created_at, expires_at FROM invite_codes ORDER BY created_at DESC LIMIT ? OFFSET ?",
     [limit, offset]
   );
-  const invites = rows.map(([code, created_at, used]) => ({
-    code,
+  const invites = rows.map(([code_hash, created_at, expires_at]) => ({
+    code_hash,
     created_at,
-    used: used === 1,
+    expires_at,
   }));
   return json(invites);
 }

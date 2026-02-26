@@ -9,7 +9,7 @@ It does **not** proxy session traffic after connection establishment.
 
 ### Responsibilities
 
-- Persist room credentials (`room_id`, `signing_key`) and invite codes in SQLite.
+- Persist room credentials (`room_id`, RSA public key PEM) and invite code hashes in SQLite.
 - Accept pairing requests from `bear-server` using invite codes.
 - Store short-lived SDP/ICE signaling messages in memory.
 - Expose two HTTP surfaces:
@@ -39,28 +39,29 @@ Tables:
 
 1. `rooms`
    - `room_id TEXT PRIMARY KEY`
-   - `signing_key TEXT NOT NULL`
+   - `signing_key TEXT NOT NULL` — RSA public key in SPKI PEM format
    - `created_at INTEGER NOT NULL`
    - `last_poll INTEGER`
 2. `invite_codes`
-   - `code TEXT PRIMARY KEY`
-   - `room_id TEXT`
+   - `code_hash TEXT PRIMARY KEY` — SHA-256 hex hash of the invite code
    - `created_at INTEGER NOT NULL`
-   - `used INTEGER NOT NULL DEFAULT 0`
-
-Startup migration attempts `ALTER TABLE invite_codes ADD COLUMN room_id TEXT` for older DBs.
+   - `expires_at INTEGER NOT NULL` — Unix timestamp; code is invalid after this time
 
 ### Auth and security model
 
 - External room routes require `Authorization: Bearer <jwt>`.
-- JWT verification:
-  1. look up `signing_key` from `rooms` by `room_id`
-  2. verify HS256 token signature
+- JWT verification (RS256):
+  1. look up RSA public key PEM from `rooms` by `room_id`
+  2. import as SPKI key, verify RS256 signature via `crypto.subtle`
   3. require token claim `room_id` to match route room
 - Per-IP auth-failure rate limiting:
   - window: 60s
   - max failures: 5
   - then `429 rate limited`
+- **Invite code security:**
+  - codes are stored as SHA-256 hashes (plaintext never reaches the relay)
+  - each code has a 10-minute TTL (`expires_at`)
+  - codes are burned on use (deleted from the DB in the pairing transaction)
 
 ### Pairing and signaling flows
 
@@ -69,19 +70,16 @@ Startup migration attempts `ALTER TABLE invite_codes ADD COLUMN room_id TEXT` fo
 Request body:
 
 ```json
-{ "signing_key": "<base64>", "invite_code": "<code>" }
+{ "room_id": "<uuid>", "signing_key": "<RSA public key PEM>", "invite_code": "<SHA-256 hex hash>" }
 ```
 
 Flow:
 
-1. Validate invite code in `invite_codes`.
-2. Ensure invite is unused and has `room_id` assigned.
-3. Transaction:
-   - mark invite as used
-   - insert/replace room with provided signing key
-4. Return `{ "ok": true, "room_id": "..." }`.
-
-Note: pairing requires invite codes to be room-bound (`room_id` present).
+1. Validate `invite_code` hash exists in `invite_codes` and `expires_at > now`.
+2. Transaction:
+   - burn (delete) the invite code row
+   - insert/replace room with provided `room_id` and public key PEM
+3. Return `{ "ok": true }`.
 
 #### Offer/answer/ICE
 
@@ -101,6 +99,7 @@ ICE candidates are consumed on read (`GET` clears returned candidates).
 ### Background maintenance
 
 - Signaling TTL cleanup every 10 seconds.
+- Expired invite code cleanup every 60 seconds (deletes rows where `expires_at < now`).
 - Room pruning every hour:
   - delete rooms with `last_poll` older than 30 days.
 
@@ -123,10 +122,10 @@ ICE candidates are consumed on read (`GET` clears returned candidates).
 - `GET /internal/room/:room_id`
 - `DELETE /internal/room/:room_id`
 - `POST /internal/invites`
-  - accepts either:
-    - `{ "invites": [{ "code": "...", "room_id": "..." }] }` (preferred)
-    - `{ "codes": ["..."] }` (legacy)
+  - accepts `{ "codes": ["<sha256-hex-hash>", ...] }`
+  - each code is stored with a 10-minute TTL
 - `GET /internal/invites`
+  - returns `[{ code_hash, created_at, expires_at }, ...]`
 
 ## Podman build
 

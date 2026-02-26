@@ -96,6 +96,48 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string());
     let base_url = Url::parse(&server_url).context("invalid server URL")?;
 
+    // --- Relay pair/revoke: talk to bear-server, then exit ---
+
+    if let Some(invite_code) = cli.relay_pair {
+        let relay_url = std::env::var("BEAR_RELAY_URL")
+            .unwrap_or_else(|_| "https://bear.applegrew.com".to_string());
+        let http = reqwest::Client::new();
+        let res = http
+            .post(format!("{}/relay/pair", server_url))
+            .json(&serde_json::json!({ "relay_url": relay_url, "invite_code": invite_code }))
+            .send()
+            .await
+            .context("failed to reach bear-server")?;
+        let body: serde_json::Value = res.json().await.context("invalid response from bear-server")?;
+        if body.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+            let room_id = body["room_id"].as_str().unwrap_or("unknown");
+            eprintln!("  Paired with relay successfully.");
+            eprintln!("  Room ID: {room_id}");
+            eprintln!("  Relay URL: {relay_url}");
+        } else {
+            let err = body["error"].as_str().unwrap_or("unknown error");
+            eprintln!("  Pairing failed: {err}");
+        }
+        return Ok(());
+    }
+
+    if cli.relay_revoke {
+        let http = reqwest::Client::new();
+        let res = http
+            .post(format!("{}/relay/revoke", server_url))
+            .send()
+            .await
+            .context("failed to reach bear-server")?;
+        let body: serde_json::Value = res.json().await.context("invalid response from bear-server")?;
+        if body.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+            eprintln!("  Relay pairing revoked.");
+        } else {
+            let err = body["error"].as_str().unwrap_or("unknown error");
+            eprintln!("  Revoke failed: {err}");
+        }
+        return Ok(());
+    }
+
     install_signal_handlers()?;
 
     let http_client = reqwest::Client::new();

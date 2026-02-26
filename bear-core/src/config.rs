@@ -69,8 +69,10 @@ pub fn server_pid_path() -> Option<PathBuf> {
 pub struct RelayConfig {
     pub relay_url: String,
     pub room_id: String,
-    pub signing_key: String,
+    pub private_key_pem: String,
     pub jwt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_tls_pin: Option<String>,
 }
 
 impl RelayConfig {

@@ -884,6 +884,7 @@ export class BearClient {
         new RTCSessionDescription({ type: 'answer', sdp: data.sdp })
       );
 
+      await this._showSasCode();
       this._startIcePoll(sid);
     } catch (e) {
       this._pushLine(`${C.red}  Signaling error: ${e.message}${C.reset}`);
@@ -923,6 +924,7 @@ export class BearClient {
           await this.pc.setRemoteDescription(
             new RTCSessionDescription({ type: 'answer', sdp: ansData.sdp })
           );
+          await this._showSasCode();
           this._startRelayIcePoll();
           return;
         }
@@ -934,6 +936,33 @@ export class BearClient {
       this._pushLine(`${C.red}  Relay signaling error: ${e.message}${C.reset}`);
       this._fullRepaint();
     }
+  }
+
+  async _showSasCode() {
+    try {
+      const localSdp = this.pc.localDescription?.sdp;
+      const remoteSdp = this.pc.remoteDescription?.sdp;
+      if (!localSdp || !remoteSdp) return;
+
+      const extractFp = (sdp) => {
+        const m = sdp.match(/a=fingerprint:sha-256 ([^\r\n]+)/);
+        return m ? m[1].trim() : null;
+      };
+      const localFp = extractFp(localSdp);
+      const remoteFp = extractFp(remoteSdp);
+      if (!localFp || !remoteFp) return;
+
+      const sorted = [localFp, remoteFp].sort();
+      const input = new TextEncoder().encode(sorted[0] + ':' + sorted[1]);
+      const hash = await crypto.subtle.digest('SHA-256', input);
+      const bytes = new Uint8Array(hash);
+      const sas = [bytes[0], bytes[1], bytes[2]]
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('')
+        .toUpperCase();
+      this._pushLine(`  Verification: ${sas}`);
+      this._fullRepaint();
+    } catch { /* ignore */ }
   }
 
   _startIcePoll(sid) {

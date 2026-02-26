@@ -144,11 +144,20 @@ Browser ◄──login──► Public Server ◄──HTTPS──► bear-serve
 ```
 
 **Three tiers:**
-1. **Relay** (`bear-relay/`, built by us) — stateless HTTP signaling mailbox with SQLite persistence for rooms/signing keys. Dockerized.
+1. **Relay** (`bear-relay/`, built by us) — stateless HTTP signaling mailbox with SQLite persistence for rooms/public keys. Dockerized.
 2. **Public server** (external, not built here) — user auth, invite codes, serves `bear.js`, mints JWTs.
 3. **Bear ecosystem** — native client (`bear`), `bear-server`, `bear.js`.
 
 Once signaling completes, the WebRTC DataChannel is **peer-to-peer** (browser ↔ bear-server) — the relay is only involved during signaling + ICE exchange.
+
+### Security model
+
+- **Asymmetric JWTs (RS256)** — `bear-server` generates an RSA-2048 keypair at pairing time. The public key is sent to the relay; the private key stays local. JWTs are signed with the private key and verified by the relay using the public key.
+- **Hashed invite codes** — invite codes are SHA-256 hashed before transmission. The relay only ever stores hashes, never plaintext codes.
+- **Credential lifecycle** — invite codes have a 10-minute TTL and are burned (deleted) on first use.
+- **TLS SPKI pinning** — during pairing, `bear-server` captures the relay's TLS certificate SPKI fingerprint and saves it. On every subsequent poll, the pin is enforced. A mismatch is treated as a fatal security event: polling stops and the user is notified.
+- **Connection notifications** — when a remote browser connects via relay, a notice is broadcast to all native clients.
+- **WebRTC fingerprint verification** — both `bear-server` and the browser compute a 6-character SAS verification code from the DTLS fingerprints in the SDP offer/answer. Users can visually compare these codes to confirm the connection is not intercepted.
 
 ### Relay deployment
 
@@ -183,7 +192,7 @@ docker run -d \
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/pair` | Register a new room: `{ room_id, signing_key, invite_code }` |
+| `POST` | `/pair` | Register a new room: `{ room_id, signing_key (RSA public key PEM), invite_code (SHA-256 hex hash) }` |
 | `DELETE` | `/room/:room_id` | Revoke a room (requires Bearer JWT) |
 | `POST` | `/room/:room_id/offer` | Browser posts SDP offer → returns `{ conn_id }` |
 | `GET` | `/room/:room_id/offer` | Bear-server polls for pending offers |
@@ -197,18 +206,18 @@ docker run -d \
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/internal/rooms` | List all rooms (with pagination) |
-| `GET` | `/internal/room/:room_id` | Get room details including signing key |
+| `GET` | `/internal/room/:room_id` | Get room details including public key PEM |
 | `DELETE` | `/internal/room/:room_id` | Revoke a room (admin) |
-| `POST` | `/internal/invites` | Push invite codes: `{ codes: [...] }` |
-| `GET` | `/internal/invites` | List invite codes with status |
+| `POST` | `/internal/invites` | Push invite code hashes: `{ codes: ["<sha256-hex>", ...] }` (10-min TTL) |
+| `GET` | `/internal/invites` | List invite codes `[{ code_hash, created_at, expires_at }]` |
 
 ### Public server contract
 
 The public server is an **external dependency** not built in this repo. It must:
 
 1. **Authenticate users** (accounts, login, sessions)
-2. **Generate invite codes** and push them to the relay via `POST /internal/invites`
-3. **Mint JWTs** for authenticated browser sessions by querying `GET /internal/room/:room_id` for the signing key, then signing a JWT with `{ room_id, iat }` using HS256
+2. **Generate invite codes**, SHA-256 hash them, and push the hashes to the relay via `POST /internal/invites`
+3. **Mint JWTs** for authenticated browser sessions by querying `GET /internal/room/:room_id` for the public key PEM, then signing a JWT with `{ room_id, iat }` using **RS256** (the room's RSA public key)
 4. **Serve `bear.js`** with relay config injected (e.g. `BEAR_RELAY_URL`, `BEAR_RELAY_JWT`, `BEAR_ROOM_ID` globals)
 5. **Provide a UI** for pairing status, invite code generation, and revocation
 
@@ -216,8 +225,11 @@ The public server is an **external dependency** not built in this repo. It must:
 
 ```bash
 # 1. Get an invite code from the public server
-# 2. Pair your bear-server with the relay
+# 2. Pair your bear-server with the relay (default: https://bear.applegrew.com)
 bear --relay-pair <invite_code>
+
+# Override relay URL via env var
+BEAR_RELAY_URL=https://my-relay.example.com bear --relay-pair <invite_code>
 
 # Subsequent starts: relay polling is automatic
 
@@ -226,6 +238,8 @@ bear --disable-relay    # Persistently disable relay
 bear --enable-relay     # Re-enable relay
 bear --relay-revoke     # Revoke pairing
 ```
+
+Pairing generates an RSA-2048 keypair, hashes the invite code, registers with the relay, captures the relay's TLS SPKI pin, and saves credentials to `~/.bear/relay.json`.
 
 ### Server control
 
