@@ -5,8 +5,8 @@ use tokio::sync::{mpsc, Notify, RwLock};
 use uuid::Uuid;
 
 // Re-export types from bear-core that bear-server code uses directly
-pub use bear_core::{AppConfig, LlmProvider, Session, PendingToolCall};
-pub use bear_core::prompts::{system_prompt, subagent_system_prompt};
+pub use bear_core::prompts::{subagent_system_prompt, system_prompt};
+pub use bear_core::{AppConfig, LlmProvider, PendingToolCall, Session};
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:49321";
 
@@ -209,7 +209,9 @@ mod tests {
     use std::time::Duration;
 
     fn notice(text: &str) -> ServerMessage {
-        ServerMessage::Notice { text: text.to_string() }
+        ServerMessage::Notice {
+            text: text.to_string(),
+        }
     }
 
     // -- TopicLog basic operations ------------------------------------------
@@ -338,10 +340,7 @@ mod tests {
 
         // Push and immediately try to consume — the notification must not be lost
         log.push(notice("b")).await;
-        let result = tokio::time::timeout(
-            Duration::from_millis(200),
-            consumer.next_batch(),
-        ).await;
+        let result = tokio::time::timeout(Duration::from_millis(200), consumer.next_batch()).await;
         assert!(result.is_ok(), "consumer should not hang (lost wakeup)");
         assert_eq!(result.unwrap().len(), 1);
     }

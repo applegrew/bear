@@ -30,11 +30,11 @@ use uuid::Uuid;
 use base64::Engine as _;
 use pkcs8::{EncodePrivateKey, EncodePublicKey};
 use rsa::pkcs1v15::SigningKey;
-use rsa::signature::{Signer, SignatureEncoding};
+use rsa::signature::{SignatureEncoding, Signer};
 use sha2::{Digest, Sha256};
 
 use llm::OllamaMessage;
-use state::{AppConfig, Session, ServerState, DEFAULT_BIND, LlmProvider};
+use state::{AppConfig, LlmProvider, ServerState, Session, DEFAULT_BIND};
 
 // ---------------------------------------------------------------------------
 // main
@@ -93,11 +93,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/ws/:session_id", get(ws_handler))
         .route("/rtc/:session_id/offer", post(rtc::rtc_offer))
         .route("/rtc/:session_id/ice/:conn_id", post(rtc::rtc_add_ice))
-        .route("/rtc/:session_id/candidates/:conn_id", post(rtc::rtc_get_candidates))
+        .route(
+            "/rtc/:session_id/candidates/:conn_id",
+            post(rtc::rtc_get_candidates),
+        )
         .route("/relay/pair", post(handle_relay_pair))
         .route("/relay/revoke", post(handle_relay_revoke))
         .with_state(state)
-        .layer(CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any));
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_headers(Any)
+                .allow_methods(Any),
+        );
 
     let addr: SocketAddr = DEFAULT_BIND.parse()?;
     tracing::info!("bear-server running on http://{addr}");
@@ -193,10 +201,7 @@ async fn handle_relay_pair(
     }
 }
 
-async fn do_relay_pair(
-    state: &ServerState,
-    payload: RelayPairRequest,
-) -> anyhow::Result<String> {
+async fn do_relay_pair(state: &ServerState, payload: RelayPairRequest) -> anyhow::Result<String> {
     // 1-3. Generate RSA-2048 keypair, export public key, hash invite code
     //      (done in spawn_blocking because RSA keygen is CPU-heavy and
     //       rsa types are not Send across await points)
@@ -287,10 +292,7 @@ fn hex_sha256(data: &[u8]) -> String {
     hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn mint_rs256_jwt(
-    private_key: &rsa::RsaPrivateKey,
-    room_id: &str,
-) -> anyhow::Result<String> {
+fn mint_rs256_jwt(private_key: &rsa::RsaPrivateKey, room_id: &str) -> anyhow::Result<String> {
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     let header = serde_json::json!({ "alg": "RS256", "typ": "JWT" });
@@ -313,10 +315,7 @@ async fn handle_relay_revoke(
     State(state): State<ServerState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     match do_relay_revoke(&state).await {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "ok": true })),
-        ),
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -363,7 +362,10 @@ async fn do_relay_revoke(state: &ServerState) -> anyhow::Result<()> {
 
 async fn list_sessions(State(state): State<ServerState>) -> impl IntoResponse {
     let sessions = state.sessions.read().await;
-    let items = sessions.values().map(|session| session.info.clone()).collect();
+    let items = sessions
+        .values()
+        .map(|session| session.info.clone())
+        .collect();
     Json(SessionListResponse { sessions: items })
 }
 
@@ -371,14 +373,12 @@ async fn create_session(
     State(state): State<ServerState>,
     Json(payload): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
-    let cwd = payload
-        .cwd
-        .unwrap_or_else(|| {
-            env::current_dir()
-                .ok()
-                .and_then(|p| p.to_str().map(|s| s.to_string()))
-                .unwrap_or_else(|| ".".to_string())
-        });
+    let cwd = payload.cwd.unwrap_or_else(|| {
+        env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| ".".to_string())
+    });
 
     // Check if any LSP server is available on $PATH
     let lsp_available = lsp::any_lsp_server_available();
@@ -391,7 +391,9 @@ async fn create_session(
     // Build system prompt, optionally enriched with README.md from the working directory
     let mut system_content = state::system_prompt(lsp_available);
     if let Some(readme) = read_readme_from_dir(&cwd) {
-        system_content.push_str("\n\n## Project README\n\nThe working directory contains the following README.md:\n\n");
+        system_content.push_str(
+            "\n\n## Project README\n\nThe working directory contains the following README.md:\n\n",
+        );
         system_content.push_str(&readme);
     }
 
@@ -428,7 +430,10 @@ async fn create_session(
     let info = session.info.clone();
     state.sessions.write().await.insert(info.id, session);
 
-    (StatusCode::CREATED, Json(CreateSessionResponse { session: info }))
+    (
+        StatusCode::CREATED,
+        Json(CreateSessionResponse { session: info }),
+    )
 }
 
 // ---------------------------------------------------------------------------

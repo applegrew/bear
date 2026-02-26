@@ -3,12 +3,11 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use lsp_types::{
-    ClientCapabilities, DocumentSymbolParams, DocumentSymbolResponse,
-    Hover, HoverParams, InitializeParams, InitializedParams, Location,
-    PartialResultParams, Position, PublishDiagnosticsParams, ReferenceContext,
-    ReferenceParams, TextDocumentIdentifier, TextDocumentPositionParams, Uri,
-    WorkDoneProgressParams, DidOpenTextDocumentParams, TextDocumentItem,
-    DocumentSymbol, SymbolInformation, SymbolKind,
+    ClientCapabilities, DidOpenTextDocumentParams, DocumentSymbol, DocumentSymbolParams,
+    DocumentSymbolResponse, Hover, HoverParams, InitializeParams, InitializedParams, Location,
+    PartialResultParams, Position, PublishDiagnosticsParams, ReferenceContext, ReferenceParams,
+    SymbolInformation, SymbolKind, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, Uri, WorkDoneProgressParams,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +17,9 @@ fn file_path_to_uri(path: &str) -> Result<Uri, String> {
         return Err(format!("Path must be absolute: {path}"));
     }
     let uri_str = format!("file://{path}");
-    uri_str.parse::<Uri>().map_err(|e| format!("Invalid URI: {e}"))
+    uri_str
+        .parse::<Uri>()
+        .map_err(|e| format!("Invalid URI: {e}"))
 }
 
 /// Convert a file:// URI string back to a file path.
@@ -106,10 +107,7 @@ struct LspClient {
 
 impl LspClient {
     /// Spawn an LSP server and perform the initialize handshake.
-    async fn spawn(
-        cmd_line: &str,
-        workspace_root: &str,
-    ) -> Result<Self, String> {
+    async fn spawn(cmd_line: &str, workspace_root: &str) -> Result<Self, String> {
         let parts: Vec<&str> = cmd_line.split_whitespace().collect();
         if parts.is_empty() {
             return Err("Empty LSP command".to_string());
@@ -135,7 +133,9 @@ impl LspClient {
             .stderr(Stdio::null())
             .current_dir(workspace_root);
 
-        let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn LSP server '{}': {}", parts[0], e))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to spawn LSP server '{}': {}", parts[0], e))?;
 
         let stdin = child.stdin.take().ok_or("No stdin")?;
         let stdout = child.stdout.take().ok_or("No stdout")?;
@@ -220,12 +220,13 @@ impl LspClient {
         let init_value = serde_json::to_value(&init_params)
             .map_err(|e| format!("Failed to serialize init params: {e}"))?;
 
-        let resp = client
-            .send_request("initialize", Some(init_value))
-            .await?;
+        let resp = client.send_request("initialize", Some(init_value)).await?;
 
         if let Some(err) = resp.error {
-            return Err(format!("LSP initialize error: {} ({})", err.message, err.code));
+            return Err(format!(
+                "LSP initialize error: {} ({})",
+                err.message, err.code
+            ));
         }
 
         // Send initialized notification
@@ -269,7 +270,10 @@ impl LspClient {
                 .write_all(msg.as_bytes())
                 .await
                 .map_err(|e| format!("Write to LSP stdin: {e}"))?;
-            stdin.flush().await.map_err(|e| format!("Flush LSP stdin: {e}"))?;
+            stdin
+                .flush()
+                .await
+                .map_err(|e| format!("Flush LSP stdin: {e}"))?;
         }
 
         // Wait with timeout
@@ -283,11 +287,7 @@ impl LspClient {
         }
     }
 
-    async fn send_notification(
-        &self,
-        method: &str,
-        params: Option<Value>,
-    ) -> Result<(), String> {
+    async fn send_notification(&self, method: &str, params: Option<Value>) -> Result<(), String> {
         let body = serde_json::to_string(&serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -302,7 +302,10 @@ impl LspClient {
             .write_all(msg.as_bytes())
             .await
             .map_err(|e| format!("Write to LSP stdin: {e}"))?;
-        stdin.flush().await.map_err(|e| format!("Flush LSP stdin: {e}"))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| format!("Flush LSP stdin: {e}"))?;
         Ok(())
     }
 
@@ -333,9 +336,9 @@ impl LspClient {
             },
         };
 
-        let value = serde_json::to_value(&params)
-            .map_err(|e| format!("Serialize didOpen: {e}"))?;
-        self.send_notification("textDocument/didOpen", Some(value)).await?;
+        let value = serde_json::to_value(&params).map_err(|e| format!("Serialize didOpen: {e}"))?;
+        self.send_notification("textDocument/didOpen", Some(value))
+            .await?;
 
         opened.insert(uri_str);
 
@@ -356,7 +359,12 @@ impl LspClient {
     }
 
     /// Request hover information at a position.
-    async fn hover(&self, file_path: &str, line: u32, character: u32) -> Result<Option<Hover>, String> {
+    async fn hover(
+        &self,
+        file_path: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Option<Hover>, String> {
         let uri = file_path_to_uri(file_path)?;
 
         let params = HoverParams {
@@ -412,7 +420,9 @@ impl LspClient {
         };
 
         let value = serde_json::to_value(&params).map_err(|e| format!("Serialize: {e}"))?;
-        let resp = self.send_request("textDocument/references", Some(value)).await?;
+        let resp = self
+            .send_request("textDocument/references", Some(value))
+            .await?;
 
         if let Some(err) = resp.error {
             return Err(format!("References error: {} ({})", err.message, err.code));
@@ -429,10 +439,7 @@ impl LspClient {
     }
 
     /// Request document symbols for a file.
-    async fn document_symbols(
-        &self,
-        file_path: &str,
-    ) -> Result<DocumentSymbolResponse, String> {
+    async fn document_symbols(&self, file_path: &str) -> Result<DocumentSymbolResponse, String> {
         let uri = file_path_to_uri(file_path)?;
 
         let params = DocumentSymbolParams {
@@ -451,7 +458,10 @@ impl LspClient {
             .await?;
 
         if let Some(err) = resp.error {
-            return Err(format!("Document symbols error: {} ({})", err.message, err.code));
+            return Err(format!(
+                "Document symbols error: {} ({})",
+                err.message, err.code
+            ));
         }
 
         match resp.result {
@@ -663,7 +673,10 @@ impl LspManager {
             };
             let line = d.range.start.line + 1;
             let col = d.range.start.character + 1;
-            lines.push(format!("{}:{}:{}: {} {}", file_path, line, col, severity, d.message));
+            lines.push(format!(
+                "{}:{}:{}: {} {}",
+                file_path, line, col, severity, d.message
+            ));
         }
         Ok(lines.join("\n"))
     }
@@ -723,7 +736,11 @@ impl LspManager {
             let col = loc.range.start.character + 1;
             lines.push(format!("{path}:{line}:{col}"));
         }
-        Ok(format!("{} references found:\n{}", locs.len(), lines.join("\n")))
+        Ok(format!(
+            "{} references found:\n{}",
+            locs.len(),
+            lines.join("\n")
+        ))
     }
 
     /// Find the line range of a named symbol in a file.
@@ -753,27 +770,22 @@ impl LspManager {
             DocumentSymbolResponse::Flat(symbols) => {
                 for sym in &symbols {
                     if sym.name == symbol_name {
-                        return Ok((
-                            sym.location.range.start.line,
-                            sym.location.range.end.line,
-                        ));
+                        return Ok((sym.location.range.start.line, sym.location.range.end.line));
                     }
                 }
                 let available: Vec<String> = symbols.iter().map(|s| s.name.clone()).collect();
                 Err(format!(
                     "Symbol '{}' not found in {}.\nAvailable symbols: {}",
-                    symbol_name, file_path, available.join(", ")
+                    symbol_name,
+                    file_path,
+                    available.join(", ")
                 ))
             }
         }
     }
 
     /// Get document symbols (outline) for a file.
-    pub async fn symbols(
-        &self,
-        file_path: &str,
-        workspace_root: &str,
-    ) -> Result<String, String> {
+    pub async fn symbols(&self, file_path: &str, workspace_root: &str) -> Result<String, String> {
         let client = self.get_client(file_path, workspace_root).await?;
         client.ensure_file_open(file_path).await?;
 

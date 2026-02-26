@@ -37,8 +37,15 @@ pub async fn ensure_server_running() -> Result<()> {
             let log_hint = if Path::new(LOG_FILE).exists() {
                 match fs::read_to_string(LOG_FILE) {
                     Ok(contents) => {
-                        let tail: String = contents.lines().rev().take(20).collect::<Vec<_>>()
-                            .into_iter().rev().collect::<Vec<_>>().join("\n");
+                        let tail: String = contents
+                            .lines()
+                            .rev()
+                            .take(20)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect::<Vec<_>>()
+                            .join("\n");
                         format!("\n  Last log lines from {LOG_FILE}:\n{tail}")
                     }
                     Err(_) => format!("\n  Check {LOG_FILE} for details."),
@@ -77,7 +84,8 @@ fn launch_server() -> Result<()> {
         .open(LOG_FILE)
         .with_context(|| format!("failed to open {LOG_FILE}"))?;
 
-    let stderr_file = log_file.try_clone()
+    let stderr_file = log_file
+        .try_clone()
         .context("failed to clone log file handle")?;
 
     // Resolve bear-server as a sibling of the current executable first,
@@ -97,7 +105,8 @@ fn launch_server() -> Result<()> {
         cmd.process_group(0);
     }
 
-    cmd.spawn().context("failed to spawn bear-server (is it on your PATH?)")?;
+    cmd.spawn()
+        .context("failed to spawn bear-server (is it on your PATH?)")?;
 
     Ok(())
 }

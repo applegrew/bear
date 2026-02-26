@@ -2,7 +2,9 @@ use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
-    style::{Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor},
+    style::{
+        Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+    },
     terminal::{self, ClearType},
 };
 use std::io::{self, Write};
@@ -24,10 +26,19 @@ pub enum RenderCmd {
         args: String,
     },
     /// Another client resolved this tool confirmation — dismiss picker.
-    ToolResolved { tool_call_id: String, approved: bool },
+    ToolResolved {
+        tool_call_id: String,
+        approved: bool,
+    },
     /// Another client resolved this prompt — dismiss picker.
-    PromptResolved { prompt_id: String },
-    ToolOutput { tool_name: String, tool_args: serde_json::Value, output: String },
+    PromptResolved {
+        prompt_id: String,
+    },
+    ToolOutput {
+        tool_name: String,
+        tool_args: serde_json::Value,
+        output: String,
+    },
     ProcessEvent(String),
     SessionInfo(String, String),
     SlashCommands(Vec<(String, String)>),
@@ -38,7 +49,9 @@ pub enum RenderCmd {
         multi: bool,
     },
     SessionRenamed(String),
-    ClientState { input_history: Vec<String> },
+    ClientState {
+        input_history: Vec<String>,
+    },
     TaskPlan {
         plan_id: String,
         tasks: Vec<(String, String, bool)>, // (id, description, needs_write)
@@ -56,7 +69,9 @@ pub enum RenderCmd {
     },
     Thinking,
     /// Another client submitted a chat prompt — display it.
-    UserInput { text: String },
+    UserInput {
+        text: String,
+    },
     /// Tell the terminal to skip the next UserInput echo (we already rendered it locally).
     SuppressNextInputEcho,
     Quit,
@@ -64,7 +79,12 @@ pub enum RenderCmd {
 
 pub fn cleanup_terminal() {
     let mut out = io::stdout();
-    let _ = execute!(out, event::DisableMouseCapture, cursor::Show, terminal::LeaveAlternateScreen);
+    let _ = execute!(
+        out,
+        event::DisableMouseCapture,
+        cursor::Show,
+        terminal::LeaveAlternateScreen
+    );
     let _ = terminal::disable_raw_mode();
 }
 
@@ -85,8 +105,14 @@ pub enum TermEvent {
         tool_call_id: String,
         choice: ToolConfirmChoice,
     },
-    UserPromptResult { prompt_id: String, selected: Vec<usize> },
-    TaskPlanResult { plan_id: String, approved: bool },
+    UserPromptResult {
+        prompt_id: String,
+        selected: Vec<usize>,
+    },
+    TaskPlanResult {
+        plan_id: String,
+        approved: bool,
+    },
     Quit,
 }
 
@@ -94,7 +120,15 @@ pub enum TermEvent {
 // Spinner
 // ---------------------------------------------------------------------------
 
-const SPINNER_DOTS: &[&str] = &["·····", "●····", "·●···", "··●··", "···●·", "····●", "·····"];
+const SPINNER_DOTS: &[&str] = &[
+    "·····",
+    "●····",
+    "·●···",
+    "··●··",
+    "···●·",
+    "····●",
+    "·····",
+];
 
 // Layout constants
 const INPUT_BOX_HEIGHT: u16 = 3; // top border + input line + bottom border
@@ -160,11 +194,20 @@ pub fn spawn_terminal_thread(
                     state.cleanup();
                     return;
                 }
-                if let RenderCmd::ToolRequest { tool_call_id, name, args, .. } = cmd {
-                    if let Some(choice) = state.run_tool_confirm_picker(&render_rx, &tool_call_id, &name, &args) {
-                        let _ = rt.block_on(event_tx.send(
-                            TermEvent::ToolConfirmResult { tool_call_id, choice },
-                        ));
+                if let RenderCmd::ToolRequest {
+                    tool_call_id,
+                    name,
+                    args,
+                    ..
+                } = cmd
+                {
+                    if let Some(choice) =
+                        state.run_tool_confirm_picker(&render_rx, &tool_call_id, &name, &args)
+                    {
+                        let _ = rt.block_on(event_tx.send(TermEvent::ToolConfirmResult {
+                            tool_call_id,
+                            choice,
+                        }));
                     }
                     if state.quit_requested {
                         state.cleanup();
@@ -175,11 +218,24 @@ pub fn spawn_terminal_thread(
                     state.full_repaint();
                     continue;
                 }
-                if let RenderCmd::UserPrompt { prompt_id, question, options, multi } = cmd {
-                    if let Some(selected) = state.run_inline_menu(&render_rx, Some(&prompt_id), &question, &options, multi) {
-                        let _ = rt.block_on(event_tx.send(
-                            TermEvent::UserPromptResult { prompt_id, selected },
-                        ));
+                if let RenderCmd::UserPrompt {
+                    prompt_id,
+                    question,
+                    options,
+                    multi,
+                } = cmd
+                {
+                    if let Some(selected) = state.run_inline_menu(
+                        &render_rx,
+                        Some(&prompt_id),
+                        &question,
+                        &options,
+                        multi,
+                    ) {
+                        let _ = rt.block_on(event_tx.send(TermEvent::UserPromptResult {
+                            prompt_id,
+                            selected,
+                        }));
                     }
                     if state.quit_requested {
                         state.cleanup();
@@ -194,17 +250,32 @@ pub fn spawn_terminal_thread(
                     state.push_line("");
                     state.push_line(&format!("  {} Proposed task plan:", a_cyan("📋")));
                     for (id, desc, needs_write) in &tasks {
-                        let tag = if *needs_write { a_yellow("[write]") } else { a_green("[read]") };
-                        state.push_line(&format!("    {} {} {}", a_gray(&format!("{}.", id)), tag, desc));
+                        let tag = if *needs_write {
+                            a_yellow("[write]")
+                        } else {
+                            a_green("[read]")
+                        };
+                        state.push_line(&format!(
+                            "    {} {} {}",
+                            a_gray(&format!("{}.", id)),
+                            tag,
+                            desc
+                        ));
                     }
                     state.push_line("");
                     // Use the existing inline menu for approval
                     let options = vec!["Approve".to_string(), "Reject".to_string()];
-                    if let Some(selected) = state.run_inline_menu(&render_rx, Some(&plan_id), "Execute this plan?", &options, false) {
+                    if let Some(selected) = state.run_inline_menu(
+                        &render_rx,
+                        Some(&plan_id),
+                        "Execute this plan?",
+                        &options,
+                        false,
+                    ) {
                         let approved = selected.first().copied() == Some(0);
-                        let _ = rt.block_on(event_tx.send(
-                            TermEvent::TaskPlanResult { plan_id, approved },
-                        ));
+                        let _ = rt.block_on(
+                            event_tx.send(TermEvent::TaskPlanResult { plan_id, approved }),
+                        );
                     }
                     if state.quit_requested {
                         state.cleanup();
@@ -215,7 +286,10 @@ pub fn spawn_terminal_thread(
                     continue;
                 }
                 // Ignore stale resolution messages that arrive outside of a picker
-                if matches!(cmd, RenderCmd::ToolResolved { .. } | RenderCmd::PromptResolved { .. }) {
+                if matches!(
+                    cmd,
+                    RenderCmd::ToolResolved { .. } | RenderCmd::PromptResolved { .. }
+                ) {
                     continue;
                 }
                 state.handle_render(cmd);
@@ -226,11 +300,15 @@ pub fn spawn_terminal_thread(
                 let now = std::time::Instant::now();
                 let needs_status_redraw = state.interrupt_warning_remaining_ms() > 0;
                 if state.streaming || needs_status_redraw {
-                    if now.duration_since(state.spinner_last_tick) >= std::time::Duration::from_millis(100) {
+                    if now.duration_since(state.spinner_last_tick)
+                        >= std::time::Duration::from_millis(100)
+                    {
                         state.spinner_frame = (state.spinner_frame + 1) % SPINNER_DOTS.len();
                         state.spinner_last_tick = now;
                         // Auto-dismiss expired warning
-                        if state.interrupt_warning_start.is_some() && state.interrupt_warning_remaining_ms() == 0 {
+                        if state.interrupt_warning_start.is_some()
+                            && state.interrupt_warning_remaining_ms() == 0
+                        {
                             state.dismiss_interrupt_warning();
                         }
                         state.draw_status_bar();
@@ -262,9 +340,21 @@ pub fn spawn_terminal_thread(
 
                     if state.dropdown_active() {
                         match action {
-                            KeyAction::HistoryPrev => { state.dropdown_up(); state.draw_input_box(); continue; }
-                            KeyAction::HistoryNext => { state.dropdown_down(); state.draw_input_box(); continue; }
-                            KeyAction::Tab => { state.accept_dropdown(); state.draw_input_box(); continue; }
+                            KeyAction::HistoryPrev => {
+                                state.dropdown_up();
+                                state.draw_input_box();
+                                continue;
+                            }
+                            KeyAction::HistoryNext => {
+                                state.dropdown_down();
+                                state.draw_input_box();
+                                continue;
+                            }
+                            KeyAction::Tab => {
+                                state.accept_dropdown();
+                                state.draw_input_box();
+                                continue;
+                            }
                             KeyAction::Submit => {
                                 if state.dropdown_idx.is_some() {
                                     state.accept_dropdown();
@@ -279,7 +369,9 @@ pub fn spawn_terminal_thread(
                                 state.draw_input_box();
                                 continue;
                             }
-                            _ => { state.dropdown_idx = None; }
+                            _ => {
+                                state.dropdown_idx = None;
+                            }
                         }
                     }
 
@@ -289,33 +381,62 @@ pub fn spawn_terminal_thread(
                             if state.interrupt_pending_text.is_some() {
                                 state.dismiss_interrupt_warning();
                             }
-                            state.insert_char(c); state.draw_input_box();
+                            state.insert_char(c);
+                            state.draw_input_box();
                         }
                         KeyAction::Backspace => {
                             if state.interrupt_pending_text.is_some() {
                                 state.dismiss_interrupt_warning();
                             }
-                            state.backspace(); state.draw_input_box();
+                            state.backspace();
+                            state.draw_input_box();
                         }
                         KeyAction::Delete => {
                             if state.interrupt_pending_text.is_some() {
                                 state.dismiss_interrupt_warning();
                             }
-                            state.delete(); state.draw_input_box();
+                            state.delete();
+                            state.draw_input_box();
                         }
-                        KeyAction::Left => { state.cursor_left(); state.draw_input_box(); }
-                        KeyAction::Right => { state.cursor_right(); state.draw_input_box(); }
-                        KeyAction::Home => { state.cursor_pos = 0; state.draw_input_box(); }
-                        KeyAction::End => { state.cursor_pos = state.input_buf.len(); state.draw_input_box(); }
-                        KeyAction::HistoryPrev => { state.history_prev(); state.draw_input_box(); }
-                        KeyAction::HistoryNext => { state.history_next(); state.draw_input_box(); }
-                        KeyAction::ScrollUp => { state.scroll_up(3); state.full_repaint(); }
-                        KeyAction::ScrollDown => { state.scroll_down(3); state.full_repaint(); }
+                        KeyAction::Left => {
+                            state.cursor_left();
+                            state.draw_input_box();
+                        }
+                        KeyAction::Right => {
+                            state.cursor_right();
+                            state.draw_input_box();
+                        }
+                        KeyAction::Home => {
+                            state.cursor_pos = 0;
+                            state.draw_input_box();
+                        }
+                        KeyAction::End => {
+                            state.cursor_pos = state.input_buf.len();
+                            state.draw_input_box();
+                        }
+                        KeyAction::HistoryPrev => {
+                            state.history_prev();
+                            state.draw_input_box();
+                        }
+                        KeyAction::HistoryNext => {
+                            state.history_next();
+                            state.draw_input_box();
+                        }
+                        KeyAction::ScrollUp => {
+                            state.scroll_up(3);
+                            state.full_repaint();
+                        }
+                        KeyAction::ScrollDown => {
+                            state.scroll_down(3);
+                            state.full_repaint();
+                        }
                         KeyAction::Tab => {}
                         KeyAction::Escape => {}
                         KeyAction::Submit => {
                             // If interrupt warning is active and user presses Enter again, confirm interrupt
-                            if state.interrupt_pending_text.is_some() && state.interrupt_warning_remaining_ms() > 0 {
+                            if state.interrupt_pending_text.is_some()
+                                && state.interrupt_warning_remaining_ms() > 0
+                            {
                                 let text = state.interrupt_pending_text.take().unwrap();
                                 state.interrupt_warning_start = None;
                                 let _ = rt.block_on(event_tx.send(TermEvent::UserLine(text)));
@@ -458,18 +579,28 @@ pub fn format_tool_description(name: &str, args: &serde_json::Value) -> Vec<Stri
         }
         _ => {
             if let Some(obj) = args.as_object() {
-                obj.iter().map(|(k, v)| {
-                    let val = match v {
-                        serde_json::Value::String(s) => {
-                            if s.len() > 60 { format!("{}…", &s[..60]) } else { s.clone() }
-                        }
-                        other => {
-                            let s = other.to_string();
-                            if s.len() > 60 { format!("{}…", &s[..60]) } else { s }
-                        }
-                    };
-                    format!("{k}: {val}")
-                }).collect()
+                obj.iter()
+                    .map(|(k, v)| {
+                        let val = match v {
+                            serde_json::Value::String(s) => {
+                                if s.len() > 60 {
+                                    format!("{}…", &s[..60])
+                                } else {
+                                    s.clone()
+                                }
+                            }
+                            other => {
+                                let s = other.to_string();
+                                if s.len() > 60 {
+                                    format!("{}…", &s[..60])
+                                } else {
+                                    s
+                                }
+                            }
+                        };
+                        format!("{k}: {val}")
+                    })
+                    .collect()
             } else {
                 vec![args.to_string()]
             }
@@ -483,7 +614,9 @@ fn visible_len(s: &str) -> usize {
     let mut in_esc = false;
     for c in s.chars() {
         if in_esc {
-            if c.is_ascii_alphabetic() { in_esc = false; }
+            if c.is_ascii_alphabetic() {
+                in_esc = false;
+            }
         } else if c == '\x1b' {
             in_esc = true;
         } else {
@@ -496,7 +629,9 @@ fn visible_len(s: &str) -> usize {
 /// Wrap a line into multiple visual rows of at most `max` visible characters,
 /// preserving ANSI escape codes across wraps.
 fn wrap_visible(s: &str, max: usize) -> Vec<String> {
-    if max == 0 { return vec![s.to_string()]; }
+    if max == 0 {
+        return vec![s.to_string()];
+    }
     let mut rows: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut vis = 0;
@@ -543,15 +678,33 @@ fn wrap_visible(s: &str, max: usize) -> Vec<String> {
 }
 
 // ANSI helpers
-fn a_green(s: &str) -> String { format!("\x1b[38;5;114m{s}\x1b[0m") }
-fn a_red(s: &str) -> String { format!("\x1b[38;5;204m{s}\x1b[0m") }
-fn a_yellow(s: &str) -> String { format!("\x1b[38;5;180m{s}\x1b[0m") }
-fn a_cyan(s: &str) -> String { format!("\x1b[38;5;80m{s}\x1b[0m") }
-fn a_gray(s: &str) -> String { format!("\x1b[38;5;102m{s}\x1b[0m") }
-fn a_white(s: &str) -> String { format!("\x1b[38;5;252m{s}\x1b[0m") }
-fn a_magenta(s: &str) -> String { format!("\x1b[38;5;141m{s}\x1b[0m") }
-fn a_bold(s: &str) -> String { format!("\x1b[1m{s}\x1b[0m") }
-fn a_dim(s: &str) -> String { format!("\x1b[2m{s}\x1b[0m") }
+fn a_green(s: &str) -> String {
+    format!("\x1b[38;5;114m{s}\x1b[0m")
+}
+fn a_red(s: &str) -> String {
+    format!("\x1b[38;5;204m{s}\x1b[0m")
+}
+fn a_yellow(s: &str) -> String {
+    format!("\x1b[38;5;180m{s}\x1b[0m")
+}
+fn a_cyan(s: &str) -> String {
+    format!("\x1b[38;5;80m{s}\x1b[0m")
+}
+fn a_gray(s: &str) -> String {
+    format!("\x1b[38;5;102m{s}\x1b[0m")
+}
+fn a_white(s: &str) -> String {
+    format!("\x1b[38;5;252m{s}\x1b[0m")
+}
+fn a_magenta(s: &str) -> String {
+    format!("\x1b[38;5;141m{s}\x1b[0m")
+}
+fn a_bold(s: &str) -> String {
+    format!("\x1b[1m{s}\x1b[0m")
+}
+fn a_dim(s: &str) -> String {
+    format!("\x1b[2m{s}\x1b[0m")
+}
 
 // ---------------------------------------------------------------------------
 // Markdown → ANSI rendering
@@ -561,16 +714,16 @@ fn a_dim(s: &str) -> String { format!("\x1b[2m{s}\x1b[0m") }
 const MD_RESET: &str = "\x1b[0m";
 const MD_BOLD: &str = "\x1b[1m";
 const MD_ITALIC: &str = "\x1b[3m";
-const MD_H1: &str = "\x1b[1m\x1b[38;5;80m";       // bold cyan
-const MD_H2: &str = "\x1b[1m\x1b[38;5;114m";      // bold green
-const MD_H3: &str = "\x1b[1m\x1b[38;5;180m";      // bold yellow
-const MD_CODE_INLINE: &str = "\x1b[38;5;222m";     // warm yellow for `code`
-const MD_CODE_BLOCK: &str = "\x1b[38;5;246m";      // light gray for code blocks
-const MD_CODE_LANG: &str = "\x1b[38;5;102m";       // dim gray for language tag
-const MD_BULLET: &str = "\x1b[38;5;80m";           // cyan bullets
-const MD_HRULE: &str = "\x1b[38;5;240m";           // dim horizontal rule
-const MD_LINK: &str = "\x1b[4m\x1b[38;5;75m";     // underline blue for links
-const MD_GREEN: &str = "\x1b[38;5;114m";           // default text green
+const MD_H1: &str = "\x1b[1m\x1b[38;5;80m"; // bold cyan
+const MD_H2: &str = "\x1b[1m\x1b[38;5;114m"; // bold green
+const MD_H3: &str = "\x1b[1m\x1b[38;5;180m"; // bold yellow
+const MD_CODE_INLINE: &str = "\x1b[38;5;222m"; // warm yellow for `code`
+const MD_CODE_BLOCK: &str = "\x1b[38;5;246m"; // light gray for code blocks
+const MD_CODE_LANG: &str = "\x1b[38;5;102m"; // dim gray for language tag
+const MD_BULLET: &str = "\x1b[38;5;80m"; // cyan bullets
+const MD_HRULE: &str = "\x1b[38;5;240m"; // dim horizontal rule
+const MD_LINK: &str = "\x1b[4m\x1b[38;5;75m"; // underline blue for links
+const MD_GREEN: &str = "\x1b[38;5;114m"; // default text green
 
 /// Render a block of markdown text into ANSI-colored lines.
 /// Returns a Vec of already-colored strings (one per output line).
@@ -608,7 +761,9 @@ fn render_md_lines(text: &str, in_code_block: &mut bool) -> Vec<String> {
 
         // Horizontal rule
         if (trimmed.starts_with("---") || trimmed.starts_with("***") || trimmed.starts_with("___"))
-            && trimmed.chars().all(|c| c == '-' || c == '*' || c == '_' || c == ' ')
+            && trimmed
+                .chars()
+                .all(|c| c == '-' || c == '*' || c == '_' || c == ' ')
             && trimmed.len() >= 3
         {
             result.push(format!("{MD_HRULE}─────────────────────────────{MD_RESET}"));
@@ -633,7 +788,10 @@ fn render_md_lines(text: &str, in_code_block: &mut bool) -> Vec<String> {
         }
 
         // List items: -, *, or numbered (1. 2. etc.)
-        if let Some(rest) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
+        if let Some(rest) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
             let formatted = render_md_inline(rest);
             result.push(format!("{MD_BULLET}  • {MD_GREEN}{formatted}{MD_RESET}"));
             continue;
@@ -644,7 +802,9 @@ fn render_md_lines(text: &str, in_code_block: &mut bool) -> Vec<String> {
             if !num_part.is_empty() && num_part.chars().all(|c| c.is_ascii_digit()) {
                 let rest = &trimmed[dot_pos + 2..];
                 let formatted = render_md_inline(rest);
-                result.push(format!("{MD_BULLET}  {num_part}. {MD_GREEN}{formatted}{MD_RESET}"));
+                result.push(format!(
+                    "{MD_BULLET}  {num_part}. {MD_GREEN}{formatted}{MD_RESET}"
+                ));
                 continue;
             }
         }
@@ -762,7 +922,12 @@ impl TermState {
         terminal::enable_raw_mode()?;
         let (w, h) = terminal::size().unwrap_or((80, 24));
         let mut out = io::stdout();
-        let _ = execute!(out, terminal::EnterAlternateScreen, cursor::Hide, event::EnableMouseCapture);
+        let _ = execute!(
+            out,
+            terminal::EnterAlternateScreen,
+            cursor::Hide,
+            event::EnableMouseCapture
+        );
         Ok(Self {
             input_buf: String::new(),
             cursor_pos: 0,
@@ -811,7 +976,10 @@ impl TermState {
     }
 
     fn scroll_up(&mut self, n: usize) {
-        let max = self.output_lines.len().saturating_sub(self.output_area_height());
+        let max = self
+            .output_lines
+            .len()
+            .saturating_sub(self.output_area_height());
         self.scroll_offset = (self.scroll_offset + n).min(max);
     }
 
@@ -889,7 +1057,11 @@ impl TermState {
         let border_w = width.saturating_sub(2);
 
         // Top border
-        let _ = execute!(out, cursor::MoveTo(0, input_row), terminal::Clear(ClearType::CurrentLine));
+        let _ = execute!(
+            out,
+            cursor::MoveTo(0, input_row),
+            terminal::Clear(ClearType::CurrentLine)
+        );
         let _ = execute!(
             out,
             SetForegroundColor(Color::DarkGrey),
@@ -900,7 +1072,11 @@ impl TermState {
         );
 
         // Input line
-        let _ = execute!(out, cursor::MoveTo(0, input_row + 1), terminal::Clear(ClearType::CurrentLine));
+        let _ = execute!(
+            out,
+            cursor::MoveTo(0, input_row + 1),
+            terminal::Clear(ClearType::CurrentLine)
+        );
         let (prompt, prompt_color) = if self.input_buf.starts_with('/') {
             ("cmd-> ", Color::Yellow)
         } else if self.input_buf.starts_with('!') {
@@ -920,33 +1096,53 @@ impl TermState {
 
         let _ = execute!(
             out,
-            SetForegroundColor(Color::DarkGrey), Print("│ "),
-            SetForegroundColor(prompt_color), SetAttribute(Attribute::Bold),
-            Print(prompt), SetAttribute(Attribute::Reset), ResetColor,
+            SetForegroundColor(Color::DarkGrey),
+            Print("│ "),
+            SetForegroundColor(prompt_color),
+            SetAttribute(Attribute::Bold),
+            Print(prompt),
+            SetAttribute(Attribute::Reset),
+            ResetColor,
             Print(display_text),
             Print(" ".repeat(padding)),
-            SetForegroundColor(Color::DarkGrey), Print(" │"), ResetColor,
+            SetForegroundColor(Color::DarkGrey),
+            Print(" │"),
+            ResetColor,
         );
 
         // Bottom border
-        let _ = execute!(out, cursor::MoveTo(0, input_row + 2), terminal::Clear(ClearType::CurrentLine));
+        let _ = execute!(
+            out,
+            cursor::MoveTo(0, input_row + 2),
+            terminal::Clear(ClearType::CurrentLine)
+        );
         let _ = execute!(
             out,
             SetForegroundColor(Color::DarkGrey),
-            Print("└"), Print("─".repeat(border_w)), Print("┘"),
+            Print("└"),
+            Print("─".repeat(border_w)),
+            Print("┘"),
             ResetColor,
         );
 
         // Cursor
         let cursor_col = 2 + prompt_len + self.cursor_pos.min(text_space);
-        let _ = execute!(out, cursor::MoveTo(cursor_col as u16, input_row + 1), cursor::Show);
+        let _ = execute!(
+            out,
+            cursor::MoveTo(cursor_col as u16, input_row + 1),
+            cursor::Show
+        );
 
         // If dropdown was previously shown, redraw the output area to restore those rows
         if self.last_dropdown_count > 0 {
             self.last_dropdown_count = 0;
             self.draw_output_area();
             // Re-position cursor after output redraw
-            let _ = execute!(out, cursor::MoveTo(cursor_col as u16, input_row + 1), cursor::Show);
+            let _ = execute!(
+                out,
+                cursor::MoveTo(cursor_col as u16, input_row + 1),
+                cursor::Show
+            );
         }
 
         // Dropdown above input box
@@ -961,20 +1157,34 @@ impl TermState {
                 let dd_start = input_row.saturating_sub(matches.len() as u16);
                 for (i, (cmd, desc)) in matches.iter().enumerate() {
                     let row = dd_start + i as u16;
-                    let _ = execute!(out, cursor::MoveTo(0, row), terminal::Clear(ClearType::CurrentLine));
+                    let _ = execute!(
+                        out,
+                        cursor::MoveTo(0, row),
+                        terminal::Clear(ClearType::CurrentLine)
+                    );
                     let selected = self.dropdown_idx == Some(i);
                     if selected {
-                        let _ = execute!(out,
-                            SetForegroundColor(Color::Yellow), Print("  ❯ "),
-                            SetForegroundColor(Color::White), Print(cmd),
-                            SetForegroundColor(Color::DarkGrey), Print("  "), Print(desc),
+                        let _ = execute!(
+                            out,
+                            SetForegroundColor(Color::Yellow),
+                            Print("  ❯ "),
+                            SetForegroundColor(Color::White),
+                            Print(cmd),
+                            SetForegroundColor(Color::DarkGrey),
+                            Print("  "),
+                            Print(desc),
                             ResetColor,
                         );
                     } else {
-                        let _ = execute!(out,
-                            SetForegroundColor(Color::DarkGrey), Print("    "),
-                            SetForegroundColor(Color::Yellow), Print(cmd),
-                            SetForegroundColor(Color::DarkGrey), Print("  "), Print(desc),
+                        let _ = execute!(
+                            out,
+                            SetForegroundColor(Color::DarkGrey),
+                            Print("    "),
+                            SetForegroundColor(Color::Yellow),
+                            Print(cmd),
+                            SetForegroundColor(Color::DarkGrey),
+                            Print("  "),
+                            Print(desc),
                             ResetColor,
                         );
                     }
@@ -992,7 +1202,11 @@ impl TermState {
         let row = self.term_height.saturating_sub(1);
         let width = self.term_width as usize;
 
-        let _ = execute!(out, cursor::MoveTo(0, row), terminal::Clear(ClearType::CurrentLine));
+        let _ = execute!(
+            out,
+            cursor::MoveTo(0, row),
+            terminal::Clear(ClearType::CurrentLine)
+        );
 
         // Check if interrupt warning is active
         let warning_active = self.interrupt_warning_remaining_ms() > 0;
@@ -1003,7 +1217,8 @@ impl TermState {
             let warn_len = visible_len(warn_text);
             // Animated underline: full width at 6s, shrinks to 0
             let bar_max = warn_len;
-            let bar_len = (bar_max as u64 * remaining_ms as u64 / 6000).min(bar_max as u64) as usize;
+            let bar_len =
+                (bar_max as u64 * remaining_ms as u64 / 6000).min(bar_max as u64) as usize;
 
             let _ = execute!(
                 out,
@@ -1030,7 +1245,11 @@ impl TermState {
                 "·····"
             };
 
-            let session = if self.session_name.is_empty() { "bear" } else { &self.session_name };
+            let session = if self.session_name.is_empty() {
+                "bear"
+            } else {
+                &self.session_name
+            };
 
             // Left: spinner + session + subagent count
             let subagent_info = if self.active_subagents.is_empty() {
@@ -1064,7 +1283,11 @@ impl TermState {
         let inner_w = width.saturating_sub(4);
         let text_space = inner_w.saturating_sub(prompt_len);
         let cursor_col = 2 + prompt_len + self.cursor_pos.min(text_space);
-        let _ = execute!(out, cursor::MoveTo(cursor_col as u16, input_row), cursor::Show);
+        let _ = execute!(
+            out,
+            cursor::MoveTo(cursor_col as u16, input_row),
+            cursor::Show
+        );
         let _ = out.flush();
     }
 
@@ -1073,7 +1296,11 @@ impl TermState {
         match self.interrupt_warning_start {
             Some(start) => {
                 let elapsed = start.elapsed().as_millis() as u64;
-                if elapsed >= 6000 { 0 } else { 6000 - elapsed }
+                if elapsed >= 6000 {
+                    0
+                } else {
+                    6000 - elapsed
+                }
             }
             None => 0,
         }
@@ -1095,7 +1322,9 @@ impl TermState {
 
     fn dropdown_up(&mut self) {
         let matches = self.matching_slash_commands(&self.input_buf);
-        if matches.is_empty() { return; }
+        if matches.is_empty() {
+            return;
+        }
         self.dropdown_idx = Some(match self.dropdown_idx {
             None | Some(0) => matches.len() - 1,
             Some(i) => i - 1,
@@ -1104,7 +1333,9 @@ impl TermState {
 
     fn dropdown_down(&mut self) {
         let matches = self.matching_slash_commands(&self.input_buf);
-        if matches.is_empty() { return; }
+        if matches.is_empty() {
+            return;
+        }
         self.dropdown_idx = Some(match self.dropdown_idx {
             None => 0,
             Some(i) if i + 1 >= matches.len() => 0,
@@ -1123,9 +1354,12 @@ impl TermState {
     }
 
     fn matching_slash_commands(&self, input: &str) -> Vec<(String, String)> {
-        if !input.starts_with('/') { return Vec::new(); }
+        if !input.starts_with('/') {
+            return Vec::new();
+        }
         let typed = input.trim_end();
-        self.slash_commands.iter()
+        self.slash_commands
+            .iter()
             .filter(|(cmd, _)| cmd.starts_with(typed) || typed.starts_with(cmd))
             .take(5)
             .cloned()
@@ -1136,7 +1370,12 @@ impl TermState {
     // Tool output rendering (to output buffer)
     // -----------------------------------------------------------------------
 
-    fn render_tool_output_to_buf(&self, tool_name: &str, tool_args: &serde_json::Value, output: &str) -> Vec<String> {
+    fn render_tool_output_to_buf(
+        &self,
+        tool_name: &str,
+        tool_args: &serde_json::Value,
+        output: &str,
+    ) -> Vec<String> {
         let mut lines = Vec::new();
         match tool_name {
             "read_file" => {
@@ -1145,7 +1384,11 @@ impl TermState {
                 if output.starts_with("Error") {
                     lines.push(format!("  {} {}", a_red("✗"), a_red(output)));
                 } else {
-                    lines.push(format!("  {} {}", a_green("✓"), a_green(&format!("Read {path} ({lc} lines)"))));
+                    lines.push(format!(
+                        "  {} {}",
+                        a_green("✓"),
+                        a_green(&format!("Read {path} ({lc} lines)"))
+                    ));
                 }
             }
             "write_file" | "edit_file" | "patch_file" => {
@@ -1169,15 +1412,26 @@ impl TermState {
             }
             "list_files" => {
                 let count = output.lines().count();
-                lines.push(format!("  {} {}", a_green("✓"), a_green(&format!("{count} entries"))));
+                lines.push(format!(
+                    "  {} {}",
+                    a_green("✓"),
+                    a_green(&format!("{count} entries"))
+                ));
                 lines.extend(Self::truncated_lines(output, DISPLAY_MAX_LINES));
             }
             "search_text" => {
                 if output == "No matches found." {
                     lines.push(format!("  {} {}", a_gray("│"), a_gray(output)));
                 } else {
-                    let count = output.lines().filter(|l| !l.starts_with('[') && !l.is_empty()).count();
-                    lines.push(format!("  {} {}", a_green("✓"), a_green(&format!("{count} matches"))));
+                    let count = output
+                        .lines()
+                        .filter(|l| !l.starts_with('[') && !l.is_empty())
+                        .count();
+                    lines.push(format!(
+                        "  {} {}",
+                        a_green("✓"),
+                        a_green(&format!("{count} matches"))
+                    ));
                     lines.extend(Self::truncated_lines(output, DISPLAY_MAX_LINES));
                 }
             }
@@ -1219,13 +1473,22 @@ impl TermState {
         };
 
         if total <= max {
-            for l in &src { out.push(render(l)); }
+            for l in &src {
+                out.push(render(l));
+            }
         } else {
             let head = max / 2;
             let tail = max - head;
-            for l in &src[..head] { out.push(render(l)); }
-            out.push(format!("    {}", a_gray(&format!("… ({} lines hidden) …", total - head - tail))));
-            for l in &src[total - tail..] { out.push(render(l)); }
+            for l in &src[..head] {
+                out.push(render(l));
+            }
+            out.push(format!(
+                "    {}",
+                a_gray(&format!("… ({} lines hidden) …", total - head - tail))
+            ));
+            for l in &src[total - tail..] {
+                out.push(render(l));
+            }
         }
         out
     }
@@ -1235,13 +1498,26 @@ impl TermState {
         let total = src.len();
         let mut out = Vec::new();
         if total <= max {
-            for l in &src { out.push(format!("  {} {}", a_gray("│"), a_gray(l))); }
+            for l in &src {
+                out.push(format!("  {} {}", a_gray("│"), a_gray(l)));
+            }
         } else {
             let head = max / 2;
             let tail = max - head;
-            for l in &src[..head] { out.push(format!("  {} {}", a_gray("│"), a_gray(l))); }
-            out.push(format!("  {} {}", a_gray("│"), a_dim(&a_gray(&format!("  … ({} lines hidden) …", total - head - tail)))));
-            for l in &src[total - tail..] { out.push(format!("  {} {}", a_gray("│"), a_gray(l))); }
+            for l in &src[..head] {
+                out.push(format!("  {} {}", a_gray("│"), a_gray(l)));
+            }
+            out.push(format!(
+                "  {} {}",
+                a_gray("│"),
+                a_dim(&a_gray(&format!(
+                    "  … ({} lines hidden) …",
+                    total - head - tail
+                )))
+            ));
+            for l in &src[total - tail..] {
+                out.push(format!("  {} {}", a_gray("│"), a_gray(l)));
+            }
         }
         out
     }
@@ -1258,10 +1534,17 @@ impl TermState {
         args: &str,
     ) -> Option<ToolConfirmChoice> {
         // Show tool card in output buffer
-        let args_val: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+        let args_val: serde_json::Value =
+            serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
         let desc = format_tool_description(name, &args_val);
 
-        self.push_line(&format!("  {} {} {} {}", a_gray("┌─"), a_magenta("⚡"), a_magenta(name), a_gray("─")));
+        self.push_line(&format!(
+            "  {} {} {} {}",
+            a_gray("┌─"),
+            a_magenta("⚡"),
+            a_magenta(name),
+            a_gray("─")
+        ));
         for l in &desc {
             self.push_line(&format!("  {}  {}", a_gray("│"), a_white(l)));
         }
@@ -1290,10 +1573,18 @@ impl TermState {
         loop {
             // Check if another client already resolved this tool confirmation
             if let Ok(cmd) = render_rx.try_recv() {
-                if let RenderCmd::ToolResolved { tool_call_id: resolved_id, approved } = &cmd {
+                if let RenderCmd::ToolResolved {
+                    tool_call_id: resolved_id,
+                    approved,
+                } = &cmd
+                {
                     if resolved_id == tool_call_id {
                         self.output_lines.truncate(picker_start);
-                        let label = if *approved { a_green("Approved (by another client)") } else { a_red("Denied (by another client)") };
+                        let label = if *approved {
+                            a_green("Approved (by another client)")
+                        } else {
+                            a_red("Denied (by another client)")
+                        };
                         self.push_line(&format!("  {} {}", a_yellow("❯"), label));
                         self.push_line("");
                         return None; // resolved externally
@@ -1316,7 +1607,11 @@ impl TermState {
                             // Update picker lines with final selection
                             self.output_lines.truncate(picker_start);
                             let chosen_label = choices[idx];
-                            self.push_line(&format!("  {} {}", a_yellow("❯"), colors[idx](chosen_label)));
+                            self.push_line(&format!(
+                                "  {} {}",
+                                a_yellow("❯"),
+                                colors[idx](chosen_label)
+                            ));
                             self.push_line("");
                             return Some(match idx {
                                 0 => ToolConfirmChoice::Approve,
@@ -1367,25 +1662,35 @@ impl TermState {
         let mut selected: Vec<bool> = vec![false; options.len()];
         let menu_start = self.output_lines.len();
 
-        let render_menu = |lines: &mut Vec<String>, opts: &[String], cur: usize, sel: &[bool], is_multi: bool| {
-            for (i, opt) in opts.iter().enumerate() {
-                let focused = i == cur;
-                if is_multi {
-                    let check = if sel[i] { "[x]" } else { "[ ]" };
-                    if focused {
-                        lines.push(format!("  {} {} {}", a_yellow(check), a_yellow("❯"), a_white(opt)));
+        let render_menu =
+            |lines: &mut Vec<String>, opts: &[String], cur: usize, sel: &[bool], is_multi: bool| {
+                for (i, opt) in opts.iter().enumerate() {
+                    let focused = i == cur;
+                    if is_multi {
+                        let check = if sel[i] { "[x]" } else { "[ ]" };
+                        if focused {
+                            lines.push(format!(
+                                "  {} {} {}",
+                                a_yellow(check),
+                                a_yellow("❯"),
+                                a_white(opt)
+                            ));
+                        } else {
+                            lines.push(format!("  {}   {}", a_gray(check), a_gray(opt)));
+                        }
+                    } else if focused {
+                        lines.push(format!("  {} {}", a_yellow("❯"), a_white(opt)));
                     } else {
-                        lines.push(format!("  {}   {}", a_gray(check), a_gray(opt)));
+                        lines.push(format!("    {}", a_gray(opt)));
                     }
-                } else if focused {
-                    lines.push(format!("  {} {}", a_yellow("❯"), a_white(opt)));
-                } else {
-                    lines.push(format!("    {}", a_gray(opt)));
                 }
-            }
-            let hint = if is_multi { "  ↑↓ navigate  ␣ toggle  ⏎ confirm" } else { "  ↑↓ navigate  ⏎ select" };
-            lines.push(a_gray(hint));
-        };
+                let hint = if is_multi {
+                    "  ↑↓ navigate  ␣ toggle  ⏎ confirm"
+                } else {
+                    "  ↑↓ navigate  ⏎ select"
+                };
+                lines.push(a_gray(hint));
+            };
 
         render_menu(&mut self.output_lines, options, idx, &selected, multi);
         self.scroll_offset = 0;
@@ -1398,10 +1703,16 @@ impl TermState {
             // Check if another client already resolved this prompt
             if let Ok(cmd) = render_rx.try_recv() {
                 if let Some(pid) = prompt_id {
-                    if let RenderCmd::PromptResolved { prompt_id: resolved_id } = &cmd {
+                    if let RenderCmd::PromptResolved {
+                        prompt_id: resolved_id,
+                    } = &cmd
+                    {
                         if resolved_id == pid {
                             self.output_lines.truncate(menu_start);
-                            self.push_line(&format!("  {}", a_gray("(resolved by another client)")));
+                            self.push_line(&format!(
+                                "  {}",
+                                a_gray("(resolved by another client)")
+                            ));
                             self.push_line("");
                             return None;
                         }
@@ -1414,22 +1725,41 @@ impl TermState {
             if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
                 if let Ok(Event::Key(key)) = event::read() {
                     match key.code {
-                        KeyCode::Up => { idx = if idx > 0 { idx - 1 } else { options.len() - 1 }; }
-                        KeyCode::Down => { idx = if idx + 1 < options.len() { idx + 1 } else { 0 }; }
-                        KeyCode::Char(' ') if multi => { selected[idx] = !selected[idx]; }
+                        KeyCode::Up => {
+                            idx = if idx > 0 { idx - 1 } else { options.len() - 1 };
+                        }
+                        KeyCode::Down => {
+                            idx = if idx + 1 < options.len() { idx + 1 } else { 0 };
+                        }
+                        KeyCode::Char(' ') if multi => {
+                            selected[idx] = !selected[idx];
+                        }
                         KeyCode::Enter => {
                             self.output_lines.truncate(menu_start);
                             if multi {
-                                let sel: Vec<usize> = selected.iter().enumerate().filter(|(_, &s)| s).map(|(i, _)| i).collect();
+                                let sel: Vec<usize> = selected
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, &s)| s)
+                                    .map(|(i, _)| i)
+                                    .collect();
                                 for (i, opt) in options.iter().enumerate() {
                                     if selected[i] {
-                                        self.push_line(&format!("  {} {}", a_green("[x]"), a_white(opt)));
+                                        self.push_line(&format!(
+                                            "  {} {}",
+                                            a_green("[x]"),
+                                            a_white(opt)
+                                        ));
                                     }
                                 }
                                 self.push_line("");
                                 return Some(sel);
                             } else {
-                                self.push_line(&format!("  {} {}", a_yellow("❯"), a_white(&options[idx])));
+                                self.push_line(&format!(
+                                    "  {} {}",
+                                    a_yellow("❯"),
+                                    a_white(&options[idx])
+                                ));
                                 self.push_line("");
                                 return Some(vec![idx]);
                             }
@@ -1498,7 +1828,11 @@ impl TermState {
             RenderCmd::ToolRequest { .. } => {
                 unreachable!("ToolRequest should be intercepted before handle_render");
             }
-            RenderCmd::ToolOutput { tool_name, tool_args, output } => {
+            RenderCmd::ToolOutput {
+                tool_name,
+                tool_args,
+                output,
+            } => {
                 let lines = self.render_tool_output_to_buf(&tool_name, &tool_args, &output);
                 self.push_lines(lines);
                 self.full_repaint();
@@ -1511,9 +1845,18 @@ impl TermState {
                 self.session_name = name.clone();
                 self.session_cwd = cwd.clone();
                 self.push_line("");
-                self.push_line(&format!("  {}", a_cyan(&format!("Connected to session {name}"))));
-                self.push_line(&format!("  {}", a_gray(&format!("Working directory: {cwd}"))));
-                self.push_line(&format!("  {}", a_gray("(session persists even if this terminal closes)")));
+                self.push_line(&format!(
+                    "  {}",
+                    a_cyan(&format!("Connected to session {name}"))
+                ));
+                self.push_line(&format!(
+                    "  {}",
+                    a_gray(&format!("Working directory: {cwd}"))
+                ));
+                self.push_line(&format!(
+                    "  {}",
+                    a_gray("(session persists even if this terminal closes)")
+                ));
                 self.push_line(&format!("  {}", a_gray("Type /help for commands")));
                 self.push_line("");
                 self.full_repaint();
@@ -1534,7 +1877,11 @@ impl TermState {
             RenderCmd::TaskPlan { .. } => {
                 // Handled in the render loop via run_inline_menu
             }
-            RenderCmd::TaskProgress { task_id, status, detail } => {
+            RenderCmd::TaskProgress {
+                task_id,
+                status,
+                detail,
+            } => {
                 let icon = match status.as_str() {
                     "in_progress" => "→",
                     "completed" => "✓",
@@ -1548,14 +1895,27 @@ impl TermState {
                     _ => a_gray,
                 };
                 let detail_str = detail.map(|d| format!(" — {d}")).unwrap_or_default();
-                self.push_line(&format!("  {} {}", color_fn(&format!("{icon} Task {task_id}")), a_gray(&detail_str)));
+                self.push_line(&format!(
+                    "  {} {}",
+                    color_fn(&format!("{icon} Task {task_id}")),
+                    a_gray(&detail_str)
+                ));
                 self.full_repaint();
             }
-            RenderCmd::SubagentUpdate { subagent_id, description, status, detail } => {
+            RenderCmd::SubagentUpdate {
+                subagent_id,
+                description,
+                status,
+                detail,
+            } => {
                 // Track active subagent count
                 match status.as_str() {
-                    "running" => { self.active_subagents.insert(subagent_id); }
-                    "completed" | "failed" => { self.active_subagents.remove(&subagent_id); }
+                    "running" => {
+                        self.active_subagents.insert(subagent_id);
+                    }
+                    "completed" | "failed" => {
+                        self.active_subagents.remove(&subagent_id);
+                    }
                     _ => {}
                 }
                 let icon = match status.as_str() {
@@ -1571,7 +1931,12 @@ impl TermState {
                     "failed" => a_red,
                     _ => a_gray,
                 };
-                self.push_line(&format!("  {} {}{}", icon, color_fn(&description), a_gray(&detail_str)));
+                self.push_line(&format!(
+                    "  {} {}{}",
+                    icon,
+                    color_fn(&description),
+                    a_gray(&detail_str)
+                ));
                 self.full_repaint();
             }
             RenderCmd::UserInput { text } => {
@@ -1616,7 +1981,12 @@ impl TermState {
     /// in muted gray. Other content is rendered with markdown formatting.
     fn flush_streaming_to_output(&mut self) {
         // Remove any previous streaming lines (marked with a tag)
-        while self.output_lines.last().map(|l| l.starts_with("\x01STREAM\x01")).unwrap_or(false) {
+        while self
+            .output_lines
+            .last()
+            .map(|l| l.starts_with("\x01STREAM\x01"))
+            .unwrap_or(false)
+        {
             self.output_lines.pop();
         }
 
@@ -1641,14 +2011,16 @@ impl TermState {
                 || trimmed.starts_with("thought:");
 
             if is_thought {
-                self.output_lines.push(format!("\x01STREAM\x01  {}{}", prefix, a_gray(line)));
+                self.output_lines
+                    .push(format!("\x01STREAM\x01  {}{}", prefix, a_gray(line)));
             } else {
                 // Render through markdown pipeline (one line at a time,
                 // but tracking code-block state across lines)
                 let md_lines = render_md_lines(line, &mut in_code_block);
                 for (j, md_line) in md_lines.iter().enumerate() {
                     let p = if i == 0 && j == 0 { "🐻 " } else { "   " };
-                    self.output_lines.push(format!("\x01STREAM\x01  {}{}", p, md_line));
+                    self.output_lines
+                        .push(format!("\x01STREAM\x01  {}{}", p, md_line));
                 }
             }
 
@@ -1683,22 +2055,30 @@ impl TermState {
     }
 
     fn cursor_left(&mut self) {
-        if self.cursor_pos > 0 { self.cursor_pos -= 1; }
+        if self.cursor_pos > 0 {
+            self.cursor_pos -= 1;
+        }
     }
 
     fn cursor_right(&mut self) {
-        if self.cursor_pos < self.input_buf.len() { self.cursor_pos += 1; }
+        if self.cursor_pos < self.input_buf.len() {
+            self.cursor_pos += 1;
+        }
     }
 
     fn history_prev(&mut self) {
-        if self.history.is_empty() { return; }
+        if self.history.is_empty() {
+            return;
+        }
         match self.history_idx {
             None => {
                 self.saved_input = self.input_buf.clone();
                 self.history_idx = Some(self.history.len() - 1);
             }
             Some(0) => return,
-            Some(idx) => { self.history_idx = Some(idx - 1); }
+            Some(idx) => {
+                self.history_idx = Some(idx - 1);
+            }
         }
         if let Some(idx) = self.history_idx {
             self.input_buf = self.history[idx].clone();

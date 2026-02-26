@@ -1,7 +1,7 @@
 use anyhow::Result;
 use bear_core::ConfigFile;
-use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::execute;
+use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use std::io::{self, BufRead, Write};
 
 use crate::menu::{interactive_menu, MenuItem, MenuMode, MenuResult};
@@ -37,7 +37,11 @@ fn run_setup_wizard() -> Result<()> {
         },
     ];
 
-    let provider_idx = match interactive_menu("Which LLM provider would you like to use?", &items, MenuMode::Single) {
+    let provider_idx = match interactive_menu(
+        "Which LLM provider would you like to use?",
+        &items,
+        MenuMode::Single,
+    ) {
         MenuResult::Single(idx) => idx,
         MenuResult::Cancelled => {
             anyhow::bail!("Setup cancelled.");

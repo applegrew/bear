@@ -152,8 +152,7 @@ pub async fn rtc_offer(
     };
 
     let conn_id = Uuid::new_v4().to_string();
-    let pending_candidates: Arc<Mutex<Vec<RTCIceCandidateInit>>> =
-        Arc::new(Mutex::new(Vec::new()));
+    let pending_candidates: Arc<Mutex<Vec<RTCIceCandidateInit>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Collect server ICE candidates
     let cands = pending_candidates.clone();
@@ -177,7 +176,10 @@ pub async fn rtc_offer(
         let sid = relay_session_id;
         let info = relay_info.clone();
         Box::pin(async move {
-            tracing::info!("rtc: data channel '{}' opened for session {sid}", dc.label());
+            tracing::info!(
+                "rtc: data channel '{}' opened for session {sid}",
+                dc.label()
+            );
             tokio::spawn(async move {
                 handle_data_channel(state, sid, info, dc).await;
             });
@@ -223,11 +225,7 @@ pub async fn rtc_offer(
         );
     }
 
-    Json(OfferResponse {
-        conn_id,
-        sdp,
-    })
-    .into_response()
+    Json(OfferResponse { conn_id, sdp }).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +267,11 @@ pub async fn rtc_get_candidates(
 ) -> impl IntoResponse {
     let peers = state.rtc_peers.read().await;
     let Some(peer) = peers.get(&conn_id) else {
-        return (StatusCode::NOT_FOUND, Json(IceCandidateResponse { candidates: vec![] })).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(IceCandidateResponse { candidates: vec![] }),
+        )
+            .into_response();
     };
 
     let mut cands = peer.pending_candidates.lock().await;
@@ -306,30 +308,54 @@ async fn handle_data_channel(
     dc: Arc<RTCDataChannel>,
 ) {
     // Send initial messages
-    let _ = dc_send_msg(&dc, &ServerMessage::SessionInfo { session: info.clone() }).await;
-    let _ = dc_send_msg(&dc, &ServerMessage::SlashCommands { commands: slash_command_infos() }).await;
+    let _ = dc_send_msg(
+        &dc,
+        &ServerMessage::SessionInfo {
+            session: info.clone(),
+        },
+    )
+    .await;
+    let _ = dc_send_msg(
+        &dc,
+        &ServerMessage::SlashCommands {
+            commands: slash_command_infos(),
+        },
+    )
+    .await;
 
     // Send shared client state (input history)
     {
         let sessions = state.sessions.read().await;
         if let Some(session) = sessions.get(&session_id) {
-            let _ = dc_send_msg(&dc, &ServerMessage::ClientState {
-                input_history: session.input_history.clone(),
-            }).await;
+            let _ = dc_send_msg(
+                &dc,
+                &ServerMessage::ClientState {
+                    input_history: session.input_history.clone(),
+                },
+            )
+            .await;
         }
     }
 
-    let _ = dc_send_msg(&dc, &ServerMessage::Notice {
-        text: format!(
-            "Session persists after clients disconnect. Working directory is {}.",
-            info.cwd
-        ),
-    }).await;
+    let _ = dc_send_msg(
+        &dc,
+        &ServerMessage::Notice {
+            text: format!(
+                "Session persists after clients disconnect. Working directory is {}.",
+                info.cwd
+            ),
+        },
+    )
+    .await;
 
     if info.name.is_none() {
-        let _ = dc_send_msg(&dc, &ServerMessage::Notice {
-            text: "Tip: Name this session with /session name <name>".to_string(),
-        }).await;
+        let _ = dc_send_msg(
+            &dc,
+            &ServerMessage::Notice {
+                text: "Tip: Name this session with /session name <name>".to_string(),
+            },
+        )
+        .await;
     }
 
     // Ensure the session worker is running
@@ -339,9 +365,13 @@ async fn handle_data_channel(
     let mut consumer = {
         let buses = state.buses.read().await;
         let Some(bus) = buses.get(&session_id) else {
-            let _ = dc_send_msg(&dc, &ServerMessage::Error {
-                text: "session bus not found".to_string(),
-            }).await;
+            let _ = dc_send_msg(
+                &dc,
+                &ServerMessage::Error {
+                    text: "session bus not found".to_string(),
+                },
+            )
+            .await;
             return;
         };
         bus.consumer()
@@ -544,7 +574,8 @@ async fn dc_send_msg(dc: &Arc<RTCDataChannel>, msg: &ServerMessage) -> Result<()
     let payload = serde_json::to_string(msg).map_err(|e| e.to_string())?;
 
     if payload.len() <= DC_MAX_PAYLOAD {
-        return dc.send_text(payload)
+        return dc
+            .send_text(payload)
             .await
             .map(|_| ())
             .map_err(|e| e.to_string());
@@ -553,7 +584,10 @@ async fn dc_send_msg(dc: &Arc<RTCDataChannel>, msg: &ServerMessage) -> Result<()
     let chunk_id = uuid::Uuid::new_v4().to_string();
     let chunks = chunk_payload(&payload, DC_MAX_PAYLOAD);
     let total = chunks.len();
-    tracing::debug!("dc_send_msg: splitting {}-byte payload into {total} chunks", payload.len());
+    tracing::debug!(
+        "dc_send_msg: splitting {}-byte payload into {total} chunks",
+        payload.len()
+    );
 
     for (idx, data) in chunks.iter().enumerate() {
         let envelope = serde_json::json!({

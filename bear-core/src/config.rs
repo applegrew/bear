@@ -94,8 +94,7 @@ impl RelayConfig {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(&path, json)
     }
 
@@ -138,8 +137,7 @@ impl ConfigFile {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(&path, json)
     }
 
@@ -163,7 +161,8 @@ impl AppConfig {
         }
 
         fn env_or_string(key: &str, file_val: Option<String>, default: &str) -> String {
-            std::env::var(key).ok()
+            std::env::var(key)
+                .ok()
                 .or(file_val)
                 .unwrap_or_else(|| default.to_string())
         }
@@ -186,7 +185,11 @@ impl AppConfig {
             openai_model: env_or_string("BEAR_OPENAI_MODEL", file.openai_model, "gpt-4"),
             openai_url: env_or_string("BEAR_OPENAI_URL", file.openai_url, "https://api.openai.com"),
             max_tool_depth: env_or("BEAR_MAX_TOOL_DEPTH", file.max_tool_depth, 100),
-            max_tool_output_chars: env_or("BEAR_MAX_TOOL_OUTPUT_CHARS", file.max_tool_output_chars, 32_000),
+            max_tool_output_chars: env_or(
+                "BEAR_MAX_TOOL_OUTPUT_CHARS",
+                file.max_tool_output_chars,
+                32_000,
+            ),
             context_budget: env_or("BEAR_CONTEXT_BUDGET", file.context_budget, 16_000),
             keep_recent: env_or("BEAR_KEEP_RECENT", file.keep_recent, 20),
             google_api_key: env_or_opt("BEAR_GOOGLE_API_KEY", file.google_api_key),
@@ -204,7 +207,8 @@ impl AppConfig {
                 .unwrap_or(default)
         }
 
-        let provider_str = std::env::var("BEAR_LLM_PROVIDER").unwrap_or_else(|_| "ollama".to_string());
+        let provider_str =
+            std::env::var("BEAR_LLM_PROVIDER").unwrap_or_else(|_| "ollama".to_string());
         let llm_provider = match provider_str.to_lowercase().as_str() {
             "openai" => LlmProvider::OpenAI,
             _ => LlmProvider::Ollama,

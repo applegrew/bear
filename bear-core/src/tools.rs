@@ -1,8 +1,8 @@
 use std::io::BufRead;
 use std::panic::AssertUnwindSafe;
 
-use async_trait::async_trait;
 use crate::{PendingToolCall, ProcessInfo, ServerMessage, TodoItem, UndoEntry};
+use async_trait::async_trait;
 use futures::FutureExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -38,15 +38,14 @@ pub fn parse_tool_calls(text: &str) -> Vec<ParsedToolCall> {
                     }
                 }
             }
-            let Some((_abs_start, json_start)) = best else { break };
+            let Some((_abs_start, json_start)) = best else {
+                break;
+            };
 
             if let Some(end) = text[json_start..].find("[/TOOL_CALL]") {
                 let json_str = &text[json_start..json_start + end];
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
-                    if let (Some(name), Some(args)) = (
-                        val["name"].as_str(),
-                        val.get("arguments"),
-                    ) {
+                    if let (Some(name), Some(args)) = (val["name"].as_str(), val.get("arguments")) {
                         calls.push(ParsedToolCall {
                             name: name.to_string(),
                             arguments: args.clone(),
@@ -65,16 +64,22 @@ pub fn parse_tool_calls(text: &str) -> Vec<ParsedToolCall> {
         let mut pos = 0;
         while pos < text.len() {
             // Find opening bracket
-            let Some(bracket) = text[pos..].find('[') else { break };
+            let Some(bracket) = text[pos..].find('[') else {
+                break;
+            };
             let abs_bracket = pos + bracket;
             // Find closing bracket
             let after = &text[abs_bracket + 1..];
-            let Some(close_bracket) = after.find(']') else { break };
+            let Some(close_bracket) = after.find(']') else {
+                break;
+            };
             let tag_name = &after[..close_bracket];
 
             // Must be snake_case with at least one underscore
             let is_tool = tag_name.contains('_')
-                && tag_name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+                && tag_name
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b == b'_');
 
             if !is_tool {
                 pos = abs_bracket + 1 + close_bracket + 1;
@@ -131,23 +136,66 @@ pub trait ToolContext: Send + Sync {
     async fn set_session_cwd(&self, session_id: Uuid, new_cwd: String);
 
     // Process management
-    async fn register_process(&self, session_id: Uuid, pid: u32, command: String, stdin_tx: mpsc::Sender<String>);
+    async fn register_process(
+        &self,
+        session_id: Uuid,
+        pid: u32,
+        command: String,
+        stdin_tx: mpsc::Sender<String>,
+    );
     async fn mark_process_exited(&self, pid: u32);
 
     // Workspace (.bear/) persistence
     async fn load_workspace_auto_approved(&self, cwd: &str) -> std::collections::HashSet<String>;
-    async fn save_workspace_auto_approved(&self, cwd: &str, set: &std::collections::HashSet<String>);
-    async fn reset_session_auto_approved(&self, session_id: Uuid, new_set: std::collections::HashSet<String>);
-    async fn save_script(&self, cwd: &str, script: &crate::workspace::SavedScript) -> Result<(), String>;
-    async fn load_script(&self, cwd: &str, name: &str) -> Result<crate::workspace::SavedScript, String>;
+    async fn save_workspace_auto_approved(
+        &self,
+        cwd: &str,
+        set: &std::collections::HashSet<String>,
+    );
+    async fn reset_session_auto_approved(
+        &self,
+        session_id: Uuid,
+        new_set: std::collections::HashSet<String>,
+    );
+    async fn save_script(
+        &self,
+        cwd: &str,
+        script: &crate::workspace::SavedScript,
+    ) -> Result<(), String>;
+    async fn load_script(
+        &self,
+        cwd: &str,
+        name: &str,
+    ) -> Result<crate::workspace::SavedScript, String>;
     async fn list_scripts(&self, cwd: &str) -> Vec<crate::workspace::SavedScript>;
 
     // LSP access
-    async fn lsp_diagnostics(&self, file_path: &str, workspace_root: &str) -> Result<String, String>;
-    async fn lsp_hover(&self, file_path: &str, line: u32, character: u32, workspace_root: &str) -> Result<String, String>;
-    async fn lsp_references(&self, file_path: &str, line: u32, character: u32, workspace_root: &str) -> Result<String, String>;
+    async fn lsp_diagnostics(
+        &self,
+        file_path: &str,
+        workspace_root: &str,
+    ) -> Result<String, String>;
+    async fn lsp_hover(
+        &self,
+        file_path: &str,
+        line: u32,
+        character: u32,
+        workspace_root: &str,
+    ) -> Result<String, String>;
+    async fn lsp_references(
+        &self,
+        file_path: &str,
+        line: u32,
+        character: u32,
+        workspace_root: &str,
+    ) -> Result<String, String>;
     async fn lsp_symbols(&self, file_path: &str, workspace_root: &str) -> Result<String, String>;
-    async fn lsp_find_symbol_range(&self, file_path: &str, symbol: &str, workspace_root: &str) -> Result<(u32, u32), String>;
+    async fn lsp_find_symbol_range(
+        &self,
+        file_path: &str,
+        symbol: &str,
+        workspace_root: &str,
+    ) -> Result<(u32, u32), String>;
 }
 
 /// Trait for sending messages to connected clients (bus).
@@ -234,8 +282,12 @@ async fn execute_tool_inner(
                 Err(e) => return e,
             };
             // Read old content for diff (empty if new file)
-            let old_content = tokio::fs::read_to_string(&full_path).await.unwrap_or_default();
-            let previous = tokio::fs::read_to_string(&full_path).await.unwrap_or_default();
+            let old_content = tokio::fs::read_to_string(&full_path)
+                .await
+                .unwrap_or_default();
+            let previous = tokio::fs::read_to_string(&full_path)
+                .await
+                .unwrap_or_default();
             ctx.push_undo(session_id, &full_path, previous).await;
             if let Some(parent) = std::path::Path::new(&full_path).parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
@@ -326,7 +378,10 @@ pub fn validate_tool_path(path: &str, cwd: &str) -> Result<String, String> {
     }
     // Block access to .bear/ directory — managed exclusively by the server
     if is_bear_dir_path(&full) {
-        return Err("Error: the .bear/ directory is managed by Bear and cannot be accessed directly.".to_string());
+        return Err(
+            "Error: the .bear/ directory is managed by Bear and cannot be accessed directly."
+                .to_string(),
+        );
     }
     Ok(full)
 }
@@ -361,9 +416,7 @@ async fn execute_session_workdir(
         .await
     {
         Ok(out) if out.status.success() => {
-            let new_cwd = String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .to_string();
+            let new_cwd = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if new_cwd.is_empty() {
                 return "Error: failed to resolve working directory".to_string();
             }
@@ -371,11 +424,13 @@ async fn execute_session_workdir(
 
             // Load fresh workspace state from the new directory's .bear/
             let new_auto_approved = ctx.load_workspace_auto_approved(&new_cwd).await;
-            ctx.reset_session_auto_approved(session_id, new_auto_approved).await;
+            ctx.reset_session_auto_approved(session_id, new_auto_approved)
+                .await;
 
             bus.send(ServerMessage::Notice {
                 text: format!("Working directory set to: {new_cwd}"),
-            }).await;
+            })
+            .await;
             format!("Working directory changed to {new_cwd}")
         }
         Ok(out) => {
@@ -428,11 +483,11 @@ pub async fn execute_run_command(
         running: true,
     };
 
-    ctx.register_process(session_id, pid, cmd_str.to_string(), stdin_tx).await;
+    ctx.register_process(session_id, pid, cmd_str.to_string(), stdin_tx)
+        .await;
 
-    bus.send(ServerMessage::ProcessStarted {
-        info: proc_info,
-    }).await;
+    bus.send(ServerMessage::ProcessStarted { info: proc_info })
+        .await;
 
     let mut stdin_handle = child.stdin.take();
     let stdout = child.stdout.take();
@@ -478,7 +533,8 @@ pub async fn execute_run_command(
         bus.send(ServerMessage::ProcessOutput {
             pid,
             text: line.clone(),
-        }).await;
+        })
+        .await;
         all_output.push_str(&line);
         all_output.push('\n');
     }
@@ -491,7 +547,10 @@ pub async fn execute_run_command(
     bus.send(ServerMessage::ProcessExited { pid, code }).await;
 
     if all_output.is_empty() {
-        format!("Process exited with code {}", code.map(|c| c.to_string()).unwrap_or("unknown".into()))
+        format!(
+            "Process exited with code {}",
+            code.map(|c| c.to_string()).unwrap_or("unknown".into())
+        )
     } else {
         all_output
     }
@@ -681,13 +740,13 @@ pub fn apply_unified_diff(original: &str, diff: &str) -> Result<String, String> 
             if hline.starts_with("@@") {
                 break;
             }
-            if hline.starts_with('-') {
-                hunk_lines.push(HunkLine::Remove(hline[1..].to_string()));
-            } else if hline.starts_with('+') {
-                hunk_lines.push(HunkLine::Add(hline[1..].to_string()));
+            if let Some(rest) = hline.strip_prefix('-') {
+                hunk_lines.push(HunkLine::Remove(rest.to_string()));
+            } else if let Some(rest) = hline.strip_prefix('+') {
+                hunk_lines.push(HunkLine::Add(rest.to_string()));
             } else {
                 // Context line (starts with ' ' or is bare text)
-                let ctx = if hline.starts_with(' ') { &hline[1..] } else { hline };
+                let ctx = hline.strip_prefix(' ').unwrap_or(hline);
                 hunk_lines.push(HunkLine::Context(ctx.to_string()));
             }
             di += 1;
@@ -743,23 +802,20 @@ pub fn apply_unified_diff(original: &str, diff: &str) -> Result<String, String> 
 
         let find_match = |cmp: &dyn Fn(&str, &str) -> bool| -> Option<usize> {
             let scan_from = search_start;
-            let scan_to = if search_end >= need { search_end - need + 1 } else { scan_from };
+            let scan_to = if search_end >= need {
+                search_end - need + 1
+            } else {
+                scan_from
+            };
             let mut best_pos: Option<usize> = None;
             let mut best_distance: usize = usize::MAX;
 
             for pos in scan_from..=scan_to.min(orig_lines.len().saturating_sub(need)) {
-                let matches = old_lines_expected
-                    .iter()
-                    .enumerate()
-                    .all(|(k, &expected)| {
-                        pos + k < orig_lines.len() && cmp(orig_lines[pos + k], expected)
-                    });
+                let matches = old_lines_expected.iter().enumerate().all(|(k, &expected)| {
+                    pos + k < orig_lines.len() && cmp(orig_lines[pos + k], expected)
+                });
                 if matches {
-                    let distance = if pos >= claimed_0 {
-                        pos - claimed_0
-                    } else {
-                        claimed_0 - pos
-                    };
+                    let distance = pos.abs_diff(claimed_0);
                     if distance < best_distance {
                         best_distance = distance;
                         best_pos = Some(pos);
@@ -791,15 +847,18 @@ pub fn apply_unified_diff(original: &str, diff: &str) -> Result<String, String> 
                                      expected ({} bytes): {:?}\n  \
                                      actual   ({} bytes): {:?}",
                                     claimed_0 + k + 1,
-                                    expected.len(), expected,
-                                    actual.len(), actual,
+                                    expected.len(),
+                                    expected,
+                                    actual.len(),
+                                    actual,
                                 );
                                 break;
                             }
                         } else {
                             mismatch_info = format!(
                                 "\nFile has only {} lines but hunk expects {} old lines",
-                                orig_lines.len(), need,
+                                orig_lines.len(),
+                                need,
                             );
                             break;
                         }
@@ -948,25 +1007,33 @@ pub fn generate_unified_diff(old: &str, new: &str, path: &str, context: usize) -
         let mut new_count = 0usize;
         let mut first = true;
 
-        for idx in *start..*end {
-            let (op, oi, ni) = edits[idx];
+        for &(op, oi, ni) in &edits[*start..*end] {
             if first {
                 old_start = oi + 1;
                 new_start = ni + 1;
                 first = false;
             }
             match op {
-                'E' => { old_count += 1; new_count += 1; }
-                'D' => { old_count += 1; }
-                'I' => { new_count += 1; }
+                'E' => {
+                    old_count += 1;
+                    new_count += 1;
+                }
+                'D' => {
+                    old_count += 1;
+                }
+                'I' => {
+                    new_count += 1;
+                }
                 _ => {}
             }
         }
 
-        out.push_str(&format!("@@ -{},{} +{},{} @@\n", old_start, old_count, new_start, new_count));
+        out.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            old_start, old_count, new_start, new_count
+        ));
 
-        for idx in *start..*end {
-            let (op, oi, ni) = edits[idx];
+        for &(op, oi, ni) in &edits[*start..*end] {
             match op {
                 'E' => out.push_str(&format!(" {}\n", old_lines[oi])),
                 'D' => out.push_str(&format!("-{}\n", old_lines[oi])),
@@ -991,9 +1058,7 @@ async fn execute_list_files(ptc: &PendingToolCall) -> String {
     let pattern = ptc.tool_call.arguments["pattern"]
         .as_str()
         .map(|s| s.to_string());
-    let max_depth = ptc.tool_call.arguments["max_depth"]
-        .as_u64()
-        .unwrap_or(3) as usize;
+    let max_depth = ptc.tool_call.arguments["max_depth"].as_u64().unwrap_or(3) as usize;
 
     let full_path = match validate_tool_path(&path, &ptc.cwd) {
         Ok(p) => p,
@@ -1027,7 +1092,14 @@ fn list_files_sync(root: &str, pattern: Option<&str>, max_depth: usize) -> Strin
 
     let glob_pattern = pattern.and_then(|p| glob::Pattern::new(p).ok());
     let mut entries = Vec::new();
-    collect_entries(root_path, root_path, 0, max_depth, &glob_pattern, &mut entries);
+    collect_entries(
+        root_path,
+        root_path,
+        0,
+        max_depth,
+        &glob_pattern,
+        &mut entries,
+    );
 
     if entries.is_empty() {
         "No matching files found.".to_string()
@@ -1140,7 +1212,15 @@ fn search_text_sync(
     if root_path.is_file() {
         search_file(root_path, &re, &mut results, max_results);
     } else {
-        search_dir(root_path, &re, &include_glob, &mut results, max_results, 0, 10);
+        search_dir(
+            root_path,
+            &re,
+            &include_glob,
+            &mut results,
+            max_results,
+            0,
+            10,
+        );
     }
 
     if results.is_empty() {
@@ -1184,7 +1264,15 @@ fn search_dir(
             continue;
         }
         if path.is_dir() {
-            search_dir(&path, re, include, results, max_results, depth + 1, max_depth);
+            search_dir(
+                &path,
+                re,
+                include,
+                results,
+                max_results,
+                depth + 1,
+                max_depth,
+            );
         } else {
             if let Some(ref pat) = include {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -1223,11 +1311,7 @@ fn search_file(
 // undo
 // ---------------------------------------------------------------------------
 
-async fn execute_undo(
-    ctx: &dyn ToolContext,
-    session_id: Uuid,
-    ptc: &PendingToolCall,
-) -> String {
+async fn execute_undo(ctx: &dyn ToolContext, session_id: Uuid, ptc: &PendingToolCall) -> String {
     let steps = ptc.tool_call.arguments["steps"]
         .as_u64()
         .unwrap_or(1)
@@ -1271,7 +1355,12 @@ async fn execute_todo_write(
         if content.is_empty() {
             continue;
         }
-        todo_list.push(TodoItem { id, content, status, priority });
+        todo_list.push(TodoItem {
+            id,
+            content,
+            status,
+            priority,
+        });
     }
 
     let count = todo_list.len();
@@ -1279,10 +1368,7 @@ async fn execute_todo_write(
     format!("Todo list updated ({count} items).")
 }
 
-async fn execute_todo_read(
-    ctx: &dyn ToolContext,
-    session_id: Uuid,
-) -> String {
+async fn execute_todo_read(ctx: &dyn ToolContext, session_id: Uuid) -> String {
     let todo_list = ctx.get_todo_list(session_id).await;
     if todo_list.is_empty() {
         return "Todo list is empty.".to_string();
@@ -1299,7 +1385,10 @@ async fn execute_todo_read(
             "low" => " [LOW]",
             _ => "",
         };
-        lines.push(format!("{status_icon} [{}] {}{priority_tag}", item.id, item.content));
+        lines.push(format!(
+            "{status_icon} [{}] {}{priority_tag}",
+            item.id, item.content
+        ));
     }
     lines.join("\n")
 }
@@ -1308,10 +1397,7 @@ async fn execute_todo_read(
 // web_fetch / web_search
 // ---------------------------------------------------------------------------
 
-async fn execute_web_fetch(
-    ctx: &dyn ToolContext,
-    ptc: &PendingToolCall,
-) -> String {
+async fn execute_web_fetch(ctx: &dyn ToolContext, ptc: &PendingToolCall) -> String {
     let url = match ptc.tool_call.arguments["url"].as_str() {
         Some(u) if !u.is_empty() => u.to_string(),
         _ => return "Error: web_fetch requires a 'url' argument.".to_string(),
@@ -1324,7 +1410,8 @@ async fn execute_web_fetch(
         return "Error: URL must start with http:// or https://".to_string();
     }
 
-    let response = match ctx.http_client()
+    let response = match ctx
+        .http_client()
         .get(&url)
         .header("User-Agent", "Bear/1.0 (AI coding assistant)")
         .send()
@@ -1351,7 +1438,11 @@ async fn execute_web_fetch(
         while end > 0 && !text.is_char_boundary(end) {
             end -= 1;
         }
-        format!("{}\n\n[... truncated at {end} bytes, total {} bytes]", &text[..end], text.len())
+        format!(
+            "{}\n\n[... truncated at {end} bytes, total {} bytes]",
+            &text[..end],
+            text.len()
+        )
     } else {
         text
     }
@@ -1412,10 +1503,14 @@ pub fn strip_html_tags(html: &str) -> String {
         if bytes[i] == b'<' {
             in_tag = true;
             let rest = &lower[i..];
-            if rest.starts_with("<br") || rest.starts_with("<p ")
-                || rest.starts_with("<p>") || rest.starts_with("<div")
-                || rest.starts_with("<li") || rest.starts_with("<h1")
-                || rest.starts_with("<h2") || rest.starts_with("<h3")
+            if rest.starts_with("<br")
+                || rest.starts_with("<p ")
+                || rest.starts_with("<p>")
+                || rest.starts_with("<div")
+                || rest.starts_with("<li")
+                || rest.starts_with("<h1")
+                || rest.starts_with("<h2")
+                || rest.starts_with("<h3")
                 || rest.starts_with("<tr")
             {
                 result.push('\n');
@@ -1501,17 +1596,12 @@ pub fn collapse_whitespace(text: &str) -> String {
     result.trim().to_string()
 }
 
-async fn execute_web_search(
-    ctx: &dyn ToolContext,
-    ptc: &PendingToolCall,
-) -> String {
+async fn execute_web_search(ctx: &dyn ToolContext, ptc: &PendingToolCall) -> String {
     let query = match ptc.tool_call.arguments["query"].as_str() {
         Some(q) if !q.is_empty() => q.to_string(),
         _ => return "Error: web_search requires a 'query' argument.".to_string(),
     };
-    let max_results = ptc.tool_call.arguments["max_results"]
-        .as_u64()
-        .unwrap_or(5) as usize;
+    let max_results = ptc.tool_call.arguments["max_results"].as_u64().unwrap_or(5) as usize;
 
     // Fallback chain: DDG → Google → Brave → error
     let mut last_error;
@@ -1585,11 +1675,15 @@ async fn search_ddg(
             return Err(format!("HTTP {status}"));
         }
 
-        let body = response.text().await
+        let body = response
+            .text()
+            .await
             .map_err(|e| format!("body read failed: {e}"))?;
 
         // Detect CAPTCHA even on 200 (DDG sometimes returns 200 with CAPTCHA)
-        if body.contains("anomaly-modal") || body.contains("Please complete the following challenge") {
+        if body.contains("anomaly-modal")
+            || body.contains("Please complete the following challenge")
+        {
             continue;
         }
 
@@ -1610,10 +1704,12 @@ fn parse_ddg_results(html: &str, max_results: usize) -> String {
     let mut pos = 0;
     while results.len() < max_results {
         let marker = "class=\"result__a\"";
-        let Some(marker_pos) = html[pos..].find(marker) else { break };
+        let Some(marker_pos) = html[pos..].find(marker) else {
+            break;
+        };
         let abs_pos = pos + marker_pos;
 
-        let search_back_start = if abs_pos > 200 { abs_pos - 200 } else { 0 };
+        let search_back_start = abs_pos.saturating_sub(200);
         let href_end = (abs_pos + marker.len() + 200).min(html.len());
         let href = extract_href(&html[search_back_start..href_end]);
 
@@ -1631,7 +1727,12 @@ fn parse_ddg_results(html: &str, max_results: usize) -> String {
         let snippet = if let Some(sp) = html[pos..].find(snippet_marker) {
             let sp_abs = pos + sp + snippet_marker.len();
             let sn_start = html[sp_abs..].find('>').map(|p| sp_abs + p + 1);
-            let sn_end = sn_start.and_then(|s| html[s..].find("</a>").or_else(|| html[s..].find("</span>")).map(|p| s + p));
+            let sn_end = sn_start.and_then(|s| {
+                html[s..]
+                    .find("</a>")
+                    .or_else(|| html[s..].find("</span>"))
+                    .map(|p| s + p)
+            });
             match (sn_start, sn_end) {
                 (Some(s), Some(e)) => strip_html_tags(&html[s..e]).trim().to_string(),
                 _ => String::new(),
@@ -1644,9 +1745,17 @@ fn parse_ddg_results(html: &str, max_results: usize) -> String {
             results.push(format!(
                 "{}. {}\n   {}\n   {}",
                 results.len() + 1,
-                if title.is_empty() { "(no title)" } else { &title },
+                if title.is_empty() {
+                    "(no title)"
+                } else {
+                    &title
+                },
                 if href.is_empty() { "(no url)" } else { &href },
-                if snippet.is_empty() { "(no snippet)" } else { &snippet },
+                if snippet.is_empty() {
+                    "(no snippet)"
+                } else {
+                    &snippet
+                },
             ));
         }
     }
@@ -1668,7 +1777,9 @@ fn extract_href(fragment: &str) -> String {
                 let url_start = uddg_pos + 5;
                 let url_end = raw[url_start..].find('&').unwrap_or(raw.len() - url_start);
                 let encoded = &raw[url_start..url_start + url_end];
-                return urlencoding::decode(encoded).unwrap_or_else(|_| encoded.into()).to_string();
+                return urlencoding::decode(encoded)
+                    .unwrap_or_else(|_| encoded.into())
+                    .to_string();
             }
             return raw.to_string();
         }
@@ -1710,7 +1821,9 @@ async fn search_google(
         return Err(format!("HTTP {status}"));
     }
 
-    let body: serde_json::Value = response.json().await
+    let body: serde_json::Value = response
+        .json()
+        .await
         .map_err(|e| format!("JSON parse failed: {e}"))?;
 
     let items = body["items"].as_array();
@@ -1766,7 +1879,9 @@ async fn search_brave(
         return Err(format!("HTTP {status}"));
     }
 
-    let body: serde_json::Value = response.json().await
+    let body: serde_json::Value = response
+        .json()
+        .await
         .map_err(|e| format!("JSON parse failed: {e}"))?;
 
     let results_arr = body["web"]["results"].as_array();
@@ -1828,12 +1943,8 @@ async fn execute_lsp_hover(
         .as_str()
         .unwrap_or("")
         .to_string();
-    let line = ptc.tool_call.arguments["line"]
-        .as_u64()
-        .unwrap_or(0) as u32;
-    let character = ptc.tool_call.arguments["character"]
-        .as_u64()
-        .unwrap_or(0) as u32;
+    let line = ptc.tool_call.arguments["line"].as_u64().unwrap_or(0) as u32;
+    let character = ptc.tool_call.arguments["character"].as_u64().unwrap_or(0) as u32;
     if path.is_empty() {
         return "Error: lsp_hover requires a 'path' argument.".to_string();
     }
@@ -1862,12 +1973,8 @@ async fn execute_lsp_references(
         .as_str()
         .unwrap_or("")
         .to_string();
-    let line = ptc.tool_call.arguments["line"]
-        .as_u64()
-        .unwrap_or(0) as u32;
-    let character = ptc.tool_call.arguments["character"]
-        .as_u64()
-        .unwrap_or(0) as u32;
+    let line = ptc.tool_call.arguments["line"].as_u64().unwrap_or(0) as u32;
+    let character = ptc.tool_call.arguments["character"].as_u64().unwrap_or(0) as u32;
     if path.is_empty() {
         return "Error: lsp_references requires a 'path' argument.".to_string();
     }
@@ -1881,7 +1988,10 @@ async fn execute_lsp_references(
     };
     let lsp_line = if line > 0 { line - 1 } else { 0 };
     let lsp_char = if character > 0 { character - 1 } else { 0 };
-    match ctx.lsp_references(&full_path, lsp_line, lsp_char, &cwd).await {
+    match ctx
+        .lsp_references(&full_path, lsp_line, lsp_char, &cwd)
+        .await
+    {
         Ok(result) => result,
         Err(e) => format!("LSP error: {e}"),
     }
@@ -1942,10 +2052,7 @@ async fn execute_read_symbol(
         None => return "Error: session not found".to_string(),
     };
 
-    let (start_line, end_line) = match ctx
-        .lsp_find_symbol_range(&full_path, &symbol, &cwd)
-        .await
-    {
+    let (start_line, end_line) = match ctx.lsp_find_symbol_range(&full_path, &symbol, &cwd).await {
         Ok(range) => range,
         Err(e) => return e,
     };
@@ -1960,7 +2067,10 @@ async fn execute_read_symbol(
     let end = (end_line as usize + 1).min(lines.len());
 
     if start >= lines.len() {
-        return format!("Error: symbol range {start_line}-{end_line} is out of bounds (file has {} lines)", lines.len());
+        return format!(
+            "Error: symbol range {start_line}-{end_line} is out of bounds (file has {} lines)",
+            lines.len()
+        );
     }
 
     let context_before = 2;
@@ -1996,7 +2106,8 @@ async fn execute_patch_symbol(
         .unwrap_or("")
         .to_string();
     if path.is_empty() || symbol.is_empty() {
-        return "Error: patch_symbol requires 'path', 'symbol', and 'content' arguments.".to_string();
+        return "Error: patch_symbol requires 'path', 'symbol', and 'content' arguments."
+            .to_string();
     }
     if new_content.is_empty() {
         return "Error: patch_symbol 'content' must not be empty.".to_string();
@@ -2010,10 +2121,7 @@ async fn execute_patch_symbol(
         None => return "Error: session not found".to_string(),
     };
 
-    let (start_line, end_line) = match ctx
-        .lsp_find_symbol_range(&full_path, &symbol, &cwd)
-        .await
-    {
+    let (start_line, end_line) = match ctx.lsp_find_symbol_range(&full_path, &symbol, &cwd).await {
         Ok(range) => range,
         Err(e) => return e,
     };
@@ -2028,7 +2136,10 @@ async fn execute_patch_symbol(
     let end = (end_line as usize + 1).min(lines.len());
 
     if start >= lines.len() {
-        return format!("Error: symbol range {start_line}-{end_line} is out of bounds (file has {} lines)", lines.len());
+        return format!(
+            "Error: symbol range {start_line}-{end_line} is out of bounds (file has {} lines)",
+            lines.len()
+        );
     }
 
     ctx.push_undo(session_id, &full_path, content.clone()).await;
@@ -2078,6 +2189,7 @@ pub fn extract_shell_commands(cmd_str: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
+    #[allow(clippy::collapsible_str_replace)]
     let replaced = cmd_str
         .replace("&&", "\x00")
         .replace("||", "\x00")
@@ -2087,9 +2199,7 @@ pub fn extract_shell_commands(cmd_str: &str) -> Vec<String> {
         .split('\x00')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .map(|s| {
-            s.trim_start_matches('(').trim_start_matches("$(").trim()
-        })
+        .map(|s| s.trim_start_matches('(').trim_start_matches("$(").trim())
         .collect();
 
     for seg in segments {
@@ -2098,7 +2208,12 @@ pub fn extract_shell_commands(cmd_str: &str) -> Vec<String> {
             if token.contains('=') && !token.starts_with('-') {
                 continue;
             }
-            if *token == "sudo" || *token == "env" || *token == "nohup" || *token == "time" || *token == "nice" {
+            if *token == "sudo"
+                || *token == "env"
+                || *token == "nohup"
+                || *token == "time"
+                || *token == "nice"
+            {
                 continue;
             }
             let base = token.rsplit('/').next().unwrap_or(token);
@@ -2159,7 +2274,11 @@ pub fn truncate_tool_output(output: &str, max_chars: usize) -> String {
     while pos > 0 {
         let line_end = pos;
         pos = if pos > 0 {
-            bytes[..pos - 1].iter().rposition(|&b| b == b'\n').map(|p| p + 1).unwrap_or(0)
+            bytes[..pos - 1]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map(|p| p + 1)
+                .unwrap_or(0)
         } else {
             0
         };
@@ -2206,7 +2325,8 @@ async fn execute_js_eval(ptc: &PendingToolCall) -> String {
             match context.eval(Source::from_bytes(&code)) {
                 Ok(value) => {
                     // Convert the result to a display string
-                    value.to_string(&mut context)
+                    value
+                        .to_string(&mut context)
                         .map(|s| s.to_std_string_escaped())
                         .unwrap_or_else(|e| format!("Error converting result: {e}"))
                 }
@@ -2251,9 +2371,7 @@ async fn execute_git_commit(ptc: &PendingToolCall) -> String {
     }
 
     // Append co-author trailer
-    let full_message = format!(
-        "{message}\n\nCo-authored-by: Bear <applegrew+bear@gmail.com>"
-    );
+    let full_message = format!("{message}\n\nCo-authored-by: Bear <applegrew+bear@gmail.com>");
 
     // Commit
     let commit_out = match Command::new("git")
@@ -2266,13 +2384,25 @@ async fn execute_git_commit(ptc: &PendingToolCall) -> String {
         Err(e) => return format!("Error running git commit: {e}"),
     };
 
-    let stdout = String::from_utf8_lossy(&commit_out.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&commit_out.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&commit_out.stdout)
+        .trim()
+        .to_string();
+    let stderr = String::from_utf8_lossy(&commit_out.stderr)
+        .trim()
+        .to_string();
 
     if commit_out.status.success() {
-        if stderr.is_empty() { stdout } else { format!("{stdout}\n{stderr}") }
+        if stderr.is_empty() {
+            stdout
+        } else {
+            format!("{stdout}\n{stderr}")
+        }
     } else {
-        let combined = if stdout.is_empty() { stderr } else { format!("{stdout}\n{stderr}") };
+        let combined = if stdout.is_empty() {
+            stderr
+        } else {
+            format!("{stdout}\n{stderr}")
+        };
         format!("Error: git commit failed: {combined}")
     }
 }
@@ -2337,10 +2467,7 @@ async fn execute_js_script_save(
     }
 }
 
-async fn execute_js_script_list(
-    ctx: &dyn ToolContext,
-    session_id: Uuid,
-) -> String {
+async fn execute_js_script_list(ctx: &dyn ToolContext, session_id: Uuid) -> String {
     let cwd = match ctx.get_session_cwd(session_id).await {
         Some(c) => c,
         None => return "Error: session not found".to_string(),
@@ -2402,7 +2529,11 @@ async fn execute_js_script(
             preamble.push_str(&format!("const {} = undefined;\n", arg_def.name));
         } else if let Some(s) = val.as_str() {
             // String value — JSON-encode to get proper escaping
-            preamble.push_str(&format!("const {} = {};\n", arg_def.name, serde_json::to_string(s).unwrap_or_else(|_| format!("\"{}\"", s))));
+            preamble.push_str(&format!(
+                "const {} = {};\n",
+                arg_def.name,
+                serde_json::to_string(s).unwrap_or_else(|_| format!("\"{}\"", s))
+            ));
         } else {
             // Number, bool, object, array — use JSON representation
             preamble.push_str(&format!("const {} = {};\n", arg_def.name, val));
@@ -2419,11 +2550,10 @@ async fn execute_js_script(
 
             let mut context = Context::default();
             match context.eval(Source::from_bytes(&full_code)) {
-                Ok(value) => {
-                    value.to_string(&mut context)
-                        .map(|s| s.to_std_string_escaped())
-                        .unwrap_or_else(|e| format!("Error converting result: {e}"))
-                }
+                Ok(value) => value
+                    .to_string(&mut context)
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_else(|e| format!("Error converting result: {e}")),
                 Err(err) => format!("Error: {err}"),
             }
         }),
@@ -2443,6 +2573,7 @@ async fn execute_js_script(
 
 /// Stateful filter that strips tool-call markup from streamed LLM chunks so
 /// the client never sees raw tool-call JSON.
+#[derive(Default)]
 pub struct ToolCallFilter {
     inside: bool,
     close_tag: String,
@@ -2453,12 +2584,14 @@ pub struct ToolCallFilter {
 pub fn is_tool_tag(tag_name: &str) -> bool {
     tag_name == "TOOL_CALL"
         || (tag_name.contains('_')
-            && tag_name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+            && tag_name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b == b'_'))
 }
 
 impl ToolCallFilter {
     pub fn new() -> Self {
-        Self { inside: false, close_tag: String::new(), buf: String::new() }
+        Self::default()
     }
 
     /// Feed a new chunk and return the text that should be shown to the user.
@@ -2489,7 +2622,9 @@ impl ToolCallFilter {
                 let after_bracket = &self.buf[bracket + 1..];
 
                 // Handle malformed [TOOL_CALL{ (missing ] after TOOL_CALL)
-                if after_bracket.starts_with("TOOL_CALL{") || after_bracket.starts_with("TOOL_CALL {") {
+                if after_bracket.starts_with("TOOL_CALL{")
+                    || after_bracket.starts_with("TOOL_CALL {")
+                {
                     output.push_str(&self.buf[..bracket]);
                     self.close_tag = "[/TOOL_CALL]".to_string();
                     self.buf = after_bracket["TOOL_CALL".len()..].to_string();
@@ -2539,15 +2674,29 @@ impl ToolCallFilter {
 
 /// Tools that are auto-executed without user confirmation.
 pub const AUTO_APPROVED_TOOLS: &[&str] = &[
-    "todo_write", "todo_read", "web_fetch", "web_search",
-    "lsp_diagnostics", "lsp_hover", "lsp_references", "lsp_symbols",
+    "todo_write",
+    "todo_read",
+    "web_fetch",
+    "web_search",
+    "lsp_diagnostics",
+    "lsp_hover",
+    "lsp_references",
+    "lsp_symbols",
     "js_eval",
 ];
 
 /// Tools that subagents are allowed to use (read-only).
 pub const SUBAGENT_ALLOWED_TOOLS: &[&str] = &[
-    "read_file", "list_files", "search_text", "web_fetch", "web_search",
-    "lsp_diagnostics", "lsp_hover", "lsp_references", "lsp_symbols", "read_symbol",
+    "read_file",
+    "list_files",
+    "search_text",
+    "web_fetch",
+    "web_search",
+    "lsp_diagnostics",
+    "lsp_hover",
+    "lsp_references",
+    "lsp_symbols",
+    "read_symbol",
     "js_eval",
 ];
 
@@ -2624,14 +2773,20 @@ mod tests {
     async fn js_eval_syntax_error() {
         let ptc = make_js_eval_ptc("function {{{");
         let result = execute_js_eval(&ptc).await;
-        assert!(result.starts_with("Error:"), "Expected error, got: {result}");
+        assert!(
+            result.starts_with("Error:"),
+            "Expected error, got: {result}"
+        );
     }
 
     #[tokio::test]
     async fn js_eval_runtime_error() {
         let ptc = make_js_eval_ptc("undefinedVariable.property");
         let result = execute_js_eval(&ptc).await;
-        assert!(result.starts_with("Error:"), "Expected error, got: {result}");
+        assert!(
+            result.starts_with("Error:"),
+            "Expected error, got: {result}"
+        );
     }
 
     #[tokio::test]
@@ -2653,13 +2808,19 @@ mod tests {
         // require() doesn't exist in boa — should error
         let ptc = make_js_eval_ptc("require('fs')");
         let result = execute_js_eval(&ptc).await;
-        assert!(result.starts_with("Error:"), "Expected error, got: {result}");
+        assert!(
+            result.starts_with("Error:"),
+            "Expected error, got: {result}"
+        );
     }
 
     #[tokio::test]
     async fn js_eval_no_process_access() {
         let ptc = make_js_eval_ptc("process.exit(1)");
         let result = execute_js_eval(&ptc).await;
-        assert!(result.starts_with("Error:"), "Expected error, got: {result}");
+        assert!(
+            result.starts_with("Error:"),
+            "Expected error, got: {result}"
+        );
     }
 }

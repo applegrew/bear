@@ -5,7 +5,7 @@ mod term;
 
 use anyhow::Context;
 use bear_core::{
-    ClientMessage, CreateSessionRequest, CreateSessionResponse, SessionListResponse, ServerMessage,
+    ClientMessage, CreateSessionRequest, CreateSessionResponse, ServerMessage, SessionListResponse,
     DEFAULT_SERVER_URL,
 };
 use clap::Parser;
@@ -108,7 +108,10 @@ async fn main() -> anyhow::Result<()> {
             .send()
             .await
             .context("failed to reach bear-server")?;
-        let body: serde_json::Value = res.json().await.context("invalid response from bear-server")?;
+        let body: serde_json::Value = res
+            .json()
+            .await
+            .context("invalid response from bear-server")?;
         if body.get("ok").and_then(|v| v.as_bool()) == Some(true) {
             let room_id = body["room_id"].as_str().unwrap_or("unknown");
             eprintln!("  Paired with relay successfully.");
@@ -128,7 +131,10 @@ async fn main() -> anyhow::Result<()> {
             .send()
             .await
             .context("failed to reach bear-server")?;
-        let body: serde_json::Value = res.json().await.context("invalid response from bear-server")?;
+        let body: serde_json::Value = res
+            .json()
+            .await
+            .context("invalid response from bear-server")?;
         if body.get("ok").and_then(|v| v.as_bool()) == Some(true) {
             eprintln!("  Relay pairing revoked.");
         } else {
@@ -224,7 +230,11 @@ async fn resolve_session(
         .iter()
         .map(|s| MenuItem {
             label: s.name.clone().unwrap_or_else(|| format!("{}", s.id)),
-            description: format!("{} | created {}", s.cwd, s.created_at.format("%Y-%m-%d %H:%M")),
+            description: format!(
+                "{} | created {}",
+                s.cwd,
+                s.created_at.format("%Y-%m-%d %H:%M")
+            ),
         })
         .collect();
     items.push(MenuItem {
@@ -233,16 +243,12 @@ async fn resolve_session(
     });
 
     match interactive_menu("Select a session:", &items, MenuMode::Single) {
-        MenuResult::Single(idx) if idx < list.sessions.len() => {
-            Ok(Some(list.sessions[idx].id))
-        }
+        MenuResult::Single(idx) if idx < list.sessions.len() => Ok(Some(list.sessions[idx].id)),
         MenuResult::Single(_) => {
             // "New session" was selected
             create_session(http_client, base_url).await.map(Some)
         }
-        MenuResult::Cancelled => {
-            Ok(None)
-        }
+        MenuResult::Cancelled => Ok(None),
         _ => create_session(http_client, base_url).await.map(Some),
     }
 }
@@ -274,7 +280,8 @@ enum LoopEvent {
 
 async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<SessionResult> {
     let ws_url = to_ws_url(base_url, session_id)?;
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url).await
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
+        .await
         .with_context(|| format!("failed to connect to {ws_url}"))?;
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
@@ -330,11 +337,13 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
 
         match event {
             LoopEvent::FromServer(msg) => {
-                dispatch_server_msg(
-                    &msg, &render_tx, &mut last_tool, &mut slash_commands,
-                );
+                dispatch_server_msg(&msg, &render_tx, &mut last_tool, &mut slash_commands);
             }
-            LoopEvent::FromTerm(TermEvent::ToolConfirmResult { tool_call_id, choice, .. }) => {
+            LoopEvent::FromTerm(TermEvent::ToolConfirmResult {
+                tool_call_id,
+                choice,
+                ..
+            }) => {
                 let approved = choice != ToolConfirmChoice::Deny;
                 let always = choice == ToolConfirmChoice::Always;
                 let payload = serde_json::to_string(&ClientMessage::ToolConfirm {
@@ -357,36 +366,29 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                 } else if let Some(rest) = line.strip_prefix("/kill ") {
                     match rest.trim().parse::<u32>() {
                         Ok(pid) => {
-                            let payload = serde_json::to_string(
-                                &ClientMessage::ProcessKill { pid },
-                            )?;
+                            let payload =
+                                serde_json::to_string(&ClientMessage::ProcessKill { pid })?;
                             ws_send!(payload);
                         }
                         Err(_) => {
-                            let _ = render_tx.send(RenderCmd::Error(
-                                "Usage: /kill <pid>".into(),
-                            ));
+                            let _ = render_tx.send(RenderCmd::Error("Usage: /kill <pid>".into()));
                         }
                     }
                 } else if let Some(rest) = line.strip_prefix("/send ") {
                     if let Some((pid_str, text)) = rest.split_once(' ') {
                         if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                            let payload = serde_json::to_string(
-                                &ClientMessage::ProcessInput {
-                                    pid,
-                                    text: text.to_string(),
-                                },
-                            )?;
+                            let payload = serde_json::to_string(&ClientMessage::ProcessInput {
+                                pid,
+                                text: text.to_string(),
+                            })?;
                             ws_send!(payload);
                         } else {
-                            let _ = render_tx.send(RenderCmd::Error(
-                                "Usage: /send <pid> <text>".into(),
-                            ));
+                            let _ = render_tx
+                                .send(RenderCmd::Error("Usage: /send <pid> <text>".into()));
                         }
                     } else {
-                        let _ = render_tx.send(RenderCmd::Error(
-                            "Usage: /send <pid> <text>".into(),
-                        ));
+                        let _ =
+                            render_tx.send(RenderCmd::Error("Usage: /send <pid> <text>".into()));
                     }
                 } else if line == "/end" {
                     // Tell the server to delete this session
@@ -401,7 +403,8 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                     return Ok(SessionResult::EndSession);
                 } else if line == "/exit" {
                     let _ = render_tx.send(RenderCmd::Notice(
-                        "Disconnecting. Session preserved. Returning to session selection...".into(),
+                        "Disconnecting. Session preserved. Returning to session selection..."
+                            .into(),
                     ));
                     let _ = render_tx.send(RenderCmd::Quit);
                     drop(render_tx);
@@ -415,21 +418,20 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                                 "Usage: /session name <session name>".into(),
                             ));
                         } else {
-                            let payload = serde_json::to_string(
-                                &ClientMessage::SessionRename { name: name.to_string() },
-                            )?;
+                            let payload = serde_json::to_string(&ClientMessage::SessionRename {
+                                name: name.to_string(),
+                            })?;
                             ws_send!(payload);
                         }
                     } else if let Some(path) = rest.strip_prefix("workdir ") {
                         let path = path.trim();
                         if path.is_empty() {
-                            let _ = render_tx.send(RenderCmd::Error(
-                                "Usage: /session workdir <path>".into(),
-                            ));
+                            let _ = render_tx
+                                .send(RenderCmd::Error("Usage: /session workdir <path>".into()));
                         } else {
-                            let payload = serde_json::to_string(
-                                &ClientMessage::SessionWorkdir { path: path.to_string() },
-                            )?;
+                            let payload = serde_json::to_string(&ClientMessage::SessionWorkdir {
+                                path: path.to_string(),
+                            })?;
                             ws_send!(payload);
                         }
                     } else {
@@ -454,73 +456,80 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
                             "Relay: relay.json exists but is invalid".to_string()
                         }
                     } else {
-                        "Relay: not configured (use `bear --relay-pair <invite_code>` to set up)".to_string()
+                        "Relay: not configured (use `bear --relay-pair <invite_code>` to set up)"
+                            .to_string()
                     };
                     let _ = render_tx.send(RenderCmd::Notice(status_msg));
                 } else if line == "/help" {
                     let command_lines = if slash_commands.is_empty() {
                         vec!["  (commands not loaded yet)".to_string()]
                     } else {
-                        slash_commands.iter()
+                        slash_commands
+                            .iter()
                             .map(|(cmd, desc)| format!("  {cmd:<20} {desc}"))
                             .collect()
                     };
                     let mut help_lines = vec!["Commands:".to_string()];
                     help_lines.extend(command_lines);
-                    help_lines.push(format!("  {:<20} {}", "/relay", "Show relay status and config"));
-                    help_lines.extend([
-                        "",
-                        "Tool confirmations:  (interactive picker)",
-                        "  Approve          Allow this tool call",
-                        "  Deny             Reject this tool call",
-                        "  Always approve   Auto-approve this command for the session",
-                        "",
-                        "Agent tools:",
-                        "  run_command      Execute shell commands",
-                        "  read_file        Read file contents",
-                        "  write_file       Create/overwrite files",
-                        "  edit_file        Surgical find-and-replace",
-                        "  patch_file       Apply unified diffs",
-                        "  list_files       Directory listing with glob",
-                        "  search_text      Regex search across files",
-                        "  undo             Revert file changes",
-                        "  user_prompt_options  Present choices to user",
-                    ].iter().map(|s| s.to_string()));
+                    help_lines.push(format!(
+                        "  {:<20} {}",
+                        "/relay", "Show relay status and config"
+                    ));
+                    help_lines.extend(
+                        [
+                            "",
+                            "Tool confirmations:  (interactive picker)",
+                            "  Approve          Allow this tool call",
+                            "  Deny             Reject this tool call",
+                            "  Always approve   Auto-approve this command for the session",
+                            "",
+                            "Agent tools:",
+                            "  run_command      Execute shell commands",
+                            "  read_file        Read file contents",
+                            "  write_file       Create/overwrite files",
+                            "  edit_file        Surgical find-and-replace",
+                            "  patch_file       Apply unified diffs",
+                            "  list_files       Directory listing with glob",
+                            "  search_text      Regex search across files",
+                            "  undo             Revert file changes",
+                            "  user_prompt_options  Present choices to user",
+                        ]
+                        .iter()
+                        .map(|s| s.to_string()),
+                    );
                     let help = help_lines.join("\n");
                     let _ = render_tx.send(RenderCmd::Notice(help));
                 } else if let Some(cmd) = line.strip_prefix('!') {
                     // Direct shell execution -> send ShellExec to server
                     let cmd = cmd.trim().to_string();
                     if cmd.is_empty() {
-                        let _ = render_tx.send(RenderCmd::Error(
-                            "Usage: !<command>".into(),
-                        ));
+                        let _ = render_tx.send(RenderCmd::Error("Usage: !<command>".into()));
                     } else {
                         let _ = render_tx.send(RenderCmd::SuppressNextInputEcho);
-                        let payload = serde_json::to_string(
-                            &ClientMessage::ShellExec { command: cmd },
-                        )?;
+                        let payload =
+                            serde_json::to_string(&ClientMessage::ShellExec { command: cmd })?;
                         ws_send!(payload);
                     }
                 } else {
                     // Regular chat input -> send to server/LLM
                     let _ = render_tx.send(RenderCmd::SuppressNextInputEcho);
-                    let payload = serde_json::to_string(
-                        &ClientMessage::Input { text: line },
-                    )?;
+                    let payload = serde_json::to_string(&ClientMessage::Input { text: line })?;
                     ws_send!(payload);
                 }
             }
-            LoopEvent::FromTerm(TermEvent::UserPromptResult { prompt_id, selected }) => {
-                let payload = serde_json::to_string(
-                    &ClientMessage::UserPromptResponse { prompt_id, selected },
-                )?;
+            LoopEvent::FromTerm(TermEvent::UserPromptResult {
+                prompt_id,
+                selected,
+            }) => {
+                let payload = serde_json::to_string(&ClientMessage::UserPromptResponse {
+                    prompt_id,
+                    selected,
+                })?;
                 ws_send!(payload);
             }
             LoopEvent::FromTerm(TermEvent::TaskPlanResult { plan_id, approved }) => {
-                let payload = serde_json::to_string(
-                    &ClientMessage::TaskPlanResponse { plan_id, approved },
-                )?;
+                let payload =
+                    serde_json::to_string(&ClientMessage::TaskPlanResponse { plan_id, approved })?;
                 ws_send!(payload);
             }
             LoopEvent::FromTerm(TermEvent::Quit) => {
@@ -534,9 +543,7 @@ async fn connect_session(base_url: &Url, session_id: Uuid) -> anyhow::Result<Ses
 
     // Show disconnection message and return to session selection
     if disconnected {
-        let _ = render_tx.send(RenderCmd::Error(
-            "Disconnected from server.".into(),
-        ));
+        let _ = render_tx.send(RenderCmd::Error("Disconnected from server.".into()));
         let _ = render_tx.send(RenderCmd::Notice(
             "Session preserved. Returning to session selection...".into(),
         ));
@@ -558,15 +565,15 @@ fn dispatch_server_msg(
     match msg {
         ServerMessage::SessionInfo { session } => {
             let _ = std::env::set_current_dir(&session.cwd);
-            let display_name = session.name.clone()
+            let display_name = session
+                .name
+                .clone()
                 .unwrap_or_else(|| session.id.to_string());
-            let _ = render_tx.send(RenderCmd::SessionInfo(
-                display_name,
-                session.cwd.clone(),
-            ));
+            let _ = render_tx.send(RenderCmd::SessionInfo(display_name, session.cwd.clone()));
         }
         ServerMessage::SlashCommands { commands } => {
-            let list: Vec<(String, String)> = commands.iter()
+            let list: Vec<(String, String)> = commands
+                .iter()
                 .map(|cmd| (cmd.cmd.clone(), cmd.desc.clone()))
                 .collect();
             *slash_commands = list.clone();
@@ -594,7 +601,12 @@ fn dispatch_server_msg(
             card.push_str("└─");
             let _ = render_tx.send(RenderCmd::Notice(card));
         }
-        ServerMessage::ToolOutput { tool_name, tool_args, output, .. } => {
+        ServerMessage::ToolOutput {
+            tool_name,
+            tool_args,
+            output,
+            ..
+        } => {
             *last_tool = (tool_name.clone(), tool_args.clone());
             let _ = render_tx.send(RenderCmd::ToolOutput {
                 tool_name: tool_name.clone(),
@@ -603,26 +615,24 @@ fn dispatch_server_msg(
             });
         }
         ServerMessage::ProcessStarted { info } => {
-            let _ = render_tx.send(RenderCmd::ProcessEvent(
-                format!("Started pid={} cmd={}", info.pid, info.command),
-            ));
+            let _ = render_tx.send(RenderCmd::ProcessEvent(format!(
+                "Started pid={} cmd={}",
+                info.pid, info.command
+            )));
         }
         ServerMessage::ProcessOutput { pid, text } => {
-            let _ = render_tx.send(RenderCmd::ProcessEvent(
-                format!("[{}] {}", pid, text),
-            ));
+            let _ = render_tx.send(RenderCmd::ProcessEvent(format!("[{}] {}", pid, text)));
         }
         ServerMessage::ProcessExited { pid, code } => {
             let code_str = code.map(|c| c.to_string()).unwrap_or("unknown".into());
-            let _ = render_tx.send(RenderCmd::ProcessEvent(
-                format!("Process {} exited (code {})", pid, code_str),
-            ));
+            let _ = render_tx.send(RenderCmd::ProcessEvent(format!(
+                "Process {} exited (code {})",
+                pid, code_str
+            )));
         }
         ServerMessage::ProcessListResult { processes } => {
             if processes.is_empty() {
-                let _ = render_tx.send(RenderCmd::Notice(
-                    "No background processes.".into(),
-                ));
+                let _ = render_tx.send(RenderCmd::Notice("No background processes.".into()));
             } else {
                 let mut lines = vec!["Background processes:".to_string()];
                 for p in processes {
@@ -632,7 +642,12 @@ fn dispatch_server_msg(
                 let _ = render_tx.send(RenderCmd::Notice(lines.join("\n")));
             }
         }
-        ServerMessage::UserPrompt { prompt_id, question, options, multi } => {
+        ServerMessage::UserPrompt {
+            prompt_id,
+            question,
+            options,
+            multi,
+        } => {
             let _ = render_tx.send(RenderCmd::UserPrompt {
                 prompt_id: prompt_id.clone(),
                 question: question.clone(),
@@ -641,9 +656,7 @@ fn dispatch_server_msg(
             });
         }
         ServerMessage::SessionRenamed { name } => {
-            let _ = render_tx.send(RenderCmd::Notice(
-                format!("Session renamed to: {name}"),
-            ));
+            let _ = render_tx.send(RenderCmd::Notice(format!("Session renamed to: {name}")));
             let _ = render_tx.send(RenderCmd::SessionRenamed(name.clone()));
         }
         ServerMessage::Notice { text } => {
@@ -664,7 +677,8 @@ fn dispatch_server_msg(
             });
         }
         ServerMessage::TaskPlan { plan_id, tasks } => {
-            let task_tuples: Vec<(String, String, bool)> = tasks.iter()
+            let task_tuples: Vec<(String, String, bool)> = tasks
+                .iter()
                 .map(|t| (t.id.clone(), t.description.clone(), t.needs_write))
                 .collect();
             let _ = render_tx.send(RenderCmd::TaskPlan {
@@ -672,14 +686,24 @@ fn dispatch_server_msg(
                 tasks: task_tuples,
             });
         }
-        ServerMessage::TaskProgress { task_id, status, detail, .. } => {
+        ServerMessage::TaskProgress {
+            task_id,
+            status,
+            detail,
+            ..
+        } => {
             let _ = render_tx.send(RenderCmd::TaskProgress {
                 task_id: task_id.clone(),
                 status: status.clone(),
                 detail: detail.clone(),
             });
         }
-        ServerMessage::SubagentUpdate { subagent_id, description, status, detail } => {
+        ServerMessage::SubagentUpdate {
+            subagent_id,
+            description,
+            status,
+            detail,
+        } => {
             let _ = render_tx.send(RenderCmd::SubagentUpdate {
                 subagent_id: subagent_id.clone(),
                 description: description.clone(),
@@ -687,7 +711,10 @@ fn dispatch_server_msg(
                 detail: detail.clone(),
             });
         }
-        ServerMessage::ToolResolved { tool_call_id, approved } => {
+        ServerMessage::ToolResolved {
+            tool_call_id,
+            approved,
+        } => {
             let _ = render_tx.send(RenderCmd::ToolResolved {
                 tool_call_id: tool_call_id.clone(),
                 approved: *approved,

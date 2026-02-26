@@ -34,16 +34,13 @@ fn kill_process(pid: u32) {
     }
 }
 
-pub async fn handle_process_kill(
-    state: &ServerState,
-    bus: &BusSender,
-    pid: u32,
-) {
+pub async fn handle_process_kill(state: &ServerState, bus: &BusSender, pid: u32) {
     let exists = state.processes.read().await.contains_key(&pid);
     if !exists {
         bus.send(ServerMessage::Error {
             text: format!("No managed process with pid {pid}"),
-        }).await;
+        })
+        .await;
         return;
     }
 
@@ -54,15 +51,11 @@ pub async fn handle_process_kill(
         p.info.running = false;
         p.stdin_tx = None;
     }
-    bus.send(ServerMessage::ProcessExited { pid, code: None }).await;
+    bus.send(ServerMessage::ProcessExited { pid, code: None })
+        .await;
 }
 
-pub async fn handle_process_input(
-    state: &ServerState,
-    bus: &BusSender,
-    pid: u32,
-    text: &str,
-) {
+pub async fn handle_process_input(state: &ServerState, bus: &BusSender, pid: u32, text: &str) {
     let procs = state.processes.read().await;
     if let Some(p) = procs.get(&pid) {
         if let Some(tx) = &p.stdin_tx {
@@ -70,12 +63,14 @@ pub async fn handle_process_input(
         } else {
             bus.send(ServerMessage::Error {
                 text: format!("Process {pid} stdin closed"),
-            }).await;
+            })
+            .await;
         }
     } else {
         bus.send(ServerMessage::Error {
             text: format!("No managed process with pid {pid}"),
-        }).await;
+        })
+        .await;
     }
 }
 

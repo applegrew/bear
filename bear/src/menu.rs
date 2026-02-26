@@ -25,11 +25,7 @@ pub enum MenuResult {
     Cancelled,
 }
 
-pub fn interactive_menu(
-    title: &str,
-    items: &[MenuItem],
-    mode: MenuMode,
-) -> MenuResult {
+pub fn interactive_menu(title: &str, items: &[MenuItem], mode: MenuMode) -> MenuResult {
     if items.is_empty() {
         return MenuResult::Cancelled;
     }
@@ -41,7 +37,15 @@ pub fn interactive_menu(
     let mut selected: Vec<bool> = vec![false; items.len()];
     let is_multi = matches!(mode, MenuMode::Multi);
 
-    draw_menu(&mut stdout, title, items, cursor_idx, &selected, is_multi, true);
+    draw_menu(
+        &mut stdout,
+        title,
+        items,
+        cursor_idx,
+        &selected,
+        is_multi,
+        true,
+    );
 
     let result = loop {
         if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
@@ -53,7 +57,15 @@ pub fn interactive_menu(
                         } else {
                             cursor_idx = items.len() - 1;
                         }
-                        draw_menu(&mut stdout, title, items, cursor_idx, &selected, is_multi, false);
+                        draw_menu(
+                            &mut stdout,
+                            title,
+                            items,
+                            cursor_idx,
+                            &selected,
+                            is_multi,
+                            false,
+                        );
                     }
                     KeyCode::Down => {
                         if cursor_idx + 1 < items.len() {
@@ -61,11 +73,27 @@ pub fn interactive_menu(
                         } else {
                             cursor_idx = 0;
                         }
-                        draw_menu(&mut stdout, title, items, cursor_idx, &selected, is_multi, false);
+                        draw_menu(
+                            &mut stdout,
+                            title,
+                            items,
+                            cursor_idx,
+                            &selected,
+                            is_multi,
+                            false,
+                        );
                     }
                     KeyCode::Char(' ') if is_multi => {
                         selected[cursor_idx] = !selected[cursor_idx];
-                        draw_menu(&mut stdout, title, items, cursor_idx, &selected, is_multi, false);
+                        draw_menu(
+                            &mut stdout,
+                            title,
+                            items,
+                            cursor_idx,
+                            &selected,
+                            is_multi,
+                            false,
+                        );
                     }
                     KeyCode::Enter => {
                         if is_multi {
@@ -140,7 +168,11 @@ fn draw_menu(
         // Build the plain-text content of this line to measure/truncate.
         let prefix = if is_multi {
             let check = if is_selected { "[x]" } else { "[ ]" };
-            if is_focused { format!("  {} ", check) } else { format!("  {} ", check) }
+            if is_focused {
+                format!("  {} ", check)
+            } else {
+                format!("  {} ", check)
+            }
         } else if is_focused {
             "  > ".to_string()
         } else {

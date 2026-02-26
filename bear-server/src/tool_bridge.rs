@@ -124,24 +124,40 @@ impl ToolContext for ServerState {
         self.workspace_store.load_auto_approved(cwd).await
     }
 
-    async fn save_workspace_auto_approved(&self, cwd: &str, set: &std::collections::HashSet<String>) {
+    async fn save_workspace_auto_approved(
+        &self,
+        cwd: &str,
+        set: &std::collections::HashSet<String>,
+    ) {
         if let Err(e) = self.workspace_store.save_auto_approved(cwd, set).await {
             tracing::warn!("failed to persist auto_approved: {e}");
         }
     }
 
-    async fn reset_session_auto_approved(&self, session_id: Uuid, new_set: std::collections::HashSet<String>) {
+    async fn reset_session_auto_approved(
+        &self,
+        session_id: Uuid,
+        new_set: std::collections::HashSet<String>,
+    ) {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(&session_id) {
             session.auto_approved = new_set;
         }
     }
 
-    async fn save_script(&self, cwd: &str, script: &bear_core::workspace::SavedScript) -> Result<(), String> {
+    async fn save_script(
+        &self,
+        cwd: &str,
+        script: &bear_core::workspace::SavedScript,
+    ) -> Result<(), String> {
         self.workspace_store.save_script(cwd, script).await
     }
 
-    async fn load_script(&self, cwd: &str, name: &str) -> Result<bear_core::workspace::SavedScript, String> {
+    async fn load_script(
+        &self,
+        cwd: &str,
+        name: &str,
+    ) -> Result<bear_core::workspace::SavedScript, String> {
         self.workspace_store.load_script(cwd, name).await
     }
 
@@ -154,7 +170,9 @@ impl ToolContext for ServerState {
         file_path: &str,
         workspace_root: &str,
     ) -> Result<String, String> {
-        self.lsp_manager.diagnostics(file_path, workspace_root).await
+        self.lsp_manager
+            .diagnostics(file_path, workspace_root)
+            .await
     }
 
     async fn lsp_hover(
@@ -181,11 +199,7 @@ impl ToolContext for ServerState {
             .await
     }
 
-    async fn lsp_symbols(
-        &self,
-        file_path: &str,
-        workspace_root: &str,
-    ) -> Result<String, String> {
+    async fn lsp_symbols(&self, file_path: &str, workspace_root: &str) -> Result<String, String> {
         self.lsp_manager.symbols(file_path, workspace_root).await
     }
 

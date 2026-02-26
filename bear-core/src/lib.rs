@@ -8,7 +8,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub use config::{AppConfig, ConfigFile, LlmProvider, RelayConfig, config_path, relay_path, server_pid_path};
+pub use config::{
+    config_path, relay_path, server_pid_path, AppConfig, ConfigFile, LlmProvider, RelayConfig,
+};
 
 pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:49321";
 
@@ -139,21 +141,45 @@ pub struct TaskItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
-    Input { text: String },
+    Input {
+        text: String,
+    },
     /// User manually executed a shell command via the `!` prefix.
     /// The server runs it like `run_command`, then feeds the output to the LLM.
-    ShellExec { command: String },
-    ToolConfirm { tool_call_id: String, approved: bool, #[serde(default)] always: bool },
-    UserPromptResponse { prompt_id: String, selected: Vec<usize> },
-    ProcessInput { pid: u32, text: String },
-    ProcessKill { pid: u32 },
+    ShellExec {
+        command: String,
+    },
+    ToolConfirm {
+        tool_call_id: String,
+        approved: bool,
+        #[serde(default)]
+        always: bool,
+    },
+    UserPromptResponse {
+        prompt_id: String,
+        selected: Vec<usize>,
+    },
+    ProcessInput {
+        pid: u32,
+        text: String,
+    },
+    ProcessKill {
+        pid: u32,
+    },
     ProcessList,
-    SessionRename { name: String },
-    SessionWorkdir { path: String },
+    SessionRename {
+        name: String,
+    },
+    SessionWorkdir {
+        path: String,
+    },
     SessionEnd,
     Interrupt,
     /// User approves or rejects a proposed task plan.
-    TaskPlanResponse { plan_id: String, approved: bool },
+    TaskPlanResponse {
+        plan_id: String,
+        approved: bool,
+    },
     /// Native client tells server to (re-)read relay.json and start polling.
     RelayStart,
     /// Native client tells server to stop relay polling for this run.
@@ -168,9 +194,15 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
-    SessionInfo { session: SessionInfo },
-    SlashCommands { commands: Vec<SlashCommandInfo> },
-    AssistantText { text: String },
+    SessionInfo {
+        session: SessionInfo,
+    },
+    SlashCommands {
+        commands: Vec<SlashCommandInfo>,
+    },
+    AssistantText {
+        text: String,
+    },
     AssistantTextDone,
     ToolRequest {
         tool_call: ToolCall,
@@ -179,18 +211,35 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         extracted_commands: Option<Vec<String>>,
     },
-    ToolOutput { tool_call_id: String, tool_name: String, tool_args: serde_json::Value, output: String },
-    ProcessStarted { info: ProcessInfo },
-    ProcessOutput { pid: u32, text: String },
-    ProcessExited { pid: u32, code: Option<i32> },
-    ProcessListResult { processes: Vec<ProcessInfo> },
+    ToolOutput {
+        tool_call_id: String,
+        tool_name: String,
+        tool_args: serde_json::Value,
+        output: String,
+    },
+    ProcessStarted {
+        info: ProcessInfo,
+    },
+    ProcessOutput {
+        pid: u32,
+        text: String,
+    },
+    ProcessExited {
+        pid: u32,
+        code: Option<i32>,
+    },
+    ProcessListResult {
+        processes: Vec<ProcessInfo>,
+    },
     UserPrompt {
         prompt_id: String,
         question: String,
         options: Vec<String>,
         multi: bool,
     },
-    SessionRenamed { name: String },
+    SessionRenamed {
+        name: String,
+    },
     /// Sent on connect to synchronise client-side state (input history)
     /// so that any client can resume seamlessly.
     ClientState {
@@ -235,9 +284,15 @@ pub enum ServerMessage {
         prompt_id: String,
     },
     /// Echo of a user's chat input, broadcast so other clients can display it.
-    UserInput { text: String },
-    Notice { text: String },
-    Error { text: String },
+    UserInput {
+        text: String,
+    },
+    Notice {
+        text: String,
+    },
+    Error {
+        text: String,
+    },
     Thinking,
     /// Relay health status broadcast to all connected clients.
     RelayStatus {

@@ -11,14 +11,6 @@ use crate::state::{BusSender, PendingToolCall, ServerState};
 // Re-export from bear-core so existing callers (ws.rs) keep working.
 pub use bear_core::tools::parse_tool_calls;
 
-// Used by tests only; cfg(test) avoids unused-import warnings in non-test builds.
-#[cfg(test)]
-pub use bear_core::tools::{
-    ParsedToolCall,
-    validate_tool_path, apply_unified_diff, generate_unified_diff,
-    strip_html_tags, collapse_whitespace,
-};
-
 // ---------------------------------------------------------------------------
 // Thin wrappers that delegate to bear_core::tools via trait implementations
 // ---------------------------------------------------------------------------
@@ -51,6 +43,7 @@ pub async fn execute_run_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bear_core::tools::{apply_unified_diff, strip_html_tags, validate_tool_path};
 
     // -- parse_tool_calls --------------------------------------------------
 
@@ -175,7 +168,8 @@ Then the second:
 
     #[test]
     fn parse_tool_name_tag_nested_json() {
-        let text = r#"[write_file]{"path": "a.json", "content": "{\"key\": \"val\"}"}[/write_file]"#;
+        let text =
+            r#"[write_file]{"path": "a.json", "content": "{\"key\": \"val\"}"}[/write_file]"#;
         let calls = parse_tool_calls(text);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "write_file");
@@ -306,7 +300,9 @@ Then the second:
     fn validate_relative_escaping_cwd_blocked() {
         let result = validate_tool_path("../../etc/passwd", "/home/user/project");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("outside the working directory"));
+        assert!(result
+            .unwrap_err()
+            .contains("outside the working directory"));
     }
 
     #[test]
@@ -421,7 +417,9 @@ Then the second:
         let diff = "@@ -1,3 +1,3 @@\n xxx\n-yyy\n+zzz\n ccc\n";
         let result = apply_unified_diff(original, diff);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("could not find matching lines"));
+        assert!(result
+            .unwrap_err()
+            .contains("could not find matching lines"));
     }
 
     #[test]
@@ -452,7 +450,10 @@ Then the second:
         let original = "fn main() {\n    println!(\"hello\");\n\n    println!(\"world\");\n}\n";
         let diff = "@@ -1,5 +1,5 @@\n fn main() {\n-    println!(\"hello\");\n+    println!(\"hi\");\n\n     println!(\"world\");\n }\n";
         let result = apply_unified_diff(original, diff).unwrap();
-        assert_eq!(result, "fn main() {\n    println!(\"hi\");\n\n    println!(\"world\");\n}\n");
+        assert_eq!(
+            result,
+            "fn main() {\n    println!(\"hi\");\n\n    println!(\"world\");\n}\n"
+        );
     }
 
     #[test]
@@ -481,7 +482,11 @@ Then the second:
         let diff = "@@ -1,4 +1,4 @@\n fn foo() {\n-    bar();\n+    qux();\n     baz();\n }\n";
         // Context uses spaces but file has tabs — should fail
         let result = apply_unified_diff(original, diff);
-        assert!(result.is_err(), "Should fail on tab/space mismatch, got: {:?}", result);
+        assert!(
+            result.is_err(),
+            "Should fail on tab/space mismatch, got: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -492,7 +497,11 @@ Then the second:
         let result = apply_unified_diff(original, diff);
         // The "Here is the diff:" line is not --- or +++, so the initial skip loop
         // breaks immediately. Then the main loop skips it (not @@). Should still work.
-        assert!(result.is_ok(), "Header not at start failed: {:?}", result.unwrap_err());
+        assert!(
+            result.is_ok(),
+            "Header not at start failed: {:?}",
+            result.unwrap_err()
+        );
         assert_eq!(result.unwrap(), "aaa\nBBB\nccc\n");
     }
 
@@ -501,9 +510,14 @@ Then the second:
         // What if the LLM's diff has a line being removed that starts with "---"?
         // The initial skip loop would consume it as a header line!
         let original = "first\n--- old separator ---\nlast\n";
-        let diff = "@@ -1,3 +1,3 @@\n first\n---- old separator ---\n+--- new separator ---\n last\n";
+        let diff =
+            "@@ -1,3 +1,3 @@\n first\n---- old separator ---\n+--- new separator ---\n last\n";
         let result = apply_unified_diff(original, diff);
-        assert!(result.is_ok(), "Triple-dash removal failed: {:?}", result.unwrap_err());
+        assert!(
+            result.is_ok(),
+            "Triple-dash removal failed: {:?}",
+            result.unwrap_err()
+        );
         assert_eq!(result.unwrap(), "first\n--- new separator ---\nlast\n");
     }
 
@@ -525,7 +539,11 @@ Then the second:
         }
 
         let result = apply_unified_diff(&original, &diff);
-        assert!(result.is_ok(), "Large hunk failed: {:?}", result.unwrap_err());
+        assert!(
+            result.is_ok(),
+            "Large hunk failed: {:?}",
+            result.unwrap_err()
+        );
         let patched = result.unwrap();
         assert!(patched.contains("line_60_new"));
         assert!(!patched.contains("\nline_60\n"));
@@ -586,7 +604,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
  }
 ";
         let result = apply_unified_diff(original, diff);
-        assert!(result.is_ok(), "Full file replacement failed: {:?}", result.unwrap_err());
+        assert!(
+            result.is_ok(),
+            "Full file replacement failed: {:?}",
+            result.unwrap_err()
+        );
         let patched = result.unwrap();
         assert!(patched.contains("use log::{info, debug};"));
         assert!(patched.contains("layout::build"));

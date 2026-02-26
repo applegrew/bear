@@ -110,11 +110,19 @@ async fn call_ollama(
     };
 
     #[derive(Debug, serde::Deserialize)]
-    struct OllamaResp { message: OllamaRespMsg }
+    struct OllamaResp {
+        message: OllamaRespMsg,
+    }
     #[derive(Debug, serde::Deserialize)]
-    struct OllamaRespMsg { role: String, content: String }
+    struct OllamaRespMsg {
+        role: String,
+        content: String,
+    }
 
-    tracing::info!("ollama non-streaming request to {url} model={}", config.ollama_model);
+    tracing::info!(
+        "ollama non-streaming request to {url} model={}",
+        config.ollama_model
+    );
     let response = http_client.post(&url).json(&payload).send().await?;
     tracing::info!("ollama non-streaming response status={}", response.status());
     if !response.status().is_success() {
@@ -160,7 +168,10 @@ async fn call_openai(
         req = req.header("Authorization", format!("Bearer {key}"));
     }
 
-    tracing::info!("openai non-streaming request to {url} model={}", config.openai_model);
+    tracing::info!(
+        "openai non-streaming request to {url} model={}",
+        config.openai_model
+    );
     let response = req.send().await?;
     tracing::info!("openai non-streaming response status={}", response.status());
     if !response.status().is_success() {
@@ -215,7 +226,10 @@ pub async fn call_openai_streaming(
         req = req.header("Authorization", format!("Bearer {key}"));
     }
 
-    tracing::info!("openai streaming request to {url} model={}", config.openai_model);
+    tracing::info!(
+        "openai streaming request to {url} model={}",
+        config.openai_model
+    );
     let response = req.send().await?;
     tracing::info!("openai streaming response status={}", response.status());
 
@@ -338,7 +352,9 @@ pub async fn compact_history_if_needed(
 
     tracing::info!(
         "context compaction triggered: {} tokens > {} budget, {} messages",
-        tokens, budget, history.len()
+        tokens,
+        budget,
+        history.len()
     );
 
     // Split: [system_prompt] [old_messages_to_summarize...] [recent_to_keep...]
@@ -400,7 +416,10 @@ pub async fn compact_history_if_needed(
             let new_tokens = estimate_tokens(history);
             tracing::info!(
                 "compaction complete: {} -> {} messages, {} -> {} est. tokens",
-                split_point, history.len(), tokens, new_tokens,
+                split_point,
+                history.len(),
+                tokens,
+                new_tokens,
             );
         }
         Err(err) => {
@@ -522,12 +541,11 @@ pub async fn call_ollama_streaming(
         stream: true,
     };
 
-    tracing::info!("ollama streaming request to {url} model={}", config.ollama_model);
-    let response = http_client
-        .post(&url)
-        .json(&payload)
-        .send()
-        .await?;
+    tracing::info!(
+        "ollama streaming request to {url} model={}",
+        config.ollama_model
+    );
+    let response = http_client.post(&url).json(&payload).send().await?;
     tracing::info!("ollama streaming response status={}", response.status());
 
     if !response.status().is_success() {
@@ -550,7 +568,11 @@ pub async fn call_ollama_streaming(
         raw_byte_count += chunk_bytes.len();
         let chunk_str = String::from_utf8_lossy(&chunk_bytes);
         if raw_byte_count <= 2000 {
-            tracing::info!("ollama stream raw ({} bytes): {:?}", chunk_bytes.len(), &chunk_str[..chunk_str.len().min(200)]);
+            tracing::info!(
+                "ollama stream raw ({} bytes): {:?}",
+                chunk_bytes.len(),
+                &chunk_str[..chunk_str.len().min(200)]
+            );
         }
         buffer.push_str(&chunk_str);
 
@@ -579,7 +601,10 @@ pub async fn call_ollama_streaming(
                     }
                 }
                 Err(err) => {
-                    tracing::warn!("ollama stream JSON parse error: {err}, line: {:?}", &line[..line.len().min(300)]);
+                    tracing::warn!(
+                        "ollama stream JSON parse error: {err}, line: {:?}",
+                        &line[..line.len().min(300)]
+                    );
                 }
             }
         }

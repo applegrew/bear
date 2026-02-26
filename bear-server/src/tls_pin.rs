@@ -179,9 +179,8 @@ fn read_length(data: &[u8]) -> Option<(usize, usize)> {
 // ---------------------------------------------------------------------------
 
 fn default_verifier() -> Arc<dyn ServerCertVerifier> {
-    let root_store = rustls::RootCertStore::from_iter(
-        webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
-    );
+    let root_store =
+        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     rustls::client::WebPkiServerVerifier::builder(Arc::new(root_store))
         .build()
         .expect("failed to build default WebPKI verifier")

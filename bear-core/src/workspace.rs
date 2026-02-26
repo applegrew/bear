@@ -36,11 +36,17 @@ pub struct WorkspaceStore {
     locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
 }
 
-impl WorkspaceStore {
-    pub fn new() -> Self {
+impl Default for WorkspaceStore {
+    fn default() -> Self {
         Self {
             locks: Mutex::new(HashMap::new()),
         }
+    }
+}
+
+impl WorkspaceStore {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Get (or create) the write lock for a given working directory.
@@ -84,11 +90,7 @@ impl WorkspaceStore {
 
     /// Save the auto-approved set to `<cwd>/.bear/auto_approved.json`.
     /// Creates the `.bear/` directory if it doesn't exist.
-    pub async fn save_auto_approved(
-        &self,
-        cwd: &str,
-        set: &HashSet<String>,
-    ) -> Result<(), String> {
+    pub async fn save_auto_approved(&self, cwd: &str, set: &HashSet<String>) -> Result<(), String> {
         let cwd_path = Path::new(cwd);
         let lock = self.dir_lock(cwd_path).await;
         let _guard = lock.lock().await;
@@ -113,11 +115,7 @@ impl WorkspaceStore {
 
     /// Save a script to `<cwd>/.bear/scripts/<name>.json`.
     /// Silently overwrites if it already exists.
-    pub async fn save_script(
-        &self,
-        cwd: &str,
-        script: &SavedScript,
-    ) -> Result<(), String> {
+    pub async fn save_script(&self, cwd: &str, script: &SavedScript) -> Result<(), String> {
         let cwd_path = Path::new(cwd);
         let lock = self.dir_lock(cwd_path).await;
         let _guard = lock.lock().await;
@@ -135,11 +133,7 @@ impl WorkspaceStore {
     }
 
     /// Load a script by name from `<cwd>/.bear/scripts/<name>.json`.
-    pub async fn load_script(
-        &self,
-        cwd: &str,
-        name: &str,
-    ) -> Result<SavedScript, String> {
+    pub async fn load_script(&self, cwd: &str, name: &str) -> Result<SavedScript, String> {
         let path = Path::new(cwd)
             .join(BEAR_DIR)
             .join(SCRIPTS_DIR)
@@ -147,8 +141,7 @@ impl WorkspaceStore {
         let data = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| format!("script '{name}' not found: {e}"))?;
-        serde_json::from_str(&data)
-            .map_err(|e| format!("failed to parse script '{name}': {e}"))
+        serde_json::from_str(&data).map_err(|e| format!("failed to parse script '{name}': {e}"))
     }
 
     /// List all saved scripts in `<cwd>/.bear/scripts/`.

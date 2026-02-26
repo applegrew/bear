@@ -129,7 +129,11 @@ async fn relay_poll_loop(state: ServerState, mut cmd_rx: watch::Receiver<bool>) 
         let config_file = ConfigFile::load();
         if config_file.relay_disabled == Some(true) {
             tracing::info!("relay: disabled in config");
-            broadcast_all_sessions(&state, relay_status("disabled", Some("disabled in config".into()))).await;
+            broadcast_all_sessions(
+                &state,
+                relay_status("disabled", Some("disabled in config".into())),
+            )
+            .await;
             break;
         }
 
@@ -286,7 +290,9 @@ async fn relay_poll_loop(state: ServerState, mut cmd_rx: watch::Receiver<bool>) 
 }
 
 fn backoff_delay(count: u32, base: Duration, max: Duration) -> Duration {
-    let secs = base.as_secs().saturating_mul(1u64.checked_shl(count.min(10)).unwrap_or(u64::MAX));
+    let secs = base
+        .as_secs()
+        .saturating_mul(1u64.checked_shl(count.min(10)).unwrap_or(u64::MAX));
     Duration::from_secs(secs).min(max)
 }
 
@@ -423,7 +429,10 @@ async fn handle_relay_offer(
         let info = relay_info.clone();
         let cid = notify_conn_id.clone();
         Box::pin(async move {
-            tracing::info!("relay: data channel '{}' opened for session {sid}", dc.label());
+            tracing::info!(
+                "relay: data channel '{}' opened for session {sid}",
+                dc.label()
+            );
             broadcast_all_sessions(
                 &state,
                 ServerMessage::Notice {
@@ -570,12 +579,16 @@ async fn relay_ice_exchange(
 
         // Check if connection is established
         let conn_state = pc.connection_state();
-        if conn_state == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Connected {
+        if conn_state
+            == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Connected
+        {
             tracing::info!("relay: ICE connected for conn_id={conn_id}");
             break;
         }
-        if conn_state == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Failed
-            || conn_state == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Closed
+        if conn_state
+            == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Failed
+            || conn_state
+                == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Closed
         {
             tracing::warn!("relay: ICE failed/closed for conn_id={conn_id}");
             break;

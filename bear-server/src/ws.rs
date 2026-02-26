@@ -9,13 +9,19 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, Notify};
 use uuid::Uuid;
 
-use crate::llm::{call_llm_streaming, compact_history_if_needed, plan_task, reflective_thinking, ChatMessage, OllamaMessage};
-use crate::process::{cleanup_session_processes, handle_process_kill, handle_process_input};
-use crate::state::{BusSender, PendingToolCall, SessionBus, ServerState};
+use crate::llm::{
+    call_llm_streaming, compact_history_if_needed, plan_task, reflective_thinking, ChatMessage,
+    OllamaMessage,
+};
+use crate::process::{cleanup_session_processes, handle_process_input, handle_process_kill};
+use crate::state::{BusSender, PendingToolCall, ServerState, SessionBus};
 use crate::tools::{execute_tool, parse_tool_calls};
-use bear_core::tools::{ToolCallFilter, extract_shell_commands, tool_display_name, tool_output_msg, truncate_tool_output};
 #[cfg(test)]
 use bear_core::tools::is_tool_tag;
+use bear_core::tools::{
+    extract_shell_commands, tool_display_name, tool_output_msg, truncate_tool_output,
+    ToolCallFilter,
+};
 
 /// When true, run a non-streaming reflection call before the main LLM response.
 const ENABLE_REFLECTION: bool = true;
@@ -33,10 +39,22 @@ const ENABLE_REFLECTION: bool = true;
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/ps", "List background processes"),
     ("/kill", "Kill a background process (usage: /kill <pid>)"),
-    ("/send", "Send stdin to a process (usage: /send <pid> <text>)"),
-    ("/session name", "Name the current session (usage: /session name <n>)"),
-    ("/session workdir", "Set session working directory (usage: /session workdir <path>)"),
-    ("/session max_subagents", "Set max concurrent subagents (usage: /session max_subagents <count>)"),
+    (
+        "/send",
+        "Send stdin to a process (usage: /send <pid> <text>)",
+    ),
+    (
+        "/session name",
+        "Name the current session (usage: /session name <n>)",
+    ),
+    (
+        "/session workdir",
+        "Set session working directory (usage: /session workdir <path>)",
+    ),
+    (
+        "/session max_subagents",
+        "Set max concurrent subagents (usage: /session max_subagents <count>)",
+    ),
     ("/allowed", "Show auto-approved commands"),
     ("/exit", "Disconnect, keep session alive"),
     ("/end", "End session, pick another"),
@@ -204,42 +222,66 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
     };
 
     let Some(info) = session_info else {
-        let _ = ws_send(&mut socket, &ServerMessage::Error {
-            text: "session not found".to_string(),
-        }).await;
+        let _ = ws_send(
+            &mut socket,
+            &ServerMessage::Error {
+                text: "session not found".to_string(),
+            },
+        )
+        .await;
         let _ = socket.close().await;
         return;
     };
 
     // Send session info and slash commands directly to this client
-    let _ = ws_send(&mut socket, &ServerMessage::SessionInfo {
-        session: info.clone(),
-    }).await;
-    let _ = ws_send(&mut socket, &ServerMessage::SlashCommands {
-        commands: slash_command_infos(),
-    }).await;
+    let _ = ws_send(
+        &mut socket,
+        &ServerMessage::SessionInfo {
+            session: info.clone(),
+        },
+    )
+    .await;
+    let _ = ws_send(
+        &mut socket,
+        &ServerMessage::SlashCommands {
+            commands: slash_command_infos(),
+        },
+    )
+    .await;
 
     // Send shared client state (input history + auto-approved commands)
     {
         let sessions = state.sessions.read().await;
         if let Some(session) = sessions.get(&session_id) {
-            let _ = ws_send(&mut socket, &ServerMessage::ClientState {
-                input_history: session.input_history.clone(),
-            }).await;
+            let _ = ws_send(
+                &mut socket,
+                &ServerMessage::ClientState {
+                    input_history: session.input_history.clone(),
+                },
+            )
+            .await;
         }
     }
 
-    let _ = ws_send(&mut socket, &ServerMessage::Notice {
-        text: format!(
-            "Session persists after clients disconnect. Working directory is {}.",
-            info.cwd
-        ),
-    }).await;
+    let _ = ws_send(
+        &mut socket,
+        &ServerMessage::Notice {
+            text: format!(
+                "Session persists after clients disconnect. Working directory is {}.",
+                info.cwd
+            ),
+        },
+    )
+    .await;
 
     if info.name.is_none() {
-        let _ = ws_send(&mut socket, &ServerMessage::Notice {
-            text: "Tip: Name this session with /session name <name>".to_string(),
-        }).await;
+        let _ = ws_send(
+            &mut socket,
+            &ServerMessage::Notice {
+                text: "Tip: Name this session with /session name <name>".to_string(),
+            },
+        )
+        .await;
     }
 
     // Ensure the session worker is running and get the client_tx
@@ -249,9 +291,13 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
     let mut consumer = {
         let buses = state.buses.read().await;
         let Some(bus) = buses.get(&session_id) else {
-            let _ = ws_send(&mut socket, &ServerMessage::Error {
-                text: "session bus not found".to_string(),
-            }).await;
+            let _ = ws_send(
+                &mut socket,
+                &ServerMessage::Error {
+                    text: "session bus not found".to_string(),
+                },
+            )
+            .await;
             return;
         };
         bus.consumer()
@@ -460,8 +506,11 @@ async fn session_worker(
     loop {
         // If no prompt is active, also listen for queued prompts from subagents.
         let can_dequeue = !has_active_prompt(
-            &pending, &pending_prompt, &pending_depth_prompt,
-            &pending_task_plan, &pending_queued_prompt,
+            &pending,
+            &pending_prompt,
+            &pending_depth_prompt,
+            &pending_task_plan,
+            &pending_queued_prompt,
         );
 
         let client_msg = if can_dequeue {
@@ -522,7 +571,8 @@ async fn session_worker(
             ClientMessage::Input { text } => {
                 tracing::info!("session_worker {session_id}: Input received: {text:?}");
                 // Broadcast the user's input so all connected clients can display it.
-                bus.send(ServerMessage::UserInput { text: text.clone() }).await;
+                bus.send(ServerMessage::UserInput { text: text.clone() })
+                    .await;
                 // Record input to shared history
                 {
                     let mut sessions = state.sessions.write().await;
@@ -542,21 +592,32 @@ async fn session_worker(
                 budget.reset(state.config.max_tool_depth);
                 pending_task_plan = None;
                 handle_user_input(
-                    &state, session_id, &bus, &mut client_rx,
-                    &mut pending, &mut pending_prompt,
+                    &state,
+                    session_id,
+                    &bus,
+                    &mut client_rx,
+                    &mut pending,
+                    &mut pending_prompt,
                     &mut pending_depth_prompt,
                     &mut pending_task_plan,
-                    &mut tool_queue, &mut tool_depth,
-                    &mut depth_limit, &mut bulk_increment,
-                    &budget, &mut subagent_handles,
+                    &mut tool_queue,
+                    &mut tool_depth,
+                    &mut depth_limit,
+                    &mut bulk_increment,
+                    &budget,
+                    &mut subagent_handles,
                     &prompt_queue_tx,
                     text,
-                ).await;
+                )
+                .await;
             }
             ClientMessage::ShellExec { command } => {
                 tracing::info!("session_worker {session_id}: ShellExec received: {command:?}");
                 // Broadcast so other clients see the command
-                bus.send(ServerMessage::UserInput { text: format!("!{command}") }).await;
+                bus.send(ServerMessage::UserInput {
+                    text: format!("!{command}"),
+                })
+                .await;
                 // Record in input history
                 {
                     let mut sessions = state.sessions.write().await;
@@ -579,21 +640,19 @@ async fn session_worker(
                 // Get session cwd
                 let cwd = {
                     let sessions = state.sessions.read().await;
-                    sessions.get(&session_id)
+                    sessions
+                        .get(&session_id)
                         .map(|s| s.info.cwd.clone())
                         .unwrap_or_else(|| ".".to_string())
                 };
 
                 // Execute the command (same as run_command tool)
-                let output = crate::tools::execute_run_command(
-                    &state, session_id, &bus, &command, &cwd,
-                ).await;
+                let output =
+                    crate::tools::execute_run_command(&state, session_id, &bus, &command, &cwd)
+                        .await;
 
                 // Truncate output for LLM context
-                let truncated = truncate_tool_output(
-                    &output,
-                    state.config.max_tool_output_chars,
-                );
+                let truncated = truncate_tool_output(&output, state.config.max_tool_output_chars);
 
                 // Inject into session history as a user message so the LLM
                 // knows about the command and its output
@@ -615,29 +674,47 @@ async fn session_worker(
 
                 // Now invoke the LLM so it can react to the output
                 invoke_llm(
-                    &state, session_id, &bus, &mut client_rx,
-                    &mut pending, &mut pending_prompt,
+                    &state,
+                    session_id,
+                    &bus,
+                    &mut client_rx,
+                    &mut pending,
+                    &mut pending_prompt,
                     &mut pending_depth_prompt,
-                    &mut tool_queue, &mut tool_depth,
-                    &mut depth_limit, &mut bulk_increment,
-                ).await;
+                    &mut tool_queue,
+                    &mut tool_depth,
+                    &mut depth_limit,
+                    &mut bulk_increment,
+                )
+                .await;
             }
-            ClientMessage::ToolConfirm { tool_call_id, approved, always } => {
+            ClientMessage::ToolConfirm {
+                tool_call_id,
+                approved,
+                always,
+            } => {
                 // Check if this resolves a queued tool confirm from a subagent
-                if let Some(PendingQueuedPrompt::ToolConfirm { tool_call_id: ref qid, .. }) = pending_queued_prompt {
+                if let Some(PendingQueuedPrompt::ToolConfirm {
+                    tool_call_id: ref qid,
+                    ..
+                }) = pending_queued_prompt
+                {
                     if *qid == tool_call_id {
                         let pqp = pending_queued_prompt.take().unwrap();
                         if let PendingQueuedPrompt::ToolConfirm { ptc, result_tx, .. } = pqp {
                             bus.send(ServerMessage::ToolResolved {
                                 tool_call_id: tool_call_id.clone(),
                                 approved,
-                            }).await;
+                            })
+                            .await;
                             if approved {
                                 // Handle auto-approve (always) for the session
                                 if always {
                                     let display = tool_display_name(&ptc.tool_call.name);
                                     if ptc.tool_call.name == "run_command" {
-                                        let cmd_str = ptc.tool_call.arguments["command"].as_str().unwrap_or("");
+                                        let cmd_str = ptc.tool_call.arguments["command"]
+                                            .as_str()
+                                            .unwrap_or("");
                                         for cmd in extract_shell_commands(cmd_str) {
                                             let mut sessions = state.sessions.write().await;
                                             if let Some(session) = sessions.get_mut(&session_id) {
@@ -655,7 +732,13 @@ async fn session_worker(
                                 // Execute the tool and send output
                                 let output = execute_tool(&state, session_id, &bus, &ptc).await;
                                 bus.send(tool_output_msg(&ptc, output.clone())).await;
-                                append_tool_result(&state, session_id, &ptc.tool_call.name, &output).await;
+                                append_tool_result(
+                                    &state,
+                                    session_id,
+                                    &ptc.tool_call.name,
+                                    &output,
+                                )
+                                .await;
                             }
                             let _ = result_tx.send((approved, always));
                         }
@@ -663,23 +746,42 @@ async fn session_worker(
                     }
                 }
                 handle_tool_confirm(
-                    &state, session_id, &bus, &mut client_rx,
-                    &mut pending, &mut pending_prompt,
+                    &state,
+                    session_id,
+                    &bus,
+                    &mut client_rx,
+                    &mut pending,
+                    &mut pending_prompt,
                     &mut pending_depth_prompt,
-                    &mut tool_queue, &mut tool_depth,
-                    &mut depth_limit, &mut bulk_increment,
-                    &tool_call_id, approved, always,
-                ).await;
+                    &mut tool_queue,
+                    &mut tool_depth,
+                    &mut depth_limit,
+                    &mut bulk_increment,
+                    &tool_call_id,
+                    approved,
+                    always,
+                )
+                .await;
             }
-            ClientMessage::UserPromptResponse { prompt_id, selected } => {
+            ClientMessage::UserPromptResponse {
+                prompt_id,
+                selected,
+            } => {
                 // Check if this resolves a queued user prompt from a subagent
-                if let Some(PendingQueuedPrompt::UserPrompt { prompt_id: ref qid, .. }) = pending_queued_prompt {
+                if let Some(PendingQueuedPrompt::UserPrompt {
+                    prompt_id: ref qid, ..
+                }) = pending_queued_prompt
+                {
                     if *qid == prompt_id {
                         let pqp = pending_queued_prompt.take().unwrap();
-                        if let PendingQueuedPrompt::UserPrompt { prompt_id: pid, is_depth_prompt, result_tx } = pqp {
-                            bus.send(ServerMessage::PromptResolved {
-                                prompt_id: pid,
-                            }).await;
+                        if let PendingQueuedPrompt::UserPrompt {
+                            prompt_id: pid,
+                            is_depth_prompt,
+                            result_tx,
+                        } = pqp
+                        {
+                            bus.send(ServerMessage::PromptResolved { prompt_id: pid })
+                                .await;
                             if is_depth_prompt {
                                 // Handle depth-limit budget update inline
                                 let choice = selected.first().copied().unwrap_or(2);
@@ -707,8 +809,10 @@ async fn session_worker(
                                         budget.terminated.store(true, Ordering::SeqCst);
                                         budget.resume.notify_waiters();
                                         bus.send(ServerMessage::Notice {
-                                            text: "Stopped. Send a new message to continue.".to_string(),
-                                        }).await;
+                                            text: "Stopped. Send a new message to continue."
+                                                .to_string(),
+                                        })
+                                        .await;
                                     }
                                 }
                             }
@@ -721,27 +825,42 @@ async fn session_worker(
                 if let Some(dp) = pending_depth_prompt.take() {
                     if dp.prompt_id == prompt_id {
                         handle_depth_prompt_response(
-                            &state, session_id, &bus, &mut client_rx,
-                            &mut pending, &mut pending_prompt,
+                            &state,
+                            session_id,
+                            &bus,
+                            &mut client_rx,
+                            &mut pending,
+                            &mut pending_prompt,
                             &mut pending_depth_prompt,
-                            &mut tool_queue, &mut tool_depth,
-                            &mut depth_limit, &mut bulk_increment,
+                            &mut tool_queue,
+                            &mut tool_depth,
+                            &mut depth_limit,
+                            &mut bulk_increment,
                             &budget,
                             &prompt_id,
                             selected,
-                        ).await;
+                        )
+                        .await;
                     } else {
                         pending_depth_prompt = Some(dp);
                     }
                 } else {
                     handle_prompt_response(
-                        &state, session_id, &bus, &mut client_rx,
-                        &mut pending, &mut pending_prompt,
+                        &state,
+                        session_id,
+                        &bus,
+                        &mut client_rx,
+                        &mut pending,
+                        &mut pending_prompt,
                         &mut pending_depth_prompt,
-                        &mut tool_queue, &mut tool_depth,
-                        &mut depth_limit, &mut bulk_increment,
-                        &prompt_id, selected,
-                    ).await;
+                        &mut tool_queue,
+                        &mut tool_depth,
+                        &mut depth_limit,
+                        &mut bulk_increment,
+                        &prompt_id,
+                        selected,
+                    )
+                    .await;
                 }
             }
             ClientMessage::TaskPlanResponse { plan_id, approved } => {
@@ -750,26 +869,39 @@ async fn session_worker(
                         // Broadcast resolution so all other clients dismiss their pickers.
                         bus.send(ServerMessage::PromptResolved {
                             prompt_id: plan_id.clone(),
-                        }).await;
+                        })
+                        .await;
                         if approved {
                             bus.send(ServerMessage::Notice {
                                 text: "Task plan approved. Starting execution…".to_string(),
-                            }).await;
+                            })
+                            .await;
                             execute_task_plan(
-                                &state, session_id, &bus, &client_tx,
+                                &state,
+                                session_id,
+                                &bus,
+                                &client_tx,
                                 &mut client_rx,
-                                &mut pending, &mut pending_prompt,
+                                &mut pending,
+                                &mut pending_prompt,
                                 &mut pending_depth_prompt,
-                                &mut tool_queue, &mut tool_depth,
-                                &mut depth_limit, &mut bulk_increment,
-                                &budget, &mut subagent_handles,
-                                &prompt_queue_tx, &mut prompt_queue_rx,
-                                &plan.plan_id, &plan.tasks,
-                            ).await;
+                                &mut tool_queue,
+                                &mut tool_depth,
+                                &mut depth_limit,
+                                &mut bulk_increment,
+                                &budget,
+                                &mut subagent_handles,
+                                &prompt_queue_tx,
+                                &mut prompt_queue_rx,
+                                &plan.plan_id,
+                                &plan.tasks,
+                            )
+                            .await;
                         } else {
                             bus.send(ServerMessage::Notice {
                                 text: "Task plan rejected.".to_string(),
-                            }).await;
+                            })
+                            .await;
                         }
                     } else {
                         pending_task_plan = Some(plan);
@@ -778,13 +910,13 @@ async fn session_worker(
             }
             ClientMessage::ProcessList => {
                 let procs = state.processes.read().await;
-                let list: Vec<ProcessInfo> = procs.values()
+                let list: Vec<ProcessInfo> = procs
+                    .values()
                     .filter(|p| p.session_id == session_id)
                     .map(|p| p.info.clone())
                     .collect();
-                bus.send(ServerMessage::ProcessListResult {
-                    processes: list,
-                }).await;
+                bus.send(ServerMessage::ProcessListResult { processes: list })
+                    .await;
             }
             ClientMessage::ProcessKill { pid } => {
                 handle_process_kill(&state, &bus, pid).await;
@@ -797,15 +929,15 @@ async fn session_worker(
                 if trimmed.is_empty() {
                     bus.send(ServerMessage::Error {
                         text: "Session name must not be empty.".to_string(),
-                    }).await;
+                    })
+                    .await;
                 } else {
                     let mut sessions = state.sessions.write().await;
                     if let Some(session) = sessions.get_mut(&session_id) {
                         session.info.name = Some(trimmed.clone());
                     }
-                    bus.send(ServerMessage::SessionRenamed {
-                        name: trimmed,
-                    }).await;
+                    bus.send(ServerMessage::SessionRenamed { name: trimmed })
+                        .await;
                 }
             }
             ClientMessage::SessionWorkdir { path } => {
@@ -821,7 +953,8 @@ async fn session_worker(
                 }
                 bus.send(ServerMessage::Notice {
                     text: "Session ended and removed.".to_string(),
-                }).await;
+                })
+                .await;
                 // Remove the bus too
                 state.buses.write().await.remove(&session_id);
                 break;
@@ -875,7 +1008,8 @@ async fn handle_session_workdir_cmd(
     if trimmed.is_empty() {
         bus.send(ServerMessage::Error {
             text: "Usage: /session workdir <path>".to_string(),
-        }).await;
+        })
+        .await;
         return;
     }
 
@@ -887,7 +1021,8 @@ async fn handle_session_workdir_cmd(
     let Some(current_cwd) = current_cwd else {
         bus.send(ServerMessage::Error {
             text: "session not found".to_string(),
-        }).await;
+        })
+        .await;
         return;
     };
 
@@ -900,13 +1035,12 @@ async fn handle_session_workdir_cmd(
         .await
     {
         Ok(out) if out.status.success() => {
-            let new_cwd = String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .to_string();
+            let new_cwd = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if new_cwd.is_empty() {
                 bus.send(ServerMessage::Error {
                     text: "Failed to resolve working directory.".to_string(),
-                }).await;
+                })
+                .await;
                 return;
             }
 
@@ -924,10 +1058,9 @@ async fn handle_session_workdir_cmd(
             if let Some(session) = updated_session {
                 bus.send(ServerMessage::Notice {
                     text: format!("Working directory set to: {new_cwd}"),
-                }).await;
-                bus.send(ServerMessage::SessionInfo {
-                    session,
-                }).await;
+                })
+                .await;
+                bus.send(ServerMessage::SessionInfo { session }).await;
             }
         }
         Ok(out) => {
@@ -942,7 +1075,8 @@ async fn handle_session_workdir_cmd(
         Err(err) => {
             bus.send(ServerMessage::Error {
                 text: format!("Failed to change directory: {err}"),
-            }).await;
+            })
+            .await;
         }
     }
 }
@@ -965,13 +1099,13 @@ async fn handle_slash_command(
     match trimmed {
         "/ps" => {
             let procs = state.processes.read().await;
-            let list: Vec<ProcessInfo> = procs.values()
+            let list: Vec<ProcessInfo> = procs
+                .values()
                 .filter(|p| p.session_id == session_id)
                 .map(|p| p.info.clone())
                 .collect();
-            bus.send(ServerMessage::ProcessListResult {
-                processes: list,
-            }).await;
+            bus.send(ServerMessage::ProcessListResult { processes: list })
+                .await;
             return true;
         }
         "/allowed" => {
@@ -982,7 +1116,13 @@ async fn handle_slash_command(
                 } else {
                     let mut cmds: Vec<&String> = session.auto_approved.iter().collect();
                     cmds.sort();
-                    format!("Auto-approved: {}", cmds.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))
+                    format!(
+                        "Auto-approved: {}",
+                        cmds.iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
                 }
             } else {
                 "Session not found.".to_string()
@@ -997,15 +1137,14 @@ async fn handle_slash_command(
                 lines.push(format!("  {cmd:<20} {desc}"));
             }
             let help = lines.join("\n");
-            bus.send(ServerMessage::Notice {
-                text: help,
-            }).await;
+            bus.send(ServerMessage::Notice { text: help }).await;
             return true;
         }
         "/exit" => {
             bus.send(ServerMessage::Notice {
                 text: "Disconnecting. Session preserved.".to_string(),
-            }).await;
+            })
+            .await;
             return true;
         }
         "/end" => {
@@ -1023,7 +1162,8 @@ async fn handle_slash_command(
             Err(_) => {
                 bus.send(ServerMessage::Error {
                     text: "Usage: /kill <pid>".to_string(),
-                }).await;
+                })
+                .await;
             }
         }
         return true;
@@ -1036,12 +1176,14 @@ async fn handle_slash_command(
             } else {
                 bus.send(ServerMessage::Error {
                     text: "Usage: /send <pid> <text>".to_string(),
-                }).await;
+                })
+                .await;
             }
         } else {
             bus.send(ServerMessage::Error {
                 text: "Usage: /send <pid> <text>".to_string(),
-            }).await;
+            })
+            .await;
         }
         return true;
     }
@@ -1052,7 +1194,8 @@ async fn handle_slash_command(
             if name.is_empty() {
                 bus.send(ServerMessage::Error {
                     text: "Usage: /session name <session name>".to_string(),
-                }).await;
+                })
+                .await;
             } else {
                 let mut sessions = state.sessions.write().await;
                 if let Some(session) = sessions.get_mut(&session_id) {
@@ -1060,7 +1203,8 @@ async fn handle_slash_command(
                 }
                 bus.send(ServerMessage::SessionRenamed {
                     name: name.to_string(),
-                }).await;
+                })
+                .await;
             }
             return true;
         }
@@ -1080,12 +1224,14 @@ async fn handle_slash_command(
                     }
                     bus.send(ServerMessage::Notice {
                         text: format!("Max concurrent subagents set to {n}."),
-                    }).await;
+                    })
+                    .await;
                 }
                 _ => {
                     bus.send(ServerMessage::Error {
                         text: "Usage: /session max_subagents <count> (must be >= 1)".to_string(),
-                    }).await;
+                    })
+                    .await;
                 }
             }
             return true;
@@ -1099,7 +1245,8 @@ async fn handle_slash_command(
 
     bus.send(ServerMessage::Error {
         text: format!("Unknown command: {trimmed}"),
-    }).await;
+    })
+    .await;
     true
 }
 
@@ -1135,7 +1282,8 @@ async fn handle_user_input(
         let Some(session) = sessions.get_mut(&session_id) else {
             bus.send(ServerMessage::Error {
                 text: "session not found".to_string(),
-            }).await;
+            })
+            .await;
             return;
         };
         session.info.touch();
@@ -1150,16 +1298,29 @@ async fn handle_user_input(
     let (history, cwd) = {
         let sessions = state.sessions.read().await;
         let Some(session) = sessions.get(&session_id) else {
-            bus.send(ServerMessage::Error { text: "session not found".to_string() }).await;
+            bus.send(ServerMessage::Error {
+                text: "session not found".to_string(),
+            })
+            .await;
             return;
         };
         (session.history.clone(), session.info.cwd.clone())
     };
     let session_context = format!("Session context:\n- Working directory: {cwd}");
 
-    match plan_task(&state.http_client, &state.config, &history, &session_context).await {
+    match plan_task(
+        &state.http_client,
+        &state.config,
+        &history,
+        &session_context,
+    )
+    .await
+    {
         Ok(plan_json) => {
-            tracing::info!("planner response: {}", &plan_json[..plan_json.len().min(500)]);
+            tracing::info!(
+                "planner response: {}",
+                &plan_json[..plan_json.len().min(500)]
+            );
             if let Some(plan) = parse_task_plan(&plan_json) {
                 if plan.plan_type == "complex_task" && !plan.tasks.is_empty() {
                     // Send plan to client for approval
@@ -1167,7 +1328,8 @@ async fn handle_user_input(
                     bus.send(ServerMessage::TaskPlan {
                         plan_id: plan_id.clone(),
                         tasks: plan.tasks.clone(),
-                    }).await;
+                    })
+                    .await;
                     *pending_task_plan = Some(PendingTaskPlan {
                         plan_id,
                         tasks: plan.tasks,
@@ -1184,7 +1346,20 @@ async fn handle_user_input(
         }
     }
 
-    invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+    invoke_llm(
+        state,
+        session_id,
+        bus,
+        client_rx,
+        pending,
+        pending_prompt,
+        pending_depth_prompt,
+        tool_queue,
+        tool_depth,
+        depth_limit,
+        bulk_increment,
+    )
+    .await;
 }
 
 /// Parsed result from the planner LLM call.
@@ -1218,7 +1393,11 @@ fn parse_task_plan(json_str: &str) -> Option<ParsedPlan> {
         let description = item["description"].as_str().unwrap_or("").to_string();
         let needs_write = item["needs_write"].as_bool().unwrap_or(true);
         if !description.is_empty() {
-            tasks.push(TaskItem { id, description, needs_write });
+            tasks.push(TaskItem {
+                id,
+                description,
+                needs_write,
+            });
         }
     }
 
@@ -1253,7 +1432,10 @@ async fn execute_task_plan(
 ) {
     let max_subagents = {
         let sessions = state.sessions.read().await;
-        sessions.get(&session_id).map(|s| s.max_subagents).unwrap_or(3)
+        sessions
+            .get(&session_id)
+            .map(|s| s.max_subagents)
+            .unwrap_or(3)
     };
 
     // Collect read-only tasks and write tasks
@@ -1283,7 +1465,8 @@ async fn execute_task_plan(
                     task_id: task.id.clone(),
                     status: "in_progress".to_string(),
                     detail: None,
-                }).await;
+                })
+                .await;
 
                 let subagent_id = format!("sa_{}", Uuid::new_v4());
                 bus.send(ServerMessage::SubagentUpdate {
@@ -1291,7 +1474,8 @@ async fn execute_task_plan(
                     description: task.description.clone(),
                     status: "running".to_string(),
                     detail: None,
-                }).await;
+                })
+                .await;
 
                 let handle = tokio::spawn(run_subagent(
                     state.clone(),
@@ -1492,7 +1676,8 @@ async fn execute_task_plan(
                     task_id: task_id.clone(),
                     status: "completed".to_string(),
                     detail: None,
-                }).await;
+                })
+                .await;
             }
 
             // Inject subagent results into session history as context
@@ -1522,7 +1707,8 @@ async fn execute_task_plan(
                 task_id: task.id.clone(),
                 status: "failed".to_string(),
                 detail: Some("Terminated by user".to_string()),
-            }).await;
+            })
+            .await;
             continue;
         }
 
@@ -1531,7 +1717,8 @@ async fn execute_task_plan(
             task_id: task.id.clone(),
             status: "in_progress".to_string(),
             detail: None,
-        }).await;
+        })
+        .await;
 
         // Inject the task description as a user message so the LLM knows what to do
         {
@@ -1546,17 +1733,27 @@ async fn execute_task_plan(
 
         // Run the main agent loop for this task
         invoke_llm(
-            state, session_id, bus, client_rx,
-            pending, pending_prompt, pending_depth_prompt,
-            tool_queue, tool_depth, depth_limit, bulk_increment,
-        ).await;
+            state,
+            session_id,
+            bus,
+            client_rx,
+            pending,
+            pending_prompt,
+            pending_depth_prompt,
+            tool_queue,
+            tool_depth,
+            depth_limit,
+            bulk_increment,
+        )
+        .await;
 
         bus.send(ServerMessage::TaskProgress {
             plan_id: plan_id.to_string(),
             task_id: task.id.clone(),
             status: "completed".to_string(),
             detail: None,
-        }).await;
+        })
+        .await;
     }
 }
 
@@ -1579,7 +1776,10 @@ async fn run_subagent(
 
     let cwd = {
         let sessions = state.sessions.read().await;
-        sessions.get(&session_id).map(|s| s.info.cwd.clone()).unwrap_or_default()
+        sessions
+            .get(&session_id)
+            .map(|s| s.info.cwd.clone())
+            .unwrap_or_default()
     };
 
     let session_context = format!("Session context:\n- Working directory: {cwd}");
@@ -1614,12 +1814,14 @@ async fn run_subagent(
         }
 
         // Non-streaming LLM call for subagent (simpler than streaming)
-        let chat_history: Vec<ChatMessage> = history.iter()
-            .map(|msg| msg.clone().into())
-            .collect();
+        let chat_history: Vec<ChatMessage> = history.iter().map(|msg| msg.clone().into()).collect();
         let reply = match crate::llm::call_llm_non_streaming(
-            &state.http_client, &state.config, &chat_history,
-        ).await {
+            &state.http_client,
+            &state.config,
+            &chat_history,
+        )
+        .await
+        {
             Ok(r) => r,
             Err(err) => {
                 tracing::warn!("subagent {subagent_id} LLM call failed: {err}");
@@ -1655,17 +1857,19 @@ async fn run_subagent(
                     let (otx, _orx) = tokio::sync::oneshot::channel();
                     // Enqueue the depth prompt — the session worker will present
                     // it when no other prompt is active.
-                    let _ = prompt_queue_tx.send(QueuedPrompt::UserPrompt {
-                        prompt_id,
-                        question: format!(
-                            "Tool depth limit reached ({} consecutive calls). Continue?",
-                            budget.current_depth(),
-                        ),
-                        options,
-                        multi: false,
-                        is_depth_prompt: true,
-                        result_tx: otx,
-                    }).await;
+                    let _ = prompt_queue_tx
+                        .send(QueuedPrompt::UserPrompt {
+                            prompt_id,
+                            question: format!(
+                                "Tool depth limit reached ({} consecutive calls). Continue?",
+                                budget.current_depth(),
+                            ),
+                            options,
+                            multi: false,
+                            is_depth_prompt: true,
+                            result_tx: otx,
+                        })
+                        .await;
                     // Note: we don't await the oneshot result here because the
                     // depth prompt response is handled by the session worker
                     // which updates the budget and notifies via budget.resume.
@@ -1681,8 +1885,17 @@ async fn run_subagent(
                 subagent_id: subagent_id.clone(),
                 description: task_description.clone(),
                 status: "running".to_string(),
-                detail: Some(format!("{} {}", tc.name, tc.arguments.get("path").and_then(|v| v.as_str()).or_else(|| tc.arguments.get("pattern").and_then(|v| v.as_str())).unwrap_or(""))),
-            }).await;
+                detail: Some(format!(
+                    "{} {}",
+                    tc.name,
+                    tc.arguments
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| tc.arguments.get("pattern").and_then(|v| v.as_str()))
+                        .unwrap_or("")
+                )),
+            })
+            .await;
 
             let tool_call = ToolCall {
                 id: format!("tc_{}", Uuid::new_v4()),
@@ -1697,7 +1910,8 @@ async fn run_subagent(
             // Check session auto-approved set (shared across all agents)
             let session_auto_approved = {
                 let sessions = state.sessions.read().await;
-                sessions.get(&session_id)
+                sessions
+                    .get(&session_id)
                     .map(|s| s.auto_approved.clone())
                     .unwrap_or_default()
             };
@@ -1714,7 +1928,10 @@ async fn run_subagent(
                 // Auto-approved — execute immediately, notify clients
                 let mut display_tc = ptc.tool_call.clone();
                 display_tc.name = tool_display_name(&ptc.tool_call.name).to_string();
-                bus.send(ServerMessage::ToolAutoApproved { tool_call: display_tc }).await;
+                bus.send(ServerMessage::ToolAutoApproved {
+                    tool_call: display_tc,
+                })
+                .await;
                 let output = execute_tool(&state, session_id, &bus, &ptc).await;
                 bus.send(tool_output_msg(&ptc, output.clone())).await;
                 append_tool_result(&state, session_id, &ptc.tool_call.name, &output).await;
@@ -1730,11 +1947,13 @@ async fn run_subagent(
 
             // Enqueue tool confirmation and wait for user response
             let (otx, orx) = tokio::sync::oneshot::channel();
-            let _ = prompt_queue_tx.send(QueuedPrompt::ToolConfirm {
-                tool_call: ptc.tool_call.clone(),
-                cwd: ptc.cwd.clone(),
-                result_tx: otx,
-            }).await;
+            let _ = prompt_queue_tx
+                .send(QueuedPrompt::ToolConfirm {
+                    tool_call: ptc.tool_call.clone(),
+                    cwd: ptc.cwd.clone(),
+                    result_tx: otx,
+                })
+                .await;
 
             // Wait for the session worker to resolve this tool confirmation
             let (approved, _always) = match orx.await {
@@ -1776,9 +1995,14 @@ async fn run_subagent(
     bus.send(ServerMessage::SubagentUpdate {
         subagent_id: subagent_id.clone(),
         description: task_description,
-        status: if budget.is_terminated() { "failed".to_string() } else { "completed".to_string() },
+        status: if budget.is_terminated() {
+            "failed".to_string()
+        } else {
+            "completed".to_string()
+        },
         detail: None,
-    }).await;
+    })
+    .await;
 
     // Send result back to parent
     let _ = result_tx.send((task_id, full_response)).await;
@@ -1818,7 +2042,8 @@ async fn invoke_llm(
             ),
             options: options.clone(),
             multi: false,
-        }).await;
+        })
+        .await;
         *pending_depth_prompt = Some(PendingDepthPrompt { prompt_id });
         return;
     }
@@ -1830,11 +2055,8 @@ async fn invoke_llm(
     {
         let mut sessions = state.sessions.write().await;
         if let Some(session) = sessions.get_mut(&session_id) {
-            compact_history_if_needed(
-                &state.http_client,
-                &state.config,
-                &mut session.history,
-            ).await;
+            compact_history_if_needed(&state.http_client, &state.config, &mut session.history)
+                .await;
         }
     }
 
@@ -1843,13 +2065,17 @@ async fn invoke_llm(
         let Some(session) = sessions.get(&session_id) else {
             bus.send(ServerMessage::Error {
                 text: "session not found".to_string(),
-            }).await;
+            })
+            .await;
             return;
         };
         (session.history.clone(), session.info.cwd.clone())
     };
 
-    tracing::info!("invoke_llm: history has {} messages, cwd={cwd}", history.len());
+    tracing::info!(
+        "invoke_llm: history has {} messages, cwd={cwd}",
+        history.len()
+    );
     let session_context = format!("Session context:\n- Working directory: {cwd}");
     let mut history_for_llm = history.clone();
     if let Some(system_msg) = history_for_llm.first_mut() {
@@ -1862,7 +2088,14 @@ async fn invoke_llm(
     // persisted to the session history — it only influences this call.
     if ENABLE_REFLECTION {
         tracing::info!("invoke_llm: starting reflective_thinking call");
-        match reflective_thinking(&state.http_client, &state.config, &history_for_llm, &session_context).await {
+        match reflective_thinking(
+            &state.http_client,
+            &state.config,
+            &history_for_llm,
+            &session_context,
+        )
+        .await
+        {
             Ok(reflection) => {
                 tracing::debug!("reflection complete ({} chars)", reflection.content.len());
                 // Insert the reflection BEFORE the last user message so the
@@ -1886,7 +2119,8 @@ async fn invoke_llm(
                     };
                     bus.send(ServerMessage::Error {
                         text: format!("Cannot reach {}: {err}", provider_name),
-                    }).await;
+                    })
+                    .await;
                     bus.send(ServerMessage::AssistantTextDone).await;
                     return;
                 }
@@ -1901,12 +2135,14 @@ async fn invoke_llm(
 
     let http = state.http_client.clone();
     let cfg = state.config.clone();
-    let history_for_llm: Vec<ChatMessage> = history_for_llm.iter()
+    let history_for_llm: Vec<ChatMessage> = history_for_llm
+        .iter()
         .map(|msg| msg.clone().into())
         .collect();
-    let llm_handle = tokio::spawn(async move {
-        call_llm_streaming(&http, &cfg, &history_for_llm, &chunk_tx).await
-    });
+    let llm_handle =
+        tokio::spawn(
+            async move { call_llm_streaming(&http, &cfg, &history_for_llm, &chunk_tx).await },
+        );
 
     // Forward chunks to the bus as AssistantText, but also listen
     // for an Interrupt/Input message from the client. If interrupted,
@@ -1981,10 +2217,14 @@ async fn invoke_llm(
     // Flush any remaining buffered text from the filter
     let remaining = filter.flush();
     if !remaining.is_empty() {
-        bus.send(ServerMessage::AssistantText { text: remaining }).await;
+        bus.send(ServerMessage::AssistantText { text: remaining })
+            .await;
     }
 
-    tracing::info!("invoke_llm: sending AssistantTextDone, partial_content len={}", partial_content.len());
+    tracing::info!(
+        "invoke_llm: sending AssistantTextDone, partial_content len={}",
+        partial_content.len()
+    );
     bus.send(ServerMessage::AssistantTextDone).await;
 
     // Save partial or full response to history
@@ -2022,7 +2262,20 @@ async fn invoke_llm(
             }
         }
         // Recurse to handle the new input
-        Box::pin(invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
+        Box::pin(invoke_llm(
+            state,
+            session_id,
+            bus,
+            client_rx,
+            pending,
+            pending_prompt,
+            pending_depth_prompt,
+            tool_queue,
+            tool_depth,
+            depth_limit,
+            bulk_increment,
+        ))
+        .await;
         return;
     }
 
@@ -2046,12 +2299,26 @@ async fn invoke_llm(
             }
 
             // Present the first tool call to the user
-            Box::pin(present_next_tool(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
+            Box::pin(present_next_tool(
+                state,
+                session_id,
+                bus,
+                client_rx,
+                pending,
+                pending_prompt,
+                pending_depth_prompt,
+                tool_queue,
+                tool_depth,
+                depth_limit,
+                bulk_increment,
+            ))
+            .await;
         }
         Ok(Err(err)) => {
             bus.send(ServerMessage::Error {
                 text: format!("LLM request failed: {err}"),
-            }).await;
+            })
+            .await;
         }
         Err(err) => {
             // JoinError — could be a panic or abort (from interrupt)
@@ -2060,7 +2327,8 @@ async fn invoke_llm(
             } else {
                 bus.send(ServerMessage::Error {
                     text: format!("LLM task panicked: {err}"),
-                }).await;
+                })
+                .await;
             }
         }
     }
@@ -2084,7 +2352,9 @@ async fn present_next_tool(
     depth_limit: &mut usize,
     bulk_increment: &mut usize,
 ) {
-    let Some(ptc) = tool_queue.pop_front() else { return };
+    let Some(ptc) = tool_queue.pop_front() else {
+        return;
+    };
 
     // Auto-handle user_prompt_options without showing a tool confirmation
     if ptc.tool_call.name == "user_prompt_options" {
@@ -2092,19 +2362,50 @@ async fn present_next_tool(
         let question = args["question"].as_str().unwrap_or("Choose:").to_string();
         let options: Vec<String> = args["options"]
             .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         let multi = args["multi"].as_bool().unwrap_or(false);
 
         if options.is_empty() {
-            let output = "Error: user_prompt_options requires a non-empty 'options' array.".to_string();
+            let output =
+                "Error: user_prompt_options requires a non-empty 'options' array.".to_string();
             bus.send(tool_output_msg(&ptc, output.clone())).await;
             append_tool_result(state, session_id, &ptc.tool_call.name, &output).await;
             *tool_depth += 1;
             if !tool_queue.is_empty() {
-                Box::pin(present_next_tool(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
+                Box::pin(present_next_tool(
+                    state,
+                    session_id,
+                    bus,
+                    client_rx,
+                    pending,
+                    pending_prompt,
+                    pending_depth_prompt,
+                    tool_queue,
+                    tool_depth,
+                    depth_limit,
+                    bulk_increment,
+                ))
+                .await;
             } else {
-                invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+                invoke_llm(
+                    state,
+                    session_id,
+                    bus,
+                    client_rx,
+                    pending,
+                    pending_prompt,
+                    pending_depth_prompt,
+                    tool_queue,
+                    tool_depth,
+                    depth_limit,
+                    bulk_increment,
+                )
+                .await;
             }
             return;
         }
@@ -2115,7 +2416,8 @@ async fn present_next_tool(
             question: question.clone(),
             options: options.clone(),
             multi,
-        }).await;
+        })
+        .await;
 
         *pending_prompt = Some(PendingPrompt {
             prompt_id,
@@ -2128,24 +2430,60 @@ async fn present_next_tool(
 
     // Auto-execute read-only / non-destructive tools without user confirmation
     const AUTO_APPROVED_TOOLS: &[&str] = &[
-        "todo_write", "todo_read", "web_fetch", "web_search",
-        "lsp_diagnostics", "lsp_hover", "lsp_references", "lsp_symbols",
-        "js_eval", "js_script_save", "js_script_list", "js_script",
+        "todo_write",
+        "todo_read",
+        "web_fetch",
+        "web_search",
+        "lsp_diagnostics",
+        "lsp_hover",
+        "lsp_references",
+        "lsp_symbols",
+        "js_eval",
+        "js_script_save",
+        "js_script_list",
+        "js_script",
     ];
     if AUTO_APPROVED_TOOLS.contains(&ptc.tool_call.name.as_str()) {
         let mut display_tc = ptc.tool_call.clone();
         display_tc.name = tool_display_name(&ptc.tool_call.name).to_string();
         bus.send(ServerMessage::ToolAutoApproved {
             tool_call: display_tc,
-        }).await;
+        })
+        .await;
         let output = execute_tool(state, session_id, bus, &ptc).await;
         bus.send(tool_output_msg(&ptc, output.clone())).await;
         append_tool_result(state, session_id, &ptc.tool_call.name, &output).await;
         *tool_depth += 1;
         if !tool_queue.is_empty() {
-            Box::pin(present_next_tool(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
+            Box::pin(present_next_tool(
+                state,
+                session_id,
+                bus,
+                client_rx,
+                pending,
+                pending_prompt,
+                pending_depth_prompt,
+                tool_queue,
+                tool_depth,
+                depth_limit,
+                bulk_increment,
+            ))
+            .await;
         } else {
-            invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+            invoke_llm(
+                state,
+                session_id,
+                bus,
+                client_rx,
+                pending,
+                pending_prompt,
+                pending_depth_prompt,
+                tool_queue,
+                tool_depth,
+                depth_limit,
+                bulk_increment,
+            )
+            .await;
         }
         return;
     }
@@ -2155,7 +2493,8 @@ async fn present_next_tool(
     // check the display name (e.g. read_symbol → read_file).
     let session_auto_approved = {
         let sessions = state.sessions.read().await;
-        sessions.get(&session_id)
+        sessions
+            .get(&session_id)
             .map(|s| s.auto_approved.clone())
             .unwrap_or_default()
     };
@@ -2175,27 +2514,56 @@ async fn present_next_tool(
         display_tc.name = tool_display_name(&ptc.tool_call.name).to_string();
         bus.send(ServerMessage::ToolAutoApproved {
             tool_call: display_tc,
-        }).await;
+        })
+        .await;
 
         let output = execute_tool(state, session_id, bus, &ptc).await;
         bus.send(tool_output_msg(&ptc, output.clone())).await;
         append_tool_result(state, session_id, &ptc.tool_call.name, &output).await;
         *tool_depth += 1;
         if !tool_queue.is_empty() {
-            Box::pin(present_next_tool(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment)).await;
+            Box::pin(present_next_tool(
+                state,
+                session_id,
+                bus,
+                client_rx,
+                pending,
+                pending_prompt,
+                pending_depth_prompt,
+                tool_queue,
+                tool_depth,
+                depth_limit,
+                bulk_increment,
+            ))
+            .await;
         } else {
-            invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+            invoke_llm(
+                state,
+                session_id,
+                bus,
+                client_rx,
+                pending,
+                pending_prompt,
+                pending_depth_prompt,
+                tool_queue,
+                tool_depth,
+                depth_limit,
+                bulk_increment,
+            )
+            .await;
         }
         return;
     }
 
     // For run_command, extract individual command names from the shell string
     let extracted_commands = if ptc.tool_call.name == "run_command" {
-        let cmd_str = ptc.tool_call.arguments["command"]
-            .as_str()
-            .unwrap_or("");
+        let cmd_str = ptc.tool_call.arguments["command"].as_str().unwrap_or("");
         let cmds = extract_shell_commands(cmd_str);
-        if cmds.is_empty() { None } else { Some(cmds) }
+        if cmds.is_empty() {
+            None
+        } else {
+            Some(cmds)
+        }
     } else {
         None
     };
@@ -2207,7 +2575,8 @@ async fn present_next_tool(
     bus.send(ServerMessage::ToolRequest {
         tool_call: display_tc,
         extracted_commands,
-    }).await;
+    })
+    .await;
     *pending = Some(ptc);
 }
 
@@ -2245,7 +2614,8 @@ async fn handle_tool_confirm(
     bus.send(ServerMessage::ToolResolved {
         tool_call_id: tool_call_id.to_string(),
         approved,
-    }).await;
+    })
+    .await;
 
     // "Always approve" — add the display name (or extracted commands for
     // run_command) to the session's server-side auto-approved set.
@@ -2254,7 +2624,11 @@ async fn handle_tool_confirm(
         let cmds: Vec<String> = if ptc.tool_call.name == "run_command" {
             let cmd_str = ptc.tool_call.arguments["command"].as_str().unwrap_or("");
             let extracted = extract_shell_commands(cmd_str);
-            if extracted.is_empty() { vec![display] } else { extracted }
+            if extracted.is_empty() {
+                vec![display]
+            } else {
+                extracted
+            }
         } else {
             vec![display]
         };
@@ -2270,7 +2644,8 @@ async fn handle_tool_confirm(
         persist_auto_approved(state, session_id).await;
         bus.send(ServerMessage::Notice {
             text: format!("'{}' will be auto-approved for this session.", label),
-        }).await;
+        })
+        .await;
     }
 
     if !approved {
@@ -2280,7 +2655,20 @@ async fn handle_tool_confirm(
         // If rejected, skip remaining queued tools and re-invoke LLM
         tool_queue.clear();
         *tool_depth += 1;
-        invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+        invoke_llm(
+            state,
+            session_id,
+            bus,
+            client_rx,
+            pending,
+            pending_prompt,
+            pending_depth_prompt,
+            tool_queue,
+            tool_depth,
+            depth_limit,
+            bulk_increment,
+        )
+        .await;
         return;
     }
 
@@ -2291,10 +2679,36 @@ async fn handle_tool_confirm(
 
     // If more tool calls queued from the same LLM response, present the next one
     if !tool_queue.is_empty() {
-        present_next_tool(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+        present_next_tool(
+            state,
+            session_id,
+            bus,
+            client_rx,
+            pending,
+            pending_prompt,
+            pending_depth_prompt,
+            tool_queue,
+            tool_depth,
+            depth_limit,
+            bulk_increment,
+        )
+        .await;
     } else {
         // All tools from this response executed — re-invoke LLM
-        invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+        invoke_llm(
+            state,
+            session_id,
+            bus,
+            client_rx,
+            pending,
+            pending_prompt,
+            pending_depth_prompt,
+            tool_queue,
+            tool_depth,
+            depth_limit,
+            bulk_increment,
+        )
+        .await;
     }
 }
 
@@ -2329,7 +2743,8 @@ async fn handle_prompt_response(
     // Broadcast resolution so all other clients dismiss their pickers.
     bus.send(ServerMessage::PromptResolved {
         prompt_id: prompt_id.to_string(),
-    }).await;
+    })
+    .await;
 
     // Build the tool output from the user's selection
     let selected_labels: Vec<String> = selected
@@ -2350,15 +2765,42 @@ async fn handle_prompt_response(
         }
     };
 
-    bus.send(tool_output_msg(&pp.tool_call, output.clone())).await;
+    bus.send(tool_output_msg(&pp.tool_call, output.clone()))
+        .await;
     append_tool_result(state, session_id, &pp.tool_call.tool_call.name, &output).await;
     *tool_depth += 1;
 
     // Continue the agentic loop
     if !tool_queue.is_empty() {
-        present_next_tool(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+        present_next_tool(
+            state,
+            session_id,
+            bus,
+            client_rx,
+            pending,
+            pending_prompt,
+            pending_depth_prompt,
+            tool_queue,
+            tool_depth,
+            depth_limit,
+            bulk_increment,
+        )
+        .await;
     } else {
-        invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+        invoke_llm(
+            state,
+            session_id,
+            bus,
+            client_rx,
+            pending,
+            pending_prompt,
+            pending_depth_prompt,
+            tool_queue,
+            tool_depth,
+            depth_limit,
+            bulk_increment,
+        )
+        .await;
     }
 }
 
@@ -2385,7 +2827,8 @@ async fn handle_depth_prompt_response(
     // Broadcast resolution so all other clients dismiss their pickers.
     bus.send(ServerMessage::PromptResolved {
         prompt_id: prompt_id.to_string(),
-    }).await;
+    })
+    .await;
 
     let choice = selected.first().copied().unwrap_or(2); // default to "No"
 
@@ -2398,9 +2841,26 @@ async fn handle_depth_prompt_response(
             // Wake all paused subagents
             budget.resume.notify_waiters();
             bus.send(ServerMessage::Notice {
-                text: format!("Continuing. Will pause again after {} total calls.", *depth_limit),
-            }).await;
-            invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+                text: format!(
+                    "Continuing. Will pause again after {} total calls.",
+                    *depth_limit
+                ),
+            })
+            .await;
+            invoke_llm(
+                state,
+                session_id,
+                bus,
+                client_rx,
+                pending,
+                pending_prompt,
+                pending_depth_prompt,
+                tool_queue,
+                tool_depth,
+                depth_limit,
+                bulk_increment,
+            )
+            .await;
         }
         1 => {
             // "Yes, for next N" — continue, pause after N more calls, increment N
@@ -2410,10 +2870,27 @@ async fn handle_depth_prompt_response(
             // Wake all paused subagents
             budget.resume.notify_waiters();
             bus.send(ServerMessage::Notice {
-                text: format!("Continuing. Will pause again after {} total calls.", *depth_limit),
-            }).await;
+                text: format!(
+                    "Continuing. Will pause again after {} total calls.",
+                    *depth_limit
+                ),
+            })
+            .await;
             *bulk_increment += 25;
-            invoke_llm(state, session_id, bus, client_rx, pending, pending_prompt, pending_depth_prompt, tool_queue, tool_depth, depth_limit, bulk_increment).await;
+            invoke_llm(
+                state,
+                session_id,
+                bus,
+                client_rx,
+                pending,
+                pending_prompt,
+                pending_depth_prompt,
+                tool_queue,
+                tool_depth,
+                depth_limit,
+                bulk_increment,
+            )
+            .await;
         }
         _ => {
             // "No" — stop all agents
@@ -2421,7 +2898,8 @@ async fn handle_depth_prompt_response(
             budget.resume.notify_waiters();
             bus.send(ServerMessage::Notice {
                 text: "Stopped. Send a new message to continue.".to_string(),
-            }).await;
+            })
+            .await;
         }
     }
 }
@@ -2517,7 +2995,9 @@ mod tests {
     #[test]
     fn truncate_long_output_has_marker() {
         // Create output that exceeds the limit
-        let lines: Vec<String> = (0..500).map(|i| format!("line {i}: some content here")).collect();
+        let lines: Vec<String> = (0..500)
+            .map(|i| format!("line {i}: some content here"))
+            .collect();
         let input = lines.join("\n");
         let result = truncate_tool_output(&input, 2000);
         assert!(result.contains("truncated"));
@@ -2760,7 +3240,8 @@ mod tests {
     #[test]
     fn filter_strips_malformed_tool_call_missing_bracket() {
         let mut f = ToolCallFilter::new();
-        let input = r#"Some text [TOOL_CALL{"name":"js_eval","arguments":{"code":"2+3"}}[/TOOL_CALL] more"#;
+        let input =
+            r#"Some text [TOOL_CALL{"name":"js_eval","arguments":{"code":"2+3"}}[/TOOL_CALL] more"#;
         let mut out = f.feed(input);
         out.push_str(&f.flush());
         assert_eq!(out.trim(), "Some text  more");
@@ -2789,17 +3270,26 @@ mod tests {
 
     #[test]
     fn extract_chained_commands() {
-        assert_eq!(extract_shell_commands("cd /tmp && rm -rf foo"), vec!["cd", "rm"]);
+        assert_eq!(
+            extract_shell_commands("cd /tmp && rm -rf foo"),
+            vec!["cd", "rm"]
+        );
     }
 
     #[test]
     fn extract_piped_commands() {
-        assert_eq!(extract_shell_commands("ls | grep foo | wc -l"), vec!["ls", "grep", "wc"]);
+        assert_eq!(
+            extract_shell_commands("ls | grep foo | wc -l"),
+            vec!["ls", "grep", "wc"]
+        );
     }
 
     #[test]
     fn extract_with_env_and_sudo() {
-        assert_eq!(extract_shell_commands("FOO=1 sudo cargo build"), vec!["cargo"]);
+        assert_eq!(
+            extract_shell_commands("FOO=1 sudo cargo build"),
+            vec!["cargo"]
+        );
     }
 
     #[test]
@@ -2809,17 +3299,24 @@ mod tests {
 
     #[test]
     fn extract_semicolon_separated() {
-        assert_eq!(extract_shell_commands("echo hello; cat file.txt"), vec!["echo", "cat"]);
+        assert_eq!(
+            extract_shell_commands("echo hello; cat file.txt"),
+            vec!["echo", "cat"]
+        );
     }
 
     #[test]
     fn extract_deduplicates() {
-        assert_eq!(extract_shell_commands("cd /a && cd /b && ls"), vec!["cd", "ls"]);
+        assert_eq!(
+            extract_shell_commands("cd /a && cd /b && ls"),
+            vec!["cd", "ls"]
+        );
     }
 
     #[test]
     fn extract_complex_mixed() {
-        let cmds = extract_shell_commands("cd . && rm -rf build; mkdir build && cd build | tee log");
+        let cmds =
+            extract_shell_commands("cd . && rm -rf build; mkdir build && cd build | tee log");
         assert_eq!(cmds, vec!["cd", "rm", "mkdir", "tee"]);
     }
 }
