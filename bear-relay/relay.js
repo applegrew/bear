@@ -149,6 +149,8 @@ async function verifyJwt(authHeader, roomId) {
     if (!valid) return null;
     const payload = JSON.parse(new TextDecoder().decode(base64UrlDecode(parts[1])));
     if (payload.room_id !== roomId) return null;
+    // Reject expired tokens
+    if (payload.exp && Math.floor(Date.now() / 1000) > payload.exp) return null;
     return payload;
   } catch {
     return null;
@@ -217,11 +219,19 @@ function matchInternalRoute(method, pathname) {
   if (method === "GET" && pathname === "/internal/invites") return { handler: "listInvites" };
   if (method === "POST" && pathname === "/internal/invites") return { handler: "pushInvites" };
 
-  const roomMatch = pathname.match(/^\/internal\/room\/([^/]+)$/);
+  const roomMatch = pathname.match(/^\/internal\/room\/([^/]+)(\/.*)?$/);
   if (roomMatch) {
     const roomId = roomMatch[1];
-    if (method === "GET") return { handler: "getRoom", roomId };
-    if (method === "DELETE") return { handler: "deleteRoom", roomId };
+    const rest = roomMatch[2] ?? "";
+    if (method === "GET" && rest === "") return { handler: "getRoom", roomId };
+    if (method === "DELETE" && rest === "") return { handler: "deleteRoom", roomId };
+    if (method === "POST" && rest === "/offer") return { handler: "internalPostOffer", roomId };
+
+    const answerMatch = rest.match(/^\/answer\/([^/]+)$/);
+    if (answerMatch) {
+      const connId = answerMatch[1];
+      if (method === "GET") return { handler: "internalGetAnswer", roomId, connId };
+    }
   }
 
   return null;
@@ -368,7 +378,7 @@ async function handlePostAnswer(req, roomId, connId, ip) {
     return text("invalid JSON", 400);
   }
 
-  answers.set(connId, { sdp: body.sdp, created_at: Date.now() });
+  answers.set(connId, { sdp: body.sdp, client_jwt: body.client_jwt || null, created_at: Date.now() });
   return json({ ok: true });
 }
 
@@ -388,7 +398,9 @@ async function handleGetAnswer(req, roomId, connId, ip) {
   }
 
   answers.delete(connId);
-  return json({ sdp: ans.sdp });
+  const result = { sdp: ans.sdp };
+  if (ans.client_jwt) result.client_jwt = ans.client_jwt;
+  return json(result);
 }
 
 async function handlePostIce(req, roomId, connId, side, ip) {
@@ -574,9 +586,49 @@ async function handleInternal(req) {
       return handlePushInvites(req);
     case "listInvites":
       return handleListInvites(url);
+    case "internalPostOffer":
+      return handleInternalPostOffer(req, route.roomId);
+    case "internalGetAnswer":
+      return handleInternalGetAnswer(route.roomId, route.connId);
     default:
       return text("not found", 404);
   }
+}
+
+async function handleInternalPostOffer(req, roomId) {
+  // Verify room exists
+  const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+  if (rows.length === 0) return text("not found", 404);
+
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return text("invalid JSON", 400);
+  }
+
+  const connId = nextConnId();
+  const roomOffers = offers.get(roomId) ?? [];
+  roomOffers.push({ conn_id: connId, sdp: body.sdp, created_at: Date.now() });
+  offers.set(roomId, roomOffers);
+
+  return json({ conn_id: connId });
+}
+
+function handleInternalGetAnswer(roomId, connId) {
+  // Verify room exists
+  const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+  if (rows.length === 0) return text("not found", 404);
+
+  const ans = answers.get(connId);
+  if (!ans || Date.now() - ans.created_at >= SIGNALING_TTL_MS) {
+    return new Response(null, { status: 204 });
+  }
+
+  answers.delete(connId);
+  const result = { sdp: ans.sdp };
+  if (ans.client_jwt) result.client_jwt = ans.client_jwt;
+  return json(result);
 }
 
 // ---------------------------------------------------------------------------

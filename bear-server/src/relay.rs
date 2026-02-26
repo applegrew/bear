@@ -480,12 +480,33 @@ async fn handle_relay_offer(
         .await;
     }
 
+    // Mint a short-lived client JWT (5 minutes) for the browser's ICE exchange
+    let client_jwt = {
+        use pkcs8::DecodePrivateKey;
+        match rsa::RsaPrivateKey::from_pkcs8_pem(&relay_cfg.private_key_pem) {
+            Ok(pk) => match crate::mint_rs256_jwt(&pk, &relay_cfg.room_id, Some(300)) {
+                Ok(jwt) => Some(jwt),
+                Err(e) => {
+                    tracing::warn!("relay: failed to mint client JWT: {e}");
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!("relay: failed to parse private key for client JWT: {e}");
+                None
+            }
+        }
+    };
+
     // POST answer to relay
     let answer_url = format!(
         "{}/room/{}/answer/{}",
         relay_cfg.relay_url, relay_cfg.room_id, conn_id
     );
-    let answer_body = serde_json::json!({ "sdp": sdp_answer });
+    let mut answer_body = serde_json::json!({ "sdp": sdp_answer });
+    if let Some(ref cjwt) = client_jwt {
+        answer_body["client_jwt"] = serde_json::json!(cjwt);
+    }
     if let Err(e) = state
         .http_client
         .post(&answer_url)

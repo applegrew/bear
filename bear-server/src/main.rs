@@ -219,7 +219,7 @@ async fn do_relay_pair(state: &ServerState, payload: RelayPairRequest) -> anyhow
 
             let hash_hex = hex_sha256(invite_code.as_bytes());
             let room_id = Uuid::new_v4().to_string();
-            let jwt = mint_rs256_jwt(&private_key, &room_id)?;
+            let jwt = mint_rs256_jwt(&private_key, &room_id, None)?;
 
             let priv_pem = private_key
                 .to_pkcs8_pem(pkcs8::LineEnding::LF)
@@ -292,14 +292,21 @@ fn hex_sha256(data: &[u8]) -> String {
     hash.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn mint_rs256_jwt(private_key: &rsa::RsaPrivateKey, room_id: &str) -> anyhow::Result<String> {
+pub(crate) fn mint_rs256_jwt(
+    private_key: &rsa::RsaPrivateKey,
+    room_id: &str,
+    ttl_secs: Option<i64>,
+) -> anyhow::Result<String> {
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     let header = serde_json::json!({ "alg": "RS256", "typ": "JWT" });
     let header_b64 = b64.encode(serde_json::to_vec(&header)?);
 
     let now = chrono::Utc::now().timestamp();
-    let payload = serde_json::json!({ "room_id": room_id, "iat": now });
+    let mut payload = serde_json::json!({ "room_id": room_id, "iat": now });
+    if let Some(ttl) = ttl_secs {
+        payload["exp"] = serde_json::json!(now + ttl);
+    }
     let payload_b64 = b64.encode(serde_json::to_vec(&payload)?);
 
     let signing_input = format!("{header_b64}.{payload_b64}");

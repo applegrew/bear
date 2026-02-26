@@ -210,6 +210,8 @@ docker run -d \
 | `DELETE` | `/internal/room/:room_id` | Revoke a room (admin) |
 | `POST` | `/internal/invites` | Push invite code hashes: `{ codes: ["<sha256-hex>", ...] }` (10-min TTL) |
 | `GET` | `/internal/invites` | List invite codes `[{ code_hash, created_at, expires_at }]` |
+| `POST` | `/internal/room/:room_id/offer` | Proxy browser SDP offer → returns `{ conn_id }` (no auth) |
+| `GET` | `/internal/room/:room_id/answer/:conn_id` | Proxy answer poll → returns `{ sdp, client_jwt }` (no auth) |
 
 ### Public server contract
 
@@ -217,8 +219,8 @@ The public server is an **external dependency** not built in this repo. It must:
 
 1. **Authenticate users** (accounts, login, sessions)
 2. **Generate invite codes**, SHA-256 hash them, and push the hashes to the relay via `POST /internal/invites`
-3. **Mint JWTs** for authenticated browser sessions by querying `GET /internal/room/:room_id` for the public key PEM, then signing a JWT with `{ room_id, iat }` using **RS256** (the room's RSA public key)
-4. **Serve `bear.js`** with relay config injected (e.g. `BEAR_RELAY_URL`, `BEAR_RELAY_JWT`, `BEAR_ROOM_ID` globals)
+3. **Proxy signaling** — forward browser offer/answer requests to the relay's internal API (`POST /internal/room/:id/offer`, `GET /internal/room/:id/answer/:conn_id`). The answer response includes a `client_jwt` minted by bear-server; pass it through to the browser.
+4. **Serve `bear.js`** with relay config injected (`BEAR_RELAY_URL`, `BEAR_ROOM_ID` globals; `BEAR_PUBLIC_URL` if not same-origin)
 5. **Provide a UI** for pairing status, invite code generation, and revocation
 
 ### Remote access setup

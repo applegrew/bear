@@ -7,11 +7,13 @@ const SERVER_URL = `http://${DEFAULT_HOST}`;
 
 // Remote relay mode: set these globals (e.g. from the public server) to enable
 // signaling via the relay instead of direct HTTP to bear-server.
-// When all three are set, bear.js uses relay signaling.
+// When both RELAY_URL and RELAY_ROOM are set, bear.js uses relay signaling.
+// The public server proxies offer/answer via the relay's internal API;
+// bear.js obtains a short-lived client JWT from the answer for direct ICE exchange.
 const RELAY_URL = (typeof BEAR_RELAY_URL !== 'undefined') ? BEAR_RELAY_URL : null;
-const RELAY_JWT = (typeof BEAR_RELAY_JWT !== 'undefined') ? BEAR_RELAY_JWT : null;
 const RELAY_ROOM = (typeof BEAR_ROOM_ID !== 'undefined') ? BEAR_ROOM_ID : null;
-const IS_REMOTE = !!(RELAY_URL && RELAY_JWT && RELAY_ROOM);
+const PUBLIC_URL = (typeof BEAR_PUBLIC_URL !== 'undefined') ? BEAR_PUBLIC_URL : '';
+const IS_REMOTE = !!(RELAY_URL && RELAY_ROOM);
 
 // STUN servers for NAT traversal
 const ICE_SERVERS = [
@@ -825,12 +827,14 @@ export class BearClient {
     this.pc.onicecandidate = (event) => {
       if (event.candidate && this._connId) {
         if (IS_REMOTE) {
-          // Remote mode: POST ICE candidates to relay
-          fetch(`${RELAY_URL}/room/${RELAY_ROOM}/ice/${this._connId}/client`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${RELAY_JWT}` },
-            body: JSON.stringify({ candidates: [event.candidate.candidate] }),
-          }).catch(() => {});
+          // Remote mode: POST ICE candidates to relay (using client JWT from answer)
+          if (this._relayJwt) {
+            fetch(`${RELAY_URL}/room/${RELAY_ROOM}/ice/${this._connId}/client`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this._relayJwt}` },
+              body: JSON.stringify({ candidates: [event.candidate.candidate] }),
+            }).catch(() => {});
+          }
         } else {
           // Local mode: POST ICE candidates to bear-server
           fetch(`${SERVER_URL}/rtc/${sid}/ice/${this._connId}`, {
@@ -897,10 +901,11 @@ export class BearClient {
       const offer = await this.pc.createOffer();
       await this.pc.setLocalDescription(offer);
 
-      // POST offer to relay
-      const offerRes = await fetch(`${RELAY_URL}/room/${RELAY_ROOM}/offer`, {
+      // POST offer to public server (proxied to relay internal API)
+      const offerRes = await fetch(`${PUBLIC_URL}/relay/${RELAY_ROOM}/offer`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${RELAY_JWT}` },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
         body: JSON.stringify({ sdp: offer.sdp }),
       });
 
@@ -913,14 +918,18 @@ export class BearClient {
       const offerData = await offerRes.json();
       this._connId = offerData.conn_id;
 
-      // Poll for answer from bear-server (via relay)
+      // Poll public server for answer (proxied from relay internal API)
       const deadline = Date.now() + 30000;
       while (Date.now() < deadline) {
-        const ansRes = await fetch(`${RELAY_URL}/room/${RELAY_ROOM}/answer/${this._connId}`, {
-          headers: { 'Authorization': `Bearer ${RELAY_JWT}` },
+        const ansRes = await fetch(`${PUBLIC_URL}/relay/${RELAY_ROOM}/answer/${this._connId}`, {
+          credentials: 'same-origin',
         });
         if (ansRes.status === 200) {
           const ansData = await ansRes.json();
+          // Extract client JWT for direct ICE exchange with relay
+          if (ansData.client_jwt) {
+            this._relayJwt = ansData.client_jwt;
+          }
           await this.pc.setRemoteDescription(
             new RTCSessionDescription({ type: 'answer', sdp: ansData.sdp })
           );
@@ -993,7 +1002,7 @@ export class BearClient {
       if (!this._connId) return;
       try {
         const res = await fetch(`${RELAY_URL}/room/${RELAY_ROOM}/ice/${this._connId}/server`, {
-          headers: { 'Authorization': `Bearer ${RELAY_JWT}` },
+          headers: { 'Authorization': `Bearer ${this._relayJwt}` },
         });
         if (!res.ok) return;
         const data = await res.json();
