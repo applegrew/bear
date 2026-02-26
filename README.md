@@ -267,3 +267,12 @@ bear/
 ├── bearjs/         # Browser client (xterm.js TUI, dual-mode signaling)
 └── html/           # Browser client HTML entry point
 ```
+
+## Misc
+
+Releasing a new version:
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+This will trigger the GitHub Actions workflow to build and release the new version.
