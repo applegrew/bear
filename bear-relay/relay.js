@@ -204,6 +204,7 @@ function matchRoute(method, pathname) {
     const rest = roomMatch[2] ?? "";
 
     if (method === "DELETE" && rest === "") return { handler: "revoke", roomId };
+    if (method === "POST" && rest === "/status") return { handler: "postStatus", roomId };
     if (method === "POST" && rest === "/offer") return { handler: "postOffer", roomId };
     if (method === "GET" && rest === "/offer") return { handler: "getOffer", roomId };
 
@@ -312,6 +313,34 @@ async function handleRevoke(req, roomId, ip) {
   db.query("DELETE FROM rooms WHERE room_id = ?", [roomId]);
   // Clean up in-memory signaling data for this room
   offers.delete(roomId);
+  return json({ ok: true });
+}
+
+async function handlePostStatus(req, roomId, ip) {
+  if (!checkRateLimit(ip)) return text("rate limited", 429);
+
+  const payload = await verifyJwt(req.headers.get("authorization"), roomId);
+  if (!payload) {
+    recordAuthFailure(ip);
+    const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+    return text(rows.length === 0 ? "not found" : "unauthorized", rows.length === 0 ? 404 : 401);
+  }
+
+  let body;
+  try { body = await req.json(); } catch { return text("invalid JSON", 400); }
+
+  if (body.online === false) {
+    // Server is shutting down — set last_poll to 0 to signal offline
+    db.query("UPDATE rooms SET last_poll = 0 WHERE room_id = ?", [roomId]);
+    // Clear any pending signaling data for this room
+    offers.delete(roomId);
+  } else {
+    // Treat as a heartbeat
+    db.query("UPDATE rooms SET last_poll = ? WHERE room_id = ?", [
+      Math.floor(Date.now() / 1000), roomId,
+    ]);
+  }
+
   return json({ ok: true });
 }
 
@@ -608,6 +637,8 @@ async function handleExternal(req, connInfo) {
       return handleRevoke(req, route.roomId, ip);
     case "postOffer":
       return handlePostOffer(req, route.roomId, ip);
+    case "postStatus":
+      return handlePostStatus(req, route.roomId, ip);
     case "getOffer":
       return handleGetOffer(req, route.roomId, ip);
     case "postAnswer":

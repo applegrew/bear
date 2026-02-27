@@ -94,6 +94,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Clone http_client before state is consumed by the router
+    let shutdown_http_client = state.http_client.clone();
+
     let app = Router::new()
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/ws/:session_id", get(ws_handler))
@@ -119,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    // Graceful shutdown on SIGTERM/SIGINT: delete PID file, then exit
+    // Graceful shutdown on SIGTERM/SIGINT: notify relay, delete PID file, then exit
     let server = axum::serve(listener, app);
     #[cfg(unix)]
     {
@@ -132,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
                 _ = sigint.recv() => {},
             }
             tracing::info!("shutting down gracefully...");
+            relay::RelayController::notify_offline(&shutdown_http_client).await;
             cleanup_pid_file();
         });
         graceful.await?;

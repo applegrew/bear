@@ -92,6 +92,36 @@ impl RelayController {
             }
         });
     }
+
+    /// Notify the relay that this server is going offline.
+    /// Called during graceful shutdown so the relay can immediately
+    /// mark the room as offline instead of waiting for poll timeout.
+    pub async fn notify_offline(http_client: &reqwest::Client) {
+        let relay_cfg = match RelayConfig::load() {
+            Some(c) => c,
+            None => return,
+        };
+        let url = format!(
+            "{}/room/{}/status",
+            relay_cfg.relay_url, relay_cfg.room_id
+        );
+        let auth = format!("Bearer {}", relay_cfg.jwt);
+        match http_client
+            .post(&url)
+            .header("Authorization", &auth)
+            .json(&serde_json::json!({ "online": false }))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                tracing::info!("relay: notified offline (status={})", resp.status());
+            }
+            Err(e) => {
+                tracing::warn!("relay: failed to notify offline: {e}");
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
