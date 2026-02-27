@@ -166,15 +166,22 @@ async function verifyJwt(authHeader, roomId) {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Max-Age": "86400",
+};
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...CORS_HEADERS },
   });
 }
 
 function text(msg, status = 200) {
-  return new Response(msg, { status });
+  return new Response(msg, { status, headers: { ...CORS_HEADERS } });
 }
 
 function getIp(req, connInfo) {
@@ -237,6 +244,14 @@ function matchInternalRoute(method, pathname) {
     if (answerMatch) {
       const connId = answerMatch[1];
       if (method === "GET") return { handler: "internalGetAnswer", roomId, connId };
+    }
+
+    const iceMatch = rest.match(/^\/ice\/([^/]+)\/(server|client)$/);
+    if (iceMatch) {
+      const connId = iceMatch[1];
+      const side = iceMatch[2];
+      if (method === "POST") return { handler: "internalPostIce", roomId, connId, side };
+      if (method === "GET") return { handler: "internalGetIce", roomId, connId, side };
     }
   }
 
@@ -351,7 +366,7 @@ async function handleGetOffer(req, roomId, ip) {
   if (validOffers.length === 0) {
     return new Response(null, {
       status: 204,
-      headers: { "X-Next-Poll": String(Math.floor(Date.now() / 1000) + 5) },
+      headers: { "X-Next-Poll": String(Math.floor(Date.now() / 1000) + 5), ...CORS_HEADERS },
     });
   }
 
@@ -363,6 +378,7 @@ async function handleGetOffer(req, roomId, ip) {
     headers: {
       "Content-Type": "application/json",
       "X-Next-Poll": String(Math.floor(Date.now() / 1000) + 5),
+      ...CORS_HEADERS,
     },
   });
 }
@@ -400,7 +416,7 @@ async function handleGetAnswer(req, roomId, connId, ip) {
 
   const ans = answers.get(connId);
   if (!ans || Date.now() - ans.created_at >= SIGNALING_TTL_MS) {
-    return new Response(null, { status: 204 });
+    return new Response(null, { status: 204, headers: { ...CORS_HEADERS } });
   }
 
   answers.delete(connId);
@@ -433,6 +449,7 @@ async function handlePostIce(req, roomId, connId, side, ip) {
     if (c) candidates.push({ candidate: c, created_at: Date.now() });
   }
   ice.set(key, candidates);
+  console.log(`[EXT POST ICE] key=${key} added=${newCandidates.length} total=${candidates.length}`);
 
   return json({ ok: true });
 }
@@ -452,6 +469,7 @@ async function handleGetIce(req, roomId, connId, side, ip) {
     (c) => Date.now() - c.created_at < SIGNALING_TTL_MS
   );
   ice.delete(key); // consume on read
+  console.log(`[EXT GET ICE] key=${key} returning=${candidates.length}`);
 
   return json({ candidates: candidates.map((c) => c.candidate) });
 }
@@ -572,6 +590,11 @@ function handleListInvites(url) {
 // ---------------------------------------------------------------------------
 
 async function handleExternal(req, connInfo) {
+  // Handle CORS preflight
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS_HEADERS });
+  }
+
   const url = new URL(req.url);
   const ip = getIp(req, connInfo);
   const route = matchRoute(req.method, url.pathname);
@@ -627,6 +650,10 @@ async function handleInternal(req) {
       return handleInternalPostOffer(req, route.roomId);
     case "internalGetAnswer":
       return handleInternalGetAnswer(route.roomId, route.connId);
+    case "internalPostIce":
+      return handleInternalPostIce(req, route.roomId, route.connId, route.side);
+    case "internalGetIce":
+      return handleInternalGetIce(route.roomId, route.connId, route.side);
     default:
       return text("not found", 404);
   }
@@ -666,6 +693,37 @@ function handleInternalGetAnswer(roomId, connId) {
   const result = { sdp: ans.sdp };
   if (ans.client_jwt) result.client_jwt = ans.client_jwt;
   return json(result);
+}
+
+async function handleInternalPostIce(req, roomId, connId, side) {
+  const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+  if (rows.length === 0) return text("not found", 404);
+
+  let body;
+  try { body = await req.json(); } catch { return text("invalid JSON", 400); }
+
+  const key = `${connId}:${side}`;
+  const candidates = ice.get(key) ?? [];
+  const newCandidates = Array.isArray(body.candidates) ? body.candidates : [body.candidate];
+  for (const c of newCandidates) {
+    if (c) candidates.push({ candidate: c, created_at: Date.now() });
+  }
+  ice.set(key, candidates);
+  console.log(`[INT POST ICE] key=${key} added=${newCandidates.length} total=${candidates.length}`);
+  return json({ ok: true });
+}
+
+function handleInternalGetIce(roomId, connId, side) {
+  const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+  if (rows.length === 0) return text("not found", 404);
+
+  const key = `${connId}:${side}`;
+  const candidates = (ice.get(key) ?? []).filter(
+    (c) => Date.now() - c.created_at < SIGNALING_TTL_MS
+  );
+  ice.delete(key); // consume on read
+  console.log(`[INT GET ICE] key=${key} returning=${candidates.length}`);
+  return json({ candidates: candidates.map((c) => c.candidate) });
 }
 
 // ---------------------------------------------------------------------------

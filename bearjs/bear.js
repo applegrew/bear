@@ -827,14 +827,17 @@ export class BearClient {
     this.pc.onicecandidate = (event) => {
       if (event.candidate && this._connId) {
         if (IS_REMOTE) {
-          // Remote mode: POST ICE candidates to relay (using client JWT from answer)
-          if (this._relayJwt) {
-            fetch(`${RELAY_URL}/room/${RELAY_ROOM}/ice/${this._connId}/client`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this._relayJwt}` },
-              body: JSON.stringify({ candidates: [event.candidate.candidate] }),
-            }).catch(() => {});
-          }
+          // Remote mode: POST ICE candidates via public server proxy
+          fetch(`${PUBLIC_URL}/relay/${RELAY_ROOM}/ice/${this._connId}/client`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ candidates: [{
+              candidate: event.candidate.candidate,
+              sdpMid: event.candidate.sdpMid,
+              sdpMLineIndex: event.candidate.sdpMLineIndex,
+            }] }),
+          }).catch(() => {});
         } else {
           // Local mode: POST ICE candidates to bear-server
           fetch(`${SERVER_URL}/rtc/${sid}/ice/${this._connId}`, {
@@ -1001,14 +1004,20 @@ export class BearClient {
     this._icePollTimer = setInterval(async () => {
       if (!this._connId) return;
       try {
-        const res = await fetch(`${RELAY_URL}/room/${RELAY_ROOM}/ice/${this._connId}/server`, {
-          headers: { 'Authorization': `Bearer ${this._relayJwt}` },
+        const res = await fetch(`${PUBLIC_URL}/relay/${RELAY_ROOM}/ice/${this._connId}/server`, {
+          credentials: 'same-origin',
         });
         if (!res.ok) return;
         const data = await res.json();
         for (const c of data.candidates || []) {
           if (typeof c === 'string') {
             await this.pc.addIceCandidate(new RTCIceCandidate({ candidate: c }));
+          } else if (c && c.candidate) {
+            await this.pc.addIceCandidate(new RTCIceCandidate({
+              candidate: c.candidate,
+              sdpMid: c.sdpMid ?? null,
+              sdpMLineIndex: c.sdpMLineIndex ?? null,
+            }));
           }
         }
       } catch { /* ignore */ }

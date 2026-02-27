@@ -65,10 +65,11 @@ impl RelayController {
     /// Uses a spawned task to break the async opaque type cycle between
     /// relay → rtc → ws → session_worker → relay_controller.
     pub fn start(&self, state: ServerState) {
-        // Send command and subscribe eagerly (before spawn) so the receiver
-        // is guaranteed to see `true` when the poll loop task starts.
-        let _ = self.cmd_tx.send(true);
+        // Subscribe first so there is at least one receiver, then send.
+        // watch::Sender::send() is a no-op when there are zero receivers,
+        // and the initial receiver is dropped in new().
         let cmd_rx = self.cmd_tx.subscribe();
+        let _ = self.cmd_tx.send(true);
         let handle_arc = self.handle.clone();
         tokio::spawn(async move {
             let mut handle = handle_arc.lock().await;
@@ -355,14 +356,8 @@ async fn handle_relay_offer(
     };
     let session_id = info.id;
 
-    // Verify the session has an active bus (worker must already be running)
-    {
-        let buses = state.buses.read().await;
-        if !buses.contains_key(&session_id) {
-            tracing::warn!("relay: session {session_id} has no active bus, skipping offer");
-            return;
-        }
-    }
+    // Ensure a session worker is running (creates bus + worker on demand)
+    let _ = crate::ws::ensure_worker_running(&state, session_id).await;
 
     // Build WebRTC peer connection
     let mut media_engine = MediaEngine::default();
@@ -412,7 +407,12 @@ async fn handle_relay_offer(
         let cands = cands.clone();
         Box::pin(async move {
             if let Some(c) = candidate {
-                if let Ok(init) = c.to_json() {
+                if let Ok(mut init) = c.to_json() {
+                    // The webrtc crate leaves sdp_mid empty; set it to "0"
+                    // so the browser can associate candidates with the
+                    // data channel m-line (a=mid:0 in the SDP).
+                    init.sdp_mid = Some("0".to_string());
+                    init.sdp_mline_index = Some(0);
                     cands.lock().await.push(init);
                 }
             }
@@ -560,41 +560,78 @@ async fn relay_ice_exchange(
             if !cands.is_empty() {
                 let candidates: Vec<serde_json::Value> = cands
                     .drain(..)
-                    .map(|c| serde_json::json!({ "candidate": c.candidate, "sdpMid": c.sdp_mid, "sdpMLineIndex": c.sdp_mline_index }))
+                    .map(|c| serde_json::json!({
+                        "candidate": c.candidate,
+                        "sdpMid": c.sdp_mid,
+                        "sdpMLineIndex": c.sdp_mline_index,
+                    }))
                     .collect();
 
                 let url = format!("{base}/room/{room}/ice/{conn_id}/server");
-                let _ = http_client
+                for c in &candidates {
+                    tracing::debug!("relay: ICE server candidate: {c}");
+                }
+                tracing::debug!("relay: ICE POST {count} server candidates to {url}", count = candidates.len());
+                match http_client
                     .post(&url)
                     .header("Authorization", &auth)
                     .json(&serde_json::json!({ "candidates": candidates }))
                     .send()
-                    .await;
+                    .await
+                {
+                    Ok(resp) => tracing::debug!("relay: ICE POST server candidates status={}", resp.status()),
+                    Err(e) => tracing::warn!("relay: ICE POST server candidates failed: {e}"),
+                }
             }
         }
 
         // GET client candidates
         {
             let url = format!("{base}/room/{room}/ice/{conn_id}/client");
-            if let Ok(resp) = http_client
+            match http_client
                 .get(&url)
                 .header("Authorization", &auth)
                 .send()
                 .await
             {
-                if let Ok(body) = resp.json::<serde_json::Value>().await {
-                    if let Some(candidates) = body["candidates"].as_array() {
-                        for c in candidates {
-                            if let Some(candidate_str) = c.as_str() {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if let Ok(body) = resp.json::<serde_json::Value>().await {
+                        if let Some(candidates) = body["candidates"].as_array() {
+                            if !candidates.is_empty() {
+                                tracing::debug!("relay: ICE GET {count} client candidates (status={status})", count = candidates.len());
+                            }
+                            for c in candidates {
+                                let (candidate_str, sdp_mid, sdp_mline_index) = if c.is_string() {
+                                    (c.as_str().unwrap().to_string(), None, None)
+                                } else if c.is_object() {
+                                    (
+                                        c["candidate"].as_str().unwrap_or("").to_string(),
+                                        c["sdpMid"].as_str().map(|s| s.to_string()),
+                                        c["sdpMLineIndex"].as_u64().map(|n| n as u16),
+                                    )
+                                } else {
+                                    tracing::warn!("relay: ICE client candidate unexpected type: {c}");
+                                    continue;
+                                };
+                                if candidate_str.is_empty() {
+                                    continue;
+                                }
+                                tracing::debug!("relay: ICE adding client candidate: {candidate_str} sdpMid={sdp_mid:?} idx={sdp_mline_index:?}");
                                 let init = RTCIceCandidateInit {
-                                    candidate: candidate_str.to_string(),
-                                    ..Default::default()
+                                    candidate: candidate_str,
+                                    sdp_mid: Some(sdp_mid.unwrap_or_default()),
+                                    sdp_mline_index: Some(sdp_mline_index.unwrap_or(0)),
+                                    username_fragment: None,
                                 };
                                 let _ = pc.add_ice_candidate(init).await;
                             }
+                        } else {
+                            tracing::debug!("relay: ICE GET client response (status={status}): {body}");
                         }
                     }
                 }
+                Err(e) => tracing::warn!("relay: ICE GET client candidates failed: {e}"),
             }
         }
 
