@@ -42,6 +42,7 @@ Content-Type: application/json
 ```
 
 - Each code has a **10-minute TTL** on the relay and is burned (deleted) on first use.
+- When pairing succeeds, the relay stores the invite code hash on the room as `invite_code_hash`. This lets the public server look up which rooms belong to which user.
 - Display the plaintext invite code to the user; it is never sent to the relay.
 
 ### 3. Signaling proxy
@@ -111,7 +112,24 @@ MIIBIjANBgkqhki...
 
 When `BEAR_RELAY_URL` and `BEAR_ROOM_ID` are both set, `bear.js` automatically switches to relay signaling mode.
 
-### 6. Pairing status and management UI
+### 6. Map rooms to users
+
+After a `bear-server` pairs with the relay, the room retains the `invite_code_hash` from the invite code used during pairing. The public server knows which invite codes it issued to which user, so it can use this to identify room ownership:
+
+1. List rooms via `GET /internal/rooms` or fetch a specific room via `GET /internal/room/:room_id`
+2. Match the `invite_code_hash` field to the user who was issued that invite code
+3. Optionally clear the hash after recording the mapping:
+
+```
+PATCH <relay_internal>/internal/room/<room_id>
+Content-Type: application/json
+
+{ "invite_code_hash": null }
+```
+
+The `PATCH` endpoint accepts a JSON body with updatable fields. Currently the only supported field is `invite_code_hash`.
+
+### 7. Pairing status and management UI
 
 - Show the user whether their `bear-server` is currently paired (room exists on relay).
 - Provide UI for:
@@ -126,7 +144,8 @@ When `BEAR_RELAY_URL` and `BEAR_ROOM_ID` are both set, `bear.js` automatically s
 | `POST` | `/internal/invites` | Push invite code hashes |
 | `GET` | `/internal/invites` | List active invite codes |
 | `GET` | `/internal/rooms` | List all rooms (with pagination) |
-| `GET` | `/internal/room/:room_id` | Get room details (including `signing_key`) |
+| `GET` | `/internal/room/:room_id` | Get room details (including `signing_key`, `invite_code_hash`) |
+| `PATCH` | `/internal/room/:room_id` | Update room fields (e.g. `{ "invite_code_hash": null }`) |
 | `DELETE` | `/internal/room/:room_id` | Revoke a room (admin) |
 | `POST` | `/internal/room/:room_id/offer` | Proxy browser SDP offer |
 | `GET` | `/internal/room/:room_id/answer/:conn_id` | Proxy answer poll |

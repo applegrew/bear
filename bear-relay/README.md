@@ -43,6 +43,7 @@ Tables:
    - `signing_key TEXT NOT NULL` — RSA public key in SPKI PEM format
    - `created_at INTEGER NOT NULL`
    - `last_poll INTEGER`
+   - `invite_code_hash TEXT` — SHA-256 hash of the invite code used during pairing (nullable; can be cleared via `PATCH /internal/room/:room_id`)
 2. `invite_codes`
    - `code_hash TEXT PRIMARY KEY` — SHA-256 hex hash of the invite code
    - `created_at INTEGER NOT NULL`
@@ -79,9 +80,11 @@ Flow:
 
 1. Validate `invite_code` hash exists in `invite_codes` and `expires_at > now`.
 2. Transaction:
-   - burn (delete) the invite code row
-   - insert/replace room with provided `room_id` and public key PEM
+   - burn (delete) the invite code from the `invite_codes` table
+   - insert/replace room with provided `room_id`, public key PEM, and the invite code hash stored as `invite_code_hash`
 3. Return `{ "ok": true }`.
+
+The `invite_code_hash` is retained on the room so that the public server can look up which rooms belong to a given user (since it knows which invite codes were issued to which user). The public server can later clear it via `PATCH /internal/room/:room_id` with `{ "invite_code_hash": null }`.
 
 #### Offer/answer/ICE
 
@@ -124,7 +127,9 @@ ICE candidates are consumed on read (`GET` clears returned candidates).
 ### Internal API (trusted network only)
 
 - `GET /internal/rooms`
-- `GET /internal/room/:room_id`
+- `GET /internal/room/:room_id` (returns `invite_code_hash` when present)
+- `PATCH /internal/room/:room_id`
+  - updates room fields; currently supports `{ "invite_code_hash": "..." | null }`
 - `DELETE /internal/room/:room_id`
 - `POST /internal/invites`
   - accepts `{ "codes": ["<sha256-hex-hash>", ...] }`
@@ -143,6 +148,7 @@ ICE candidates are consumed on read (`GET` clears returned candidates).
 - Proxy offer/answer signaling through the internal API routes above.
 - Preserve relay payload fields unchanged (do not strip/rename signaling metadata).
 - Provide `BEAR_RELAY_URL`, `BEAR_ROOM_ID`, `BEAR_PUBLIC_URL`, and `BEAR_ROOM_KEY` to `bear.js`.
+- Use `invite_code_hash` on rooms (via `GET /internal/rooms` or `GET /internal/room/:room_id`) to map rooms to users. Optionally clear it via `PATCH /internal/room/:room_id` with `{ "invite_code_hash": null }` after mapping is established.
 
 ## Podman build
 

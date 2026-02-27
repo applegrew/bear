@@ -24,12 +24,17 @@ const db = new DB(DB_PATH);
 db.execute("PRAGMA journal_mode=WAL");
 db.execute(`
   CREATE TABLE IF NOT EXISTS rooms (
-    room_id     TEXT PRIMARY KEY,
-    signing_key TEXT NOT NULL,
-    created_at  INTEGER NOT NULL,
-    last_poll   INTEGER
+    room_id          TEXT PRIMARY KEY,
+    signing_key      TEXT NOT NULL,
+    created_at       INTEGER NOT NULL,
+    last_poll        INTEGER,
+    invite_code_hash TEXT
   )
 `);
+// Migration: add invite_code_hash column if missing (existing DBs)
+try {
+  db.execute("ALTER TABLE rooms ADD COLUMN invite_code_hash TEXT");
+} catch { /* column already exists */ }
 db.execute(`
   CREATE TABLE IF NOT EXISTS invite_codes (
     code_hash   TEXT PRIMARY KEY,
@@ -224,6 +229,7 @@ function matchInternalRoute(method, pathname) {
     const roomId = roomMatch[1];
     const rest = roomMatch[2] ?? "";
     if (method === "GET" && rest === "") return { handler: "getRoom", roomId };
+    if (method === "PATCH" && rest === "") return { handler: "updateRoom", roomId };
     if (method === "DELETE" && rest === "") return { handler: "deleteRoom", roomId };
     if (method === "POST" && rest === "/offer") return { handler: "internalPostOffer", roomId };
 
@@ -262,13 +268,13 @@ async function handlePair(req) {
   );
   if (rows.length === 0) return json({ error: "invalid or expired invite code" }, 403);
 
-  // Burn invite code and create room (transaction)
+  // Burn invite code and create room, keeping the code hash on the room
   db.execute("BEGIN");
   try {
     db.query("DELETE FROM invite_codes WHERE code_hash = ?", [invite_code]);
     db.query(
-      "INSERT OR REPLACE INTO rooms (room_id, signing_key, created_at) VALUES (?, ?, ?)",
-      [room_id, signing_key, now]
+      "INSERT OR REPLACE INTO rooms (room_id, signing_key, created_at, invite_code_hash) VALUES (?, ?, ?, ?)",
+      [room_id, signing_key, now, invite_code]
     );
     db.execute("COMMIT");
   } catch (e) {
@@ -458,25 +464,54 @@ function handleListRooms(url) {
   const limit = parseInt(url.searchParams.get("limit") ?? "100");
   const offset = parseInt(url.searchParams.get("offset") ?? "0");
   const rows = db.query(
-    "SELECT room_id, created_at, last_poll FROM rooms ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    "SELECT room_id, created_at, last_poll, invite_code_hash FROM rooms ORDER BY created_at DESC LIMIT ? OFFSET ?",
     [limit, offset]
   );
-  const rooms = rows.map(([room_id, created_at, last_poll]) => ({
+  const rooms = rows.map(([room_id, created_at, last_poll, invite_code_hash]) => ({
     room_id,
     created_at,
     last_poll,
+    invite_code_hash: invite_code_hash ?? null,
   }));
   return json(rooms);
 }
 
 function handleGetRoom(roomId) {
   const rows = db.query(
-    "SELECT room_id, signing_key, created_at, last_poll FROM rooms WHERE room_id = ?",
+    "SELECT room_id, signing_key, created_at, last_poll, invite_code_hash FROM rooms WHERE room_id = ?",
     [roomId]
   );
   if (rows.length === 0) return text("not found", 404);
-  const [rid, signing_key, created_at, last_poll] = rows[0];
-  return json({ room_id: rid, signing_key, created_at, last_poll });
+  const [rid, signing_key, created_at, last_poll, invite_code_hash] = rows[0];
+  return json({ room_id: rid, signing_key, created_at, last_poll, invite_code_hash: invite_code_hash ?? null });
+}
+
+async function handleUpdateRoom(req, roomId) {
+  const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+  if (rows.length === 0) return text("not found", 404);
+
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return text("invalid JSON", 400);
+  }
+
+  // Build SET clause from allowed fields
+  const allowed = ["invite_code_hash"];
+  const setClauses = [];
+  const params = [];
+  for (const field of allowed) {
+    if (field in body) {
+      setClauses.push(`${field} = ?`);
+      params.push(body[field] ?? null);
+    }
+  }
+  if (setClauses.length === 0) return text("no updatable fields provided", 400);
+
+  params.push(roomId);
+  db.query(`UPDATE rooms SET ${setClauses.join(", ")} WHERE room_id = ?`, params);
+  return json({ ok: true });
 }
 
 function handleDeleteRoom(roomId) {
@@ -580,6 +615,8 @@ async function handleInternal(req) {
       return handleListRooms(url);
     case "getRoom":
       return handleGetRoom(route.roomId);
+    case "updateRoom":
+      return handleUpdateRoom(req, route.roomId);
     case "deleteRoom":
       return handleDeleteRoom(route.roomId);
     case "pushInvites":

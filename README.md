@@ -209,6 +209,7 @@ docker run -d \
 |---|---|---|
 | `GET` | `/internal/rooms` | List all rooms (with pagination) |
 | `GET` | `/internal/room/:room_id` | Get room details including public key PEM |
+| `PATCH` | `/internal/room/:room_id` | Update room fields (e.g. `{ "invite_code_hash": null }`) |
 | `DELETE` | `/internal/room/:room_id` | Revoke a room (admin) |
 | `POST` | `/internal/invites` | Push invite code hashes: `{ codes: ["<sha256-hex>", ...] }` (10-min TTL) |
 | `GET` | `/internal/invites` | List invite codes `[{ code_hash, created_at, expires_at }]` |
@@ -224,7 +225,8 @@ The public server is an **external dependency** not built in this repo. See [`Pu
 3. **Proxy signaling** — forward browser offer/answer requests to the relay's internal API (`POST /internal/room/:id/offer`, `GET /internal/room/:id/answer/:conn_id`) and pass through metadata fields unchanged (`offer_hash_enc`, `offer_hash`, `signature`, `client_jwt`).
 4. **Expose room public key to browser** — fetch `signing_key` via `GET /internal/room/:room_id` and inject it as `BEAR_ROOM_KEY` for browser-side verification.
 5. **Serve `bear.js`** with relay config injected (`BEAR_RELAY_URL`, `BEAR_ROOM_ID`, `BEAR_PUBLIC_URL`, `BEAR_ROOM_KEY`)
-6. **Provide a UI** for pairing status, invite code generation, and revocation
+6. **Map rooms to users** — use `invite_code_hash` from `GET /internal/rooms` or `GET /internal/room/:room_id` to identify which user owns a room (the public server knows which invite codes it issued to which user). Optionally clear the hash via `PATCH /internal/room/:room_id` with `{ "invite_code_hash": null }` after the mapping is recorded.
+7. **Provide a UI** for pairing status, invite code generation, and revocation
 
 ### Remote access setup
 
