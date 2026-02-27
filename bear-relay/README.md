@@ -12,6 +12,7 @@ It does **not** proxy session traffic after connection establishment.
 - Persist room credentials (`room_id`, RSA public key PEM) and invite code hashes in SQLite.
 - Accept pairing requests from `bear-server` using invite codes.
 - Store short-lived SDP/ICE signaling messages in memory.
+- Act as an opaque mailbox for signaling metadata (e.g. `offer_hash_enc`, `offer_hash`, `signature`, `client_jwt`) without interpreting or transforming those fields.
 - Expose two HTTP surfaces:
   - **External API** (`PORT`, default `8080`) for browser + `bear-server` (JWT-gated per room).
   - **Internal API** (`INTERNAL_PORT`, default `8081`) for trusted control-plane/admin usage.
@@ -25,8 +26,8 @@ Two listeners run in one process:
 
 Signaling state is in-memory only:
 
-- `offers: Map<room_id, [{ conn_id, sdp, created_at }]>`
-- `answers: Map<conn_id, { sdp, created_at }>`
+- `offers: Map<room_id, [{ conn_id, sdp, offer_hash_enc?, created_at }]>`
+- `answers: Map<conn_id, { sdp, client_jwt?, offer_hash?, signature?, created_at }>`
 - `ice: Map<"conn_id:side", [{ candidate, created_at }]>`
 
 This state is TTL-pruned every 10s (`SIGNALING_TTL_MS = 60_000`).
@@ -54,6 +55,7 @@ Tables:
   1. look up RSA public key PEM from `rooms` by `room_id`
   2. import as SPKI key, verify RS256 signature via `crypto.subtle`
   3. require token claim `room_id` to match route room
+  4. reject expired tokens when `exp` claim is present
 - Per-IP auth-failure rate limiting:
   - window: 60s
   - max failures: 5
@@ -83,13 +85,16 @@ Flow:
 
 #### Offer/answer/ICE
 
-- Browser posts offer: `POST /room/:room_id/offer` -> `{ conn_id }`
-- `bear-server` polls: `GET /room/:room_id/offer`
-  - `200` with oldest pending offer
+- Browser signaling path (recommended): public server proxies to relay internal API:
+  - `POST /internal/room/:room_id/offer` with `{ sdp }` and optional `offer_hash_enc`
+  - `GET /internal/room/:room_id/answer/:conn_id` returning `{ sdp }` plus passthrough metadata when present (`client_jwt`, `offer_hash`, `signature`)
+- `bear-server` signaling path: polls external API:
+  - `GET /room/:room_id/offer`
+  - `200` with oldest pending offer (`{ conn_id, sdp }` and optional `offer_hash_enc`)
   - `204` if none pending
-- `bear-server` posts answer: `POST /room/:room_id/answer/:conn_id`
-- Browser polls answer: `GET /room/:room_id/answer/:conn_id`
-  - `200` with SDP or `204` if not ready
+- `bear-server` posts answer: `POST /room/:room_id/answer/:conn_id` with `{ sdp }` and optional metadata (`client_jwt`, `offer_hash`, `signature`)
+- Browser/public server polls answer externally when needed: `GET /room/:room_id/answer/:conn_id`
+  - `200` with `sdp` (+ any posted metadata) or `204` if not ready
 - Both sides exchange ICE via:
   - `POST /room/:room_id/ice/:conn_id/:side`
   - `GET /room/:room_id/ice/:conn_id/:side`
@@ -109,10 +114,10 @@ ICE candidates are consumed on read (`GET` clears returned candidates).
 
 - `POST /pair`
 - `DELETE /room/:room_id`
-- `POST /room/:room_id/offer`
+- `POST /room/:room_id/offer` (accepts optional `offer_hash_enc`)
 - `GET /room/:room_id/offer`
-- `POST /room/:room_id/answer/:conn_id`
-- `GET /room/:room_id/answer/:conn_id`
+- `POST /room/:room_id/answer/:conn_id` (accepts optional `client_jwt`, `offer_hash`, `signature`)
+- `GET /room/:room_id/answer/:conn_id` (returns `sdp` + passthrough metadata when present)
 - `POST /room/:room_id/ice/:conn_id/:side`
 - `GET /room/:room_id/ice/:conn_id/:side`
 
@@ -126,6 +131,18 @@ ICE candidates are consumed on read (`GET` clears returned candidates).
   - each code is stored with a 10-minute TTL
 - `GET /internal/invites`
   - returns `[{ code_hash, created_at, expires_at }, ...]`
+- `POST /internal/room/:room_id/offer`
+  - accepts browser signaling payload (`{ sdp }` + passthrough metadata such as `offer_hash_enc`)
+  - returns `{ conn_id }`
+- `GET /internal/room/:room_id/answer/:conn_id`
+  - returns `204` when pending, else `{ sdp }` + passthrough metadata (`client_jwt`, `offer_hash`, `signature`) when present
+
+### Public server expectations
+
+- Authenticate browser users via session cookies.
+- Proxy offer/answer signaling through the internal API routes above.
+- Preserve relay payload fields unchanged (do not strip/rename signaling metadata).
+- Provide `BEAR_RELAY_URL`, `BEAR_ROOM_ID`, `BEAR_PUBLIC_URL`, and `BEAR_ROOM_KEY` to `bear.js`.
 
 ## Podman build
 

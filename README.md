@@ -133,7 +133,8 @@ Bear supports remote browser access via a three-tier signaling architecture:
                          Public Internet
                               │
 Browser ◄──login──► Public Server ◄──HTTPS──► bear-server
-  (bear.js)        (auth + JWT)               (user's machine)
+  (bear.js)        (session auth +            (user's machine)
+                    signaling proxy)
                         │                          │
                    internal net              HTTPS (JWT-gated)
                         │                          │
@@ -145,7 +146,7 @@ Browser ◄──login──► Public Server ◄──HTTPS──► bear-serve
 
 **Three tiers:**
 1. **Relay** (`bear-relay/`, built by us) — stateless HTTP signaling mailbox with SQLite persistence for rooms/public keys. Dockerized.
-2. **Public server** (external, not built here) — user auth, invite codes, serves `bear.js`, mints JWTs.
+2. **Public server** (external, not built here) — user auth, invite codes, serves `bear.js`, proxies signaling, injects relay config/public key for browser verification.
 3. **Bear ecosystem** — native client (`bear`), `bear-server`, `bear.js`.
 
 Once signaling completes, the WebRTC DataChannel is **peer-to-peer** (browser ↔ bear-server) — the relay is only involved during signaling + ICE exchange.
@@ -156,6 +157,7 @@ Once signaling completes, the WebRTC DataChannel is **peer-to-peer** (browser �
 - **Hashed invite codes** — invite codes are SHA-256 hashed before transmission. The relay only ever stores hashes, never plaintext codes.
 - **Credential lifecycle** — invite codes have a 10-minute TTL and are burned (deleted) on first use.
 - **TLS SPKI pinning** — during pairing, `bear-server` captures the relay's TLS certificate SPKI fingerprint and saves it. On every subsequent poll, the pin is enforced. A mismatch is treated as a fatal security event: polling stops and the user is notified.
+- **Signaling integrity (design contract)** — browser includes an encrypted offer hash commitment (`offer_hash_enc`) and bear-server returns signed answer metadata (`offer_hash`, `signature`) so relay-side SDP tampering is detectable by both peers.
 - **Connection notifications** — when a remote browser connects via relay, a notice is broadcast to all native clients.
 - **WebRTC fingerprint verification** — both `bear-server` and the browser compute a 6-character SAS verification code from the DTLS fingerprints in the SDP offer/answer. Users can visually compare these codes to confirm the connection is not intercepted.
 
@@ -194,10 +196,10 @@ docker run -d \
 |---|---|---|
 | `POST` | `/pair` | Register a new room: `{ room_id, signing_key (RSA public key PEM), invite_code (SHA-256 hex hash) }` |
 | `DELETE` | `/room/:room_id` | Revoke a room (requires Bearer JWT) |
-| `POST` | `/room/:room_id/offer` | Browser posts SDP offer → returns `{ conn_id }` |
+| `POST` | `/room/:room_id/offer` | Client/public-server posts SDP offer → returns `{ conn_id }` (accepts optional `offer_hash_enc`) |
 | `GET` | `/room/:room_id/offer` | Bear-server polls for pending offers |
-| `POST` | `/room/:room_id/answer/:conn_id` | Bear-server posts SDP answer |
-| `GET` | `/room/:room_id/answer/:conn_id` | Browser polls for the answer |
+| `POST` | `/room/:room_id/answer/:conn_id` | Bear-server posts SDP answer (and optional `offer_hash`, `signature`, `client_jwt`) |
+| `GET` | `/room/:room_id/answer/:conn_id` | Browser/public-server polls answer (returns `sdp` plus passthrough metadata) |
 | `POST` | `/room/:room_id/ice/:conn_id/:side` | Post ICE candidates (`side` = `server` or `client`) |
 | `GET` | `/room/:room_id/ice/:conn_id/:side` | Poll ICE candidates |
 
@@ -210,18 +212,19 @@ docker run -d \
 | `DELETE` | `/internal/room/:room_id` | Revoke a room (admin) |
 | `POST` | `/internal/invites` | Push invite code hashes: `{ codes: ["<sha256-hex>", ...] }` (10-min TTL) |
 | `GET` | `/internal/invites` | List invite codes `[{ code_hash, created_at, expires_at }]` |
-| `POST` | `/internal/room/:room_id/offer` | Proxy browser SDP offer → returns `{ conn_id }` (no auth) |
-| `GET` | `/internal/room/:room_id/answer/:conn_id` | Proxy answer poll → returns `{ sdp, client_jwt }` (no auth) |
+| `POST` | `/internal/room/:room_id/offer` | Proxy browser SDP offer → returns `{ conn_id }` (no auth, passthrough fields like `offer_hash_enc`) |
+| `GET` | `/internal/room/:room_id/answer/:conn_id` | Proxy answer poll → returns `{ sdp, client_jwt, offer_hash, signature }` when present (no auth) |
 
 ### Public server contract
 
-The public server is an **external dependency** not built in this repo. It must:
+The public server is an **external dependency** not built in this repo. See [`PublicServerContract.md`](PublicServerContract.md) for the full specification. Summary:
 
 1. **Authenticate users** (accounts, login, sessions)
 2. **Generate invite codes**, SHA-256 hash them, and push the hashes to the relay via `POST /internal/invites`
-3. **Proxy signaling** — forward browser offer/answer requests to the relay's internal API (`POST /internal/room/:id/offer`, `GET /internal/room/:id/answer/:conn_id`). The answer response includes a `client_jwt` minted by bear-server; pass it through to the browser.
-4. **Serve `bear.js`** with relay config injected (`BEAR_RELAY_URL`, `BEAR_ROOM_ID` globals; `BEAR_PUBLIC_URL` if not same-origin)
-5. **Provide a UI** for pairing status, invite code generation, and revocation
+3. **Proxy signaling** — forward browser offer/answer requests to the relay's internal API (`POST /internal/room/:id/offer`, `GET /internal/room/:id/answer/:conn_id`) and pass through metadata fields unchanged (`offer_hash_enc`, `offer_hash`, `signature`, `client_jwt`).
+4. **Expose room public key to browser** — fetch `signing_key` via `GET /internal/room/:room_id` and inject it as `BEAR_ROOM_KEY` for browser-side verification.
+5. **Serve `bear.js`** with relay config injected (`BEAR_RELAY_URL`, `BEAR_ROOM_ID`, `BEAR_PUBLIC_URL`, `BEAR_ROOM_KEY`)
+6. **Provide a UI** for pairing status, invite code generation, and revocation
 
 ### Remote access setup
 
