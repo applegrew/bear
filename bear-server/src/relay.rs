@@ -65,16 +65,16 @@ impl RelayController {
     /// Uses a spawned task to break the async opaque type cycle between
     /// relay → rtc → ws → session_worker → relay_controller.
     pub fn start(&self, state: ServerState) {
-        let cmd_tx = self.cmd_tx.clone();
+        // Send command and subscribe eagerly (before spawn) so the receiver
+        // is guaranteed to see `true` when the poll loop task starts.
+        let _ = self.cmd_tx.send(true);
+        let cmd_rx = self.cmd_tx.subscribe();
         let handle_arc = self.handle.clone();
         tokio::spawn(async move {
             let mut handle = handle_arc.lock().await;
             if handle.as_ref().map_or(false, |h| !h.is_finished()) {
-                let _ = cmd_tx.send(true);
                 return;
             }
-            let _ = cmd_tx.send(true);
-            let cmd_rx = cmd_tx.subscribe();
             let task = tokio::spawn(relay_poll_loop(state, cmd_rx));
             *handle = Some(task);
         });
