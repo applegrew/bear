@@ -74,6 +74,20 @@ Bear is a Rust-based "claude code"-style coding assistant with persistent sessio
 
 ## Quick start
 
+### Install (macOS & Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/applegrew/bear/master/install.sh | sh
+```
+
+Then run:
+
+```bash
+bear
+```
+
+### Build from source
+
 ```bash
 # Run the server (one per machine)
 cargo run -p bear-server
