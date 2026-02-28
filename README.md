@@ -6,6 +6,14 @@
 
 Bear is a Rust-based "claude code"-style coding assistant with persistent sessions backed by a single `bear-server` process. Multiple clients (native terminal and browser) can connect to the same session simultaneously, and sessions persist even after client terminals close.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/applegrew/bear/master/install.sh | sh
+```
+
+Supports macOS (Intel & Apple Silicon) and Linux (x86_64).
+
 ## Features
 
 ### Core
