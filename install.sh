@@ -70,6 +70,30 @@ fi
 echo "Latest release: $TAG"
 
 # ---------------------------------------------------------------------------
+# Check if already installed and up-to-date
+# ---------------------------------------------------------------------------
+
+VERSION_FILE="$HOME/.bear/.version"
+INSTALLED_VERSION=""
+
+if [ -f "$VERSION_FILE" ]; then
+  INSTALLED_VERSION="$(cat "$VERSION_FILE" 2>/dev/null || echo "")"
+fi
+
+if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" = "$TAG" ]; then
+  echo ""
+  echo "  Bear $TAG is already installed and up-to-date."
+  echo ""
+  exit 0
+fi
+
+if [ -n "$INSTALLED_VERSION" ]; then
+  echo "Updating from $INSTALLED_VERSION to $TAG..."
+else
+  echo "Installing Bear $TAG..."
+fi
+
+# ---------------------------------------------------------------------------
 # Download and install
 # ---------------------------------------------------------------------------
 
@@ -89,7 +113,15 @@ mkdir -p "$INSTALL_DIR"
 tar xzf "$TMP_DIR/$ARTIFACT" -C "$INSTALL_DIR"
 chmod +x "$INSTALL_DIR/bear" "$INSTALL_DIR/bear-server"
 
-echo "Installed bear and bear-server to $INSTALL_DIR"
+# Store installed version
+mkdir -p "$(dirname "$VERSION_FILE")"
+echo "$TAG" > "$VERSION_FILE"
+
+if [ -n "$INSTALLED_VERSION" ]; then
+  echo "Updated bear and bear-server to $TAG"
+else
+  echo "Installed bear and bear-server to $INSTALL_DIR"
+fi
 
 # ---------------------------------------------------------------------------
 # Add to PATH if needed
