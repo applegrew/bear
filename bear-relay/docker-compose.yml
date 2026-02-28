@@ -11,7 +11,13 @@ services:
     environment:
       - PORT=8080
       - INTERNAL_PORT=8081
+      # Database backend: "sqlite" (default), "postgres", or "mysql"
+      - DB_BACKEND=sqlite
+      # SQLite file path (only used when DB_BACKEND=sqlite)
       - DB_PATH=/data/relay.db
+      # Connection string for postgres/mysql (required when DB_BACKEND is not sqlite)
+      # - DATABASE_URL=postgres://user:pass@host:5432/bear_relay
+      # - DATABASE_URL=mysql://user:pass@host:3306/bear_relay
     restart: unless-stopped
 
 volumes:

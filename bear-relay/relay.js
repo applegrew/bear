@@ -1,7 +1,8 @@
-// bear-relay — Deno signaling relay with SQLite persistence
+// bear-relay — Deno signaling relay with pluggable database backend
 // Two HTTP listeners: external (JWT-gated) and internal (no auth)
+// DB backend selected via DB_BACKEND env var: "sqlite" (default), "postgres", "mysql"
 
-import { DB } from "https://deno.land/x/sqlite@v3.9.1/mod.ts";
+import { createDatabase } from "./db.js";
 // djwt removed — RS256 verification uses native crypto.subtle
 
 // ---------------------------------------------------------------------------
@@ -10,38 +11,16 @@ import { DB } from "https://deno.land/x/sqlite@v3.9.1/mod.ts";
 
 const PORT = parseInt(Deno.env.get("PORT") ?? "8080");
 const INTERNAL_PORT = parseInt(Deno.env.get("INTERNAL_PORT") ?? "8081");
-const DB_PATH = Deno.env.get("DB_PATH") ?? "/data/relay.db";
 const SIGNALING_TTL_MS = 60_000; // 60s for offers/answers/ICE
 const ROOM_PRUNE_DAYS = 30;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_FAILURES = 5;
 
 // ---------------------------------------------------------------------------
-// SQLite setup
+// Database setup (initialized at startup)
 // ---------------------------------------------------------------------------
 
-const db = new DB(DB_PATH);
-db.execute("PRAGMA journal_mode=WAL");
-db.execute(`
-  CREATE TABLE IF NOT EXISTS rooms (
-    room_id          TEXT PRIMARY KEY,
-    signing_key      TEXT NOT NULL,
-    created_at       INTEGER NOT NULL,
-    last_poll        INTEGER,
-    invite_code_hash TEXT
-  )
-`);
-// Migration: add invite_code_hash column if missing (existing DBs)
-try {
-  db.execute("ALTER TABLE rooms ADD COLUMN invite_code_hash TEXT");
-} catch { /* column already exists */ }
-db.execute(`
-  CREATE TABLE IF NOT EXISTS invite_codes (
-    code_hash   TEXT PRIMARY KEY,
-    created_at  INTEGER NOT NULL,
-    expires_at  INTEGER NOT NULL
-  )
-`);
+let db;
 
 // ---------------------------------------------------------------------------
 // In-memory signaling store (ephemeral, TTL-based)
@@ -78,15 +57,15 @@ setInterval(() => {
 }, 10_000);
 
 // Periodic cleanup of expired invite codes
-setInterval(() => {
+setInterval(async () => {
   const now = Math.floor(Date.now() / 1000);
-  db.query("DELETE FROM invite_codes WHERE expires_at < ?", [now]);
+  await db.execute("DELETE FROM invite_codes WHERE expires_at < ?", [now]);
 }, 60_000);
 
 // Periodic room pruning (30 days no poll)
-setInterval(() => {
+setInterval(async () => {
   const cutoff = Math.floor(Date.now() / 1000) - ROOM_PRUNE_DAYS * 86400;
-  db.query("DELETE FROM rooms WHERE last_poll IS NOT NULL AND last_poll < ?", [cutoff]);
+  await db.execute("DELETE FROM rooms WHERE last_poll IS NOT NULL AND last_poll < ?", [cutoff]);
 }, 3600_000); // every hour
 
 // ---------------------------------------------------------------------------
@@ -142,7 +121,7 @@ async function verifyJwt(authHeader, roomId) {
   if (parts.length !== 3) return null;
 
   // Look up room
-  const rows = db.query("SELECT signing_key FROM rooms WHERE room_id = ?", [roomId]);
+  const rows = await db.query("SELECT signing_key FROM rooms WHERE room_id = ?", [roomId]);
   if (rows.length === 0) return null;
   const publicKeyPem = rows[0][0];
 
@@ -278,23 +257,23 @@ async function handlePair(req) {
 
   // Validate invite code (must exist and not expired)
   const now = Math.floor(Date.now() / 1000);
-  const rows = db.query(
+  const rows = await db.query(
     "SELECT 1 FROM invite_codes WHERE code_hash = ? AND expires_at > ?",
     [invite_code, now]
   );
   if (rows.length === 0) return json({ error: "invalid or expired invite code" }, 403);
 
   // Burn invite code and create room, keeping the code hash on the room
-  db.execute("BEGIN");
   try {
-    db.query("DELETE FROM invite_codes WHERE code_hash = ?", [invite_code]);
-    db.query(
-      "INSERT OR REPLACE INTO rooms (room_id, signing_key, created_at, invite_code_hash) VALUES (?, ?, ?, ?)",
-      [room_id, signing_key, now, invite_code]
-    );
-    db.execute("COMMIT");
+    await db.transaction(async (tx) => {
+      await tx.execute("DELETE FROM invite_codes WHERE code_hash = ?", [invite_code]);
+      await db.upsert(
+        "rooms",
+        ["room_id", "signing_key", "created_at", "invite_code_hash"],
+        [room_id, signing_key, now, invite_code]
+      );
+    });
   } catch (e) {
-    db.execute("ROLLBACK");
     return json({ error: "pairing failed: " + e.message }, 500);
   }
 
@@ -310,7 +289,7 @@ async function handleRevoke(req, roomId, ip) {
     return text("unauthorized", 401);
   }
 
-  db.query("DELETE FROM rooms WHERE room_id = ?", [roomId]);
+  await db.execute("DELETE FROM rooms WHERE room_id = ?", [roomId]);
   // Clean up in-memory signaling data for this room
   offers.delete(roomId);
   return json({ ok: true });
@@ -322,7 +301,7 @@ async function handlePostStatus(req, roomId, ip) {
   const payload = await verifyJwt(req.headers.get("authorization"), roomId);
   if (!payload) {
     recordAuthFailure(ip);
-    const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+    const rows = await db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
     return text(rows.length === 0 ? "not found" : "unauthorized", rows.length === 0 ? 404 : 401);
   }
 
@@ -331,12 +310,12 @@ async function handlePostStatus(req, roomId, ip) {
 
   if (body.online === false) {
     // Server is shutting down — set last_poll to 0 to signal offline
-    db.query("UPDATE rooms SET last_poll = 0 WHERE room_id = ?", [roomId]);
+    await db.execute("UPDATE rooms SET last_poll = 0 WHERE room_id = ?", [roomId]);
     // Clear any pending signaling data for this room
     offers.delete(roomId);
   } else {
     // Treat as a heartbeat
-    db.query("UPDATE rooms SET last_poll = ? WHERE room_id = ?", [
+    await db.execute("UPDATE rooms SET last_poll = ? WHERE room_id = ?", [
       Math.floor(Date.now() / 1000), roomId,
     ]);
   }
@@ -351,7 +330,7 @@ async function handlePostOffer(req, roomId, ip) {
   if (!payload) {
     recordAuthFailure(ip);
     // Check if room exists to distinguish 401 vs 404
-    const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+    const rows = await db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
     return text(rows.length === 0 ? "not found" : "unauthorized", rows.length === 0 ? 404 : 401);
   }
 
@@ -376,12 +355,12 @@ async function handleGetOffer(req, roomId, ip) {
   const payload = await verifyJwt(req.headers.get("authorization"), roomId);
   if (!payload) {
     recordAuthFailure(ip);
-    const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+    const rows = await db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
     return text(rows.length === 0 ? "not found" : "unauthorized", rows.length === 0 ? 404 : 401);
   }
 
   // Update last_poll
-  db.query("UPDATE rooms SET last_poll = ? WHERE room_id = ?", [
+  await db.execute("UPDATE rooms SET last_poll = ? WHERE room_id = ?", [
     Math.floor(Date.now() / 1000),
     roomId,
   ]);
@@ -418,7 +397,7 @@ async function handlePostAnswer(req, roomId, connId, ip) {
   const payload = await verifyJwt(req.headers.get("authorization"), roomId);
   if (!payload) {
     recordAuthFailure(ip);
-    const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+    const rows = await db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
     return text(rows.length === 0 ? "not found" : "unauthorized", rows.length === 0 ? 404 : 401);
   }
 
@@ -439,7 +418,7 @@ async function handleGetAnswer(req, roomId, connId, ip) {
   const payload = await verifyJwt(req.headers.get("authorization"), roomId);
   if (!payload) {
     recordAuthFailure(ip);
-    const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+    const rows = await db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
     return text(rows.length === 0 ? "not found" : "unauthorized", rows.length === 0 ? 404 : 401);
   }
 
@@ -460,7 +439,7 @@ async function handlePostIce(req, roomId, connId, side, ip) {
   const payload = await verifyJwt(req.headers.get("authorization"), roomId);
   if (!payload) {
     recordAuthFailure(ip);
-    const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+    const rows = await db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
     return text(rows.length === 0 ? "not found" : "unauthorized", rows.length === 0 ? 404 : 401);
   }
 
@@ -489,7 +468,7 @@ async function handleGetIce(req, roomId, connId, side, ip) {
   const payload = await verifyJwt(req.headers.get("authorization"), roomId);
   if (!payload) {
     recordAuthFailure(ip);
-    const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+    const rows = await db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
     return text(rows.length === 0 ? "not found" : "unauthorized", rows.length === 0 ? 404 : 401);
   }
 
@@ -507,10 +486,10 @@ async function handleGetIce(req, roomId, connId, side, ip) {
 // Internal route handlers (no auth)
 // ---------------------------------------------------------------------------
 
-function handleListRooms(url) {
+async function handleListRooms(url) {
   const limit = parseInt(url.searchParams.get("limit") ?? "100");
   const offset = parseInt(url.searchParams.get("offset") ?? "0");
-  const rows = db.query(
+  const rows = await db.query(
     "SELECT room_id, created_at, last_poll, invite_code_hash FROM rooms ORDER BY created_at DESC LIMIT ? OFFSET ?",
     [limit, offset]
   );
@@ -523,8 +502,8 @@ function handleListRooms(url) {
   return json(rooms);
 }
 
-function handleGetRoom(roomId) {
-  const rows = db.query(
+async function handleGetRoom(roomId) {
+  const rows = await db.query(
     "SELECT room_id, signing_key, created_at, last_poll, invite_code_hash FROM rooms WHERE room_id = ?",
     [roomId]
   );
@@ -534,7 +513,7 @@ function handleGetRoom(roomId) {
 }
 
 async function handleUpdateRoom(req, roomId) {
-  const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+  const rows = await db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
   if (rows.length === 0) return text("not found", 404);
 
   let body;
@@ -557,12 +536,12 @@ async function handleUpdateRoom(req, roomId) {
   if (setClauses.length === 0) return text("no updatable fields provided", 400);
 
   params.push(roomId);
-  db.query(`UPDATE rooms SET ${setClauses.join(", ")} WHERE room_id = ?`, params);
+  await db.execute(`UPDATE rooms SET ${setClauses.join(", ")} WHERE room_id = ?`, params);
   return json({ ok: true });
 }
 
-function handleDeleteRoom(roomId) {
-  db.query("DELETE FROM rooms WHERE room_id = ?", [roomId]);
+async function handleDeleteRoom(roomId) {
+  await db.execute("DELETE FROM rooms WHERE room_id = ?", [roomId]);
   offers.delete(roomId);
   return json({ ok: true });
 }
@@ -582,27 +561,27 @@ async function handlePushInvites(req) {
 
   const now = Math.floor(Date.now() / 1000);
   const expires_at = now + 600; // 10 minutes TTL
-  db.execute("BEGIN");
   try {
-    for (const code of codes) {
-      db.query(
-        "INSERT OR IGNORE INTO invite_codes (code_hash, created_at, expires_at) VALUES (?, ?, ?)",
-        [String(code), now, expires_at]
-      );
-    }
-    db.execute("COMMIT");
+    await db.transaction(async (tx) => {
+      for (const code of codes) {
+        await db.insertIgnore(
+          "invite_codes",
+          ["code_hash", "created_at", "expires_at"],
+          [String(code), now, expires_at]
+        );
+      }
+    });
   } catch (e) {
-    db.execute("ROLLBACK");
     return json({ error: e.message }, 500);
   }
 
   return json({ ok: true, count: codes.length });
 }
 
-function handleListInvites(url) {
+async function handleListInvites(url) {
   const limit = parseInt(url.searchParams.get("limit") ?? "100");
   const offset = parseInt(url.searchParams.get("offset") ?? "0");
-  const rows = db.query(
+  const rows = await db.query(
     "SELECT code_hash, created_at, expires_at FROM invite_codes ORDER BY created_at DESC LIMIT ? OFFSET ?",
     [limit, offset]
   );
@@ -692,7 +671,7 @@ async function handleInternal(req) {
 
 async function handleInternalPostOffer(req, roomId) {
   // Verify room exists
-  const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+  const rows = await db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
   if (rows.length === 0) return text("not found", 404);
 
   let body;
@@ -710,9 +689,9 @@ async function handleInternalPostOffer(req, roomId) {
   return json({ conn_id: connId });
 }
 
-function handleInternalGetAnswer(roomId, connId) {
+async function handleInternalGetAnswer(roomId, connId) {
   // Verify room exists
-  const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+  const rows = await db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
   if (rows.length === 0) return text("not found", 404);
 
   const ans = answers.get(connId);
@@ -727,7 +706,7 @@ function handleInternalGetAnswer(roomId, connId) {
 }
 
 async function handleInternalPostIce(req, roomId, connId, side) {
-  const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+  const rows = await db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
   if (rows.length === 0) return text("not found", 404);
 
   let body;
@@ -744,8 +723,8 @@ async function handleInternalPostIce(req, roomId, connId, side) {
   return json({ ok: true });
 }
 
-function handleInternalGetIce(roomId, connId, side) {
-  const rows = db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
+async function handleInternalGetIce(roomId, connId, side) {
+  const rows = await db.query("SELECT 1 FROM rooms WHERE room_id = ?", [roomId]);
   if (rows.length === 0) return text("not found", 404);
 
   const key = `${connId}:${side}`;
@@ -761,10 +740,16 @@ function handleInternalGetIce(roomId, connId, side) {
 // Start servers
 // ---------------------------------------------------------------------------
 
-console.log(`bear-relay starting...`);
-console.log(`  External API: http://0.0.0.0:${PORT}`);
-console.log(`  Internal API: http://0.0.0.0:${INTERNAL_PORT}`);
-console.log(`  Database: ${DB_PATH}`);
+async function main() {
+  console.log(`bear-relay starting...`);
 
-Deno.serve({ port: PORT, hostname: "0.0.0.0" }, handleExternal);
-Deno.serve({ port: INTERNAL_PORT, hostname: "0.0.0.0" }, handleInternal);
+  db = await createDatabase();
+
+  console.log(`  External API: http://0.0.0.0:${PORT}`);
+  console.log(`  Internal API: http://0.0.0.0:${INTERNAL_PORT}`);
+
+  Deno.serve({ port: PORT, hostname: "0.0.0.0" }, handleExternal);
+  Deno.serve({ port: INTERNAL_PORT, hostname: "0.0.0.0" }, handleInternal);
+}
+
+main();

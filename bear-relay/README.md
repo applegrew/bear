@@ -1,6 +1,6 @@
 # bear-relay
 
-Relay signaling server for Bear (Deno + SQLite).
+Relay signaling server for Bear (Deno, pluggable DB backend).
 
 ## Technical design
 
@@ -9,7 +9,7 @@ It does **not** proxy session traffic after connection establishment.
 
 ### Responsibilities
 
-- Persist room credentials (`room_id`, RSA public key PEM) and invite code hashes in SQLite.
+- Persist room credentials (`room_id`, RSA public key PEM) and invite code hashes in a database (SQLite, PostgreSQL, or MySQL).
 - Accept pairing requests from `bear-server` using invite codes.
 - Store short-lived SDP/ICE signaling messages in memory.
 - Act as an opaque mailbox for signaling metadata (e.g. `offer_hash_enc`, `offer_hash`, `signature`, `client_jwt`) without interpreting or transforming those fields.
@@ -32,9 +32,17 @@ Signaling state is in-memory only:
 
 This state is TTL-pruned every 10s (`SIGNALING_TTL_MS = 60_000`).
 
-### Persistence model (SQLite)
+### Persistence model
 
-Database path: `DB_PATH` (default `/data/relay.db`), WAL mode enabled.
+The relay supports three database backends, selected via the `DB_BACKEND` environment variable:
+
+| `DB_BACKEND` | Connection | Default |
+|---|---|---|
+| `sqlite` (default) | `DB_PATH` file path | `/data/relay.db` |
+| `postgres` / `postgresql` | `DATABASE_URL` connection string | *(required)* |
+| `mysql` / `mariadb` | `DATABASE_URL` connection string | *(required)* |
+
+SQLite uses WAL mode. Schema is auto-created on startup for all backends.
 
 Tables:
 
@@ -159,6 +167,8 @@ podman build -t bear-relay:latest -f bear-relay/Dockerfile bear-relay
 
 ## Podman run
 
+### SQLite (default, local dev)
+
 ```bash
 podman run --rm \
   -p 8090:8080 \
@@ -166,11 +176,39 @@ podman run --rm \
   -v /path/on/host:/data \
   -e PORT=8080 \
   -e INTERNAL_PORT=8081 \
+  -e DB_BACKEND=sqlite \
   -e DB_PATH=/data/relay.db \
+  localhost/bear-relay:latest
+```
+
+### PostgreSQL
+
+```bash
+podman run --rm \
+  -p 8090:8080 \
+  -p 8091:8081 \
+  -e PORT=8080 \
+  -e INTERNAL_PORT=8081 \
+  -e DB_BACKEND=postgres \
+  -e DATABASE_URL=postgres://user:pass@db-host:5432/bear_relay \
+  localhost/bear-relay:latest
+```
+
+### MySQL / MariaDB
+
+```bash
+podman run --rm \
+  -p 8090:8080 \
+  -p 8091:8081 \
+  -e PORT=8080 \
+  -e INTERNAL_PORT=8081 \
+  -e DB_BACKEND=mysql \
+  -e DATABASE_URL=mysql://user:pass@db-host:3306/bear_relay \
   localhost/bear-relay:latest
 ```
 
 ## Operational notes
 
 - Keep `INTERNAL_PORT` inaccessible from the public internet.
-- Mount persistent storage to `/data` to retain rooms/invites across restarts.
+- When using SQLite, mount persistent storage to `/data` to retain rooms/invites across restarts.
+- When using PostgreSQL or MySQL, the database can live on a separate node (e.g. in a Kubernetes cluster), allowing multiple relay instances to share state.
