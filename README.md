@@ -305,3 +305,7 @@ git tag v0.1.0 && git push origin v0.1.0
 ```
 
 This will trigger the GitHub Actions workflow to build and release the new version.
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
