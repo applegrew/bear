@@ -101,10 +101,7 @@ impl RelayController {
             Some(c) => c,
             None => return,
         };
-        let url = format!(
-            "{}/room/{}/status",
-            relay_cfg.relay_url, relay_cfg.room_id
-        );
+        let url = format!("{}/room/{}/status", relay_cfg.relay_url, relay_cfg.room_id);
         let auth = format!("Bearer {}", relay_cfg.jwt);
         match http_client
             .post(&url)
@@ -590,18 +587,23 @@ async fn relay_ice_exchange(
             if !cands.is_empty() {
                 let candidates: Vec<serde_json::Value> = cands
                     .drain(..)
-                    .map(|c| serde_json::json!({
-                        "candidate": c.candidate,
-                        "sdpMid": c.sdp_mid,
-                        "sdpMLineIndex": c.sdp_mline_index,
-                    }))
+                    .map(|c| {
+                        serde_json::json!({
+                            "candidate": c.candidate,
+                            "sdpMid": c.sdp_mid,
+                            "sdpMLineIndex": c.sdp_mline_index,
+                        })
+                    })
                     .collect();
 
                 let url = format!("{base}/room/{room}/ice/{conn_id}/server");
                 for c in &candidates {
                     tracing::debug!("relay: ICE server candidate: {c}");
                 }
-                tracing::debug!("relay: ICE POST {count} server candidates to {url}", count = candidates.len());
+                tracing::debug!(
+                    "relay: ICE POST {count} server candidates to {url}",
+                    count = candidates.len()
+                );
                 match http_client
                     .post(&url)
                     .header("Authorization", &auth)
@@ -609,7 +611,10 @@ async fn relay_ice_exchange(
                     .send()
                     .await
                 {
-                    Ok(resp) => tracing::debug!("relay: ICE POST server candidates status={}", resp.status()),
+                    Ok(resp) => tracing::debug!(
+                        "relay: ICE POST server candidates status={}",
+                        resp.status()
+                    ),
                     Err(e) => tracing::warn!("relay: ICE POST server candidates failed: {e}"),
                 }
             }
@@ -629,7 +634,10 @@ async fn relay_ice_exchange(
                     if let Ok(body) = resp.json::<serde_json::Value>().await {
                         if let Some(candidates) = body["candidates"].as_array() {
                             if !candidates.is_empty() {
-                                tracing::debug!("relay: ICE GET {count} client candidates (status={status})", count = candidates.len());
+                                tracing::debug!(
+                                    "relay: ICE GET {count} client candidates (status={status})",
+                                    count = candidates.len()
+                                );
                             }
                             for c in candidates {
                                 let (candidate_str, sdp_mid, sdp_mline_index) = if c.is_string() {
@@ -641,7 +649,9 @@ async fn relay_ice_exchange(
                                         c["sdpMLineIndex"].as_u64().map(|n| n as u16),
                                     )
                                 } else {
-                                    tracing::warn!("relay: ICE client candidate unexpected type: {c}");
+                                    tracing::warn!(
+                                        "relay: ICE client candidate unexpected type: {c}"
+                                    );
                                     continue;
                                 };
                                 if candidate_str.is_empty() {
@@ -657,7 +667,9 @@ async fn relay_ice_exchange(
                                 let _ = pc.add_ice_candidate(init).await;
                             }
                         } else {
-                            tracing::debug!("relay: ICE GET client response (status={status}): {body}");
+                            tracing::debug!(
+                                "relay: ICE GET client response (status={status}): {body}"
+                            );
                         }
                     }
                 }
