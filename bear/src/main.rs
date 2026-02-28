@@ -100,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(invite_code) = cli.relay_pair {
         let relay_url = std::env::var("BEAR_RELAY_URL")
-            .unwrap_or_else(|_| "https://bear.applegrew.com".to_string());
+            .unwrap_or_else(|_| "https://bear.applegrew.com/relay".to_string());
         let http = reqwest::Client::new();
         let res = http
             .post(format!("{}/relay/pair", server_url))
