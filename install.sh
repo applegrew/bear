@@ -127,39 +127,55 @@ fi
 # Add to PATH if needed
 # ---------------------------------------------------------------------------
 
-add_to_path() {
-  local profile="$1"
-  if [ -f "$profile" ]; then
-    if ! grep -q "$INSTALL_DIR" "$profile" 2>/dev/null; then
-      echo "" >> "$profile"
-      echo "# Bear" >> "$profile"
-      echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$profile"
-      echo "  Added $INSTALL_DIR to PATH in $profile"
-    fi
-  fi
-}
-
-case "$SHELL" in
-  */zsh)
-    add_to_path "$HOME/.zshrc"
-    ;;
-  */bash)
-    if [ -f "$HOME/.bash_profile" ]; then
-      add_to_path "$HOME/.bash_profile"
-    else
-      add_to_path "$HOME/.bashrc"
-    fi
-    ;;
-  *)
-    add_to_path "$HOME/.profile"
-    ;;
-esac
-
-# Also check if it's already on PATH
+# Check if it's already on PATH
 if echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
   IN_PATH=true
 else
   IN_PATH=false
+fi
+
+# If not in PATH, offer to add it to shell profile
+if [ "$IN_PATH" = false ]; then
+  # Determine which profile to modify
+  PROFILE=""
+  case "$SHELL" in
+    */zsh)
+      PROFILE="$HOME/.zshrc"
+      ;;
+    */bash)
+      if [ -f "$HOME/.bash_profile" ]; then
+        PROFILE="$HOME/.bash_profile"
+      else
+        PROFILE="$HOME/.bashrc"
+      fi
+      ;;
+    *)
+      PROFILE="$HOME/.profile"
+      ;;
+  esac
+
+  # Check if profile already has the PATH entry
+  ALREADY_IN_PROFILE=false
+  if [ -f "$PROFILE" ] && grep -q "$INSTALL_DIR" "$PROFILE" 2>/dev/null; then
+    ALREADY_IN_PROFILE=true
+  fi
+
+  # Prompt user if not already in profile
+  if [ "$ALREADY_IN_PROFILE" = false ]; then
+    printf "Add %s to PATH in %s? [Y/n] " "$INSTALL_DIR" "$PROFILE"
+    read -r response
+    case "$response" in
+      [nN][oO]|[nN])
+        echo "  Skipped adding to PATH."
+        ;;
+      *)
+        echo "" >> "$PROFILE"
+        echo "# Bear" >> "$PROFILE"
+        echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$PROFILE"
+        echo "  Added $INSTALL_DIR to PATH in $PROFILE"
+        ;;
+    esac
+  fi
 fi
 
 # ---------------------------------------------------------------------------
