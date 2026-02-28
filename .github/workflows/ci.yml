@@ -92,7 +92,7 @@ jobs:
             runner: ubuntu-latest
             artifact: bear-linux-x86_64.tar.gz
           - name: macOS Intel
-            runner: macos-13
+            runner: macos-12
             artifact: bear-macos-x86_64.tar.gz
           - name: macOS ARM
             runner: macos-latest
