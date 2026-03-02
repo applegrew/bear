@@ -269,7 +269,7 @@ async function handlePair(req) {
   try {
     await db.transaction(async (tx) => {
       await tx.execute("DELETE FROM invite_codes WHERE code_hash = ?", [invite_code]);
-      await db.upsert(
+      await tx.upsert(
         "rooms",
         ["room_id", "signing_key", "created_at", "invite_code_hash"],
         [room_id, signing_key, now, invite_code]
@@ -580,7 +580,7 @@ async function handlePushInvites(req) {
   try {
     await db.transaction(async (tx) => {
       for (const code of codes) {
-        await db.insertIgnore(
+        await tx.insertIgnore(
           "invite_codes",
           ["code_hash", "created_at", "expires_at"],
           [String(code), now, expires_at]

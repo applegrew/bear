@@ -42,7 +42,7 @@ The relay supports three database backends, selected via the `DB_BACKEND` enviro
 | `postgres` / `postgresql` | `DATABASE_URL` connection string | *(required)* |
 | `mysql` / `mariadb` | `DATABASE_URL` connection string | *(required)* |
 
-SQLite uses WAL mode. Schema is auto-created on startup for all backends.
+SQLite uses WAL mode. PostgreSQL and MySQL use connection pooling (`DB_POOL_SIZE`, default 5). Schema is auto-created on startup for all backends.
 
 Tables:
 

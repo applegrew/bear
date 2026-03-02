@@ -12,7 +12,7 @@ services:
       - PORT=8080
       - INTERNAL_PORT=8081
       # Relay version (reported by /internal/health)
-      - RELAY_VERSION=0.1.6
+      - RELAY_VERSION=0.1.6.1
       # Database backend: "sqlite" (default), "postgres", or "mysql"
       - DB_BACKEND=sqlite
       # SQLite file path (only used when DB_BACKEND=sqlite)
@@ -20,6 +20,8 @@ services:
       # Connection string for postgres/mysql (required when DB_BACKEND is not sqlite)
       # - DATABASE_URL=postgres://user:pass@host:5432/bear_relay
       # - DATABASE_URL=mysql://user:pass@host:3306/bear_relay
+      # Connection pool size for postgres/mysql (default: 5)
+      # - DB_POOL_SIZE=5
     restart: unless-stopped
 
 volumes:

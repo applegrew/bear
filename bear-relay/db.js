@@ -7,9 +7,10 @@
 //                  e.g. postgres://user:pass@host:5432/dbname
 //                  e.g. mysql://user:pass@host:3306/dbname
 //   DB_PATH      — SQLite file path (default: /data/relay.db)
+//   DB_POOL_SIZE — connection pool size for postgres/mysql (default: 5)
 
 import { DB as SqliteDB } from "https://deno.land/x/sqlite@v3.9.1/mod.ts";
-import { Client as PgClient } from "https://deno.land/x/postgres@v0.19.3/mod.ts";
+import { Pool as PgPool } from "https://deno.land/x/postgres@v0.19.3/mod.ts";
 import { Client as MysqlClient } from "https://deno.land/x/mysql@v2.12.1/mod.ts";
 
 // ---------------------------------------------------------------------------
@@ -121,7 +122,7 @@ class SqliteBackend {
     }
   }
 
-  // Transaction helper — fn receives this backend instance
+  // Transaction helper — fn receives a backend-like wrapper
   async transaction(fn) {
     this._db.execute("BEGIN");
     try {
@@ -157,71 +158,109 @@ class SqliteBackend {
 // ---------------------------------------------------------------------------
 
 class PostgresBackend {
-  constructor(url) {
-    this._client = new PgClient(url);
+  constructor(url, poolSize) {
+    this._pool = new PgPool(url, poolSize, true);
   }
 
   get name() { return "postgres"; }
 
   async init() {
-    await this._client.connect();
-    await this._client.queryArray(ROOMS_TABLE_POSTGRES);
-    await this._client.queryArray(INVITE_CODES_TABLE_POSTGRES);
+    const client = await this._pool.connect();
+    try {
+      await client.queryArray(ROOMS_TABLE_POSTGRES);
+      await client.queryArray(INVITE_CODES_TABLE_POSTGRES);
+    } finally {
+      client.release();
+    }
   }
 
   async query(sql, params = []) {
-    const pgSql = toPgParams(sql);
-    const result = await this._client.queryArray(pgSql, params);
-    return result.rows;
+    const client = await this._pool.connect();
+    try {
+      const pgSql = toPgParams(sql);
+      const result = await client.queryArray(pgSql, params);
+      return result.rows;
+    } finally {
+      client.release();
+    }
   }
 
   async execute(sql, params = []) {
-    const pgSql = toPgParams(sql);
-    await this._client.queryArray(pgSql, params);
+    const client = await this._pool.connect();
+    try {
+      const pgSql = toPgParams(sql);
+      await client.queryArray(pgSql, params);
+    } finally {
+      client.release();
+    }
   }
 
   async transaction(fn) {
-    const tx = await this._client.createTransaction("relay_tx");
-    await tx.begin();
-    // Create a wrapper that uses the transaction for queries
-    const txBackend = {
-      query: async (sql, params = []) => {
-        const pgSql = toPgParams(sql);
-        const result = await tx.queryArray(pgSql, params);
-        return result.rows;
-      },
-      execute: async (sql, params = []) => {
-        const pgSql = toPgParams(sql);
-        await tx.queryArray(pgSql, params);
-      },
-    };
+    const client = await this._pool.connect();
     try {
-      await fn(txBackend);
-      await tx.commit();
+      await client.queryArray("BEGIN");
+      // Build a lightweight backend-like wrapper bound to this client
+      const tx = {
+        query: async (sql, params = []) => {
+          const pgSql = toPgParams(sql);
+          const result = await client.queryArray(pgSql, params);
+          return result.rows;
+        },
+        execute: async (sql, params = []) => {
+          const pgSql = toPgParams(sql);
+          await client.queryArray(pgSql, params);
+        },
+        upsert: async (table, columns, values) => {
+          const pk = columns[0];
+          const placeholders = columns.map((_, i) => `$${i + 1}`).join(", ");
+          const updates = columns.slice(1).map((c, i) => `${c} = $${i + 2}`).join(", ");
+          const sql = `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT (${pk}) DO UPDATE SET ${updates}`;
+          await client.queryArray(sql, values);
+        },
+        insertIgnore: async (table, columns, values) => {
+          const placeholders = columns.map((_, i) => `$${i + 1}`).join(", ");
+          const sql = `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`;
+          await client.queryArray(sql, values);
+        },
+      };
+      await fn(tx);
+      await client.queryArray("COMMIT");
     } catch (e) {
-      await tx.rollback();
+      await client.queryArray("ROLLBACK");
       throw e;
+    } finally {
+      client.release();
     }
   }
 
   // Upsert: INSERT ... ON CONFLICT (pk) DO UPDATE SET ...
   async upsert(table, columns, values) {
-    const pk = columns[0]; // assumes first column is the primary key
-    const placeholders = columns.map((_, i) => `$${i + 1}`).join(", ");
-    const updates = columns.slice(1).map((c, i) => `${c} = $${i + 2}`).join(", ");
-    const sql = `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT (${pk}) DO UPDATE SET ${updates}`;
-    await this._client.queryArray(sql, values);
+    const client = await this._pool.connect();
+    try {
+      const pk = columns[0]; // assumes first column is the primary key
+      const placeholders = columns.map((_, i) => `$${i + 1}`).join(", ");
+      const updates = columns.slice(1).map((c, i) => `${c} = $${i + 2}`).join(", ");
+      const sql = `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT (${pk}) DO UPDATE SET ${updates}`;
+      await client.queryArray(sql, values);
+    } finally {
+      client.release();
+    }
   }
 
   // Insert ignore: INSERT ... ON CONFLICT DO NOTHING
   async insertIgnore(table, columns, values) {
-    const placeholders = columns.map((_, i) => `$${i + 1}`).join(", ");
-    const sql = `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`;
-    await this._client.queryArray(sql, values);
+    const client = await this._pool.connect();
+    try {
+      const placeholders = columns.map((_, i) => `$${i + 1}`).join(", ");
+      const sql = `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders}) ON CONFLICT DO NOTHING`;
+      await client.queryArray(sql, values);
+    } finally {
+      client.release();
+    }
   }
 
-  close() {
-    this._client.end();
+  async close() {
+    await this._pool.end();
   }
 }
 
@@ -230,8 +269,9 @@ class PostgresBackend {
 // ---------------------------------------------------------------------------
 
 class MysqlBackend {
-  constructor(url) {
+  constructor(url, poolSize) {
     this._url = new URL(url);
+    this._poolSize = poolSize;
     this._client = null;
   }
 
@@ -244,6 +284,7 @@ class MysqlBackend {
       username: this._url.username,
       password: this._url.password,
       db: this._url.pathname.replace(/^\//, ""),
+      poolSize: this._poolSize,
     });
     await this._client.execute(ROOMS_TABLE_MYSQL);
     await this._client.execute(INVITE_CODES_TABLE_MYSQL);
@@ -260,7 +301,7 @@ class MysqlBackend {
 
   async transaction(fn) {
     await this._client.transaction(async (conn) => {
-      const txBackend = {
+      const tx = {
         query: async (sql, params = []) => {
           const result = await conn.execute(sql, params);
           return (result.rows ?? []).map((row) => Object.values(row));
@@ -268,8 +309,18 @@ class MysqlBackend {
         execute: async (sql, params = []) => {
           await conn.execute(sql, params);
         },
+        upsert: async (table, columns, values) => {
+          const placeholders = columns.map(() => "?").join(", ");
+          const sql = `REPLACE INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`;
+          await conn.execute(sql, values);
+        },
+        insertIgnore: async (table, columns, values) => {
+          const placeholders = columns.map(() => "?").join(", ");
+          const sql = `INSERT IGNORE INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`;
+          await conn.execute(sql, values);
+        },
       };
-      await fn(txBackend);
+      await fn(tx);
     });
   }
 
@@ -299,18 +350,19 @@ class MysqlBackend {
 export async function createDatabase() {
   const backend = (Deno.env.get("DB_BACKEND") ?? "sqlite").toLowerCase();
   const url = Deno.env.get("DATABASE_URL") ?? "";
+  const poolSize = parseInt(Deno.env.get("DB_POOL_SIZE") ?? "5");
 
   let db;
   switch (backend) {
     case "postgres":
     case "postgresql":
       if (!url) throw new Error("DATABASE_URL is required for postgres backend");
-      db = new PostgresBackend(url);
+      db = new PostgresBackend(url, poolSize);
       break;
     case "mysql":
     case "mariadb":
       if (!url) throw new Error("DATABASE_URL is required for mysql backend");
-      db = new MysqlBackend(url);
+      db = new MysqlBackend(url, poolSize);
       break;
     case "sqlite":
     default: {
