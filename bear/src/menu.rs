@@ -29,7 +29,12 @@ pub fn interactive_menu(title: &str, items: &[MenuItem], mode: MenuMode) -> Menu
     interactive_menu_with_default(title, items, mode, 0)
 }
 
-pub fn interactive_menu_with_default(title: &str, items: &[MenuItem], mode: MenuMode, initial_idx: usize) -> MenuResult {
+pub fn interactive_menu_with_default(
+    title: &str,
+    items: &[MenuItem],
+    mode: MenuMode,
+    initial_idx: usize,
+) -> MenuResult {
     if items.is_empty() {
         return MenuResult::Cancelled;
     }

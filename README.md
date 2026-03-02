@@ -317,7 +317,7 @@ bear/
 
 Releasing a new version:
 ```bash
-git tag v0.1.5 && git push origin v0.1.5
+git tag v0.1.6 && git push origin v0.1.6
 ```
 
 This will trigger the GitHub Actions workflow to build and release the new version.

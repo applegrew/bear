@@ -43,13 +43,15 @@ fn run_setup_wizard(existing: Option<ConfigFile>) -> Result<()> {
     )?;
 
     // Determine initial provider index from existing config
-    let initial_provider = existing.as_ref().and_then(|c| c.llm_provider.as_deref()).map(|p| {
-        match p {
+    let initial_provider = existing
+        .as_ref()
+        .and_then(|c| c.llm_provider.as_deref())
+        .map(|p| match p {
             "openai" => 1,
             "gemini" => 2,
             _ => 0,
-        }
-    }).unwrap_or(0);
+        })
+        .unwrap_or(0);
 
     // 1. Provider selection
     let items = vec![
@@ -89,7 +91,10 @@ fn run_setup_wizard(existing: Option<ConfigFile>) -> Result<()> {
             // Ollama
             config.llm_provider = Some("ollama".to_string());
 
-            let def_url = config.ollama_url.as_deref().unwrap_or("http://127.0.0.1:11434");
+            let def_url = config
+                .ollama_url
+                .as_deref()
+                .unwrap_or("http://127.0.0.1:11434");
             let url = prompt_with_default("Ollama server URL", def_url)?;
             config.ollama_url = Some(url);
 
@@ -108,7 +113,10 @@ fn run_setup_wizard(existing: Option<ConfigFile>) -> Result<()> {
             let model = prompt_with_default("OpenAI model", def_model)?;
             config.openai_model = Some(model);
 
-            let def_url = config.openai_url.as_deref().unwrap_or("https://api.openai.com");
+            let def_url = config
+                .openai_url
+                .as_deref()
+                .unwrap_or("https://api.openai.com");
             let url = prompt_with_default("OpenAI API URL", def_url)?;
             config.openai_url = Some(url);
         }

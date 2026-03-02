@@ -12,7 +12,7 @@ services:
       - PORT=8080
       - INTERNAL_PORT=8081
       # Relay version (reported by /internal/health)
-      - RELAY_VERSION=0.1.5
+      - RELAY_VERSION=0.1.6
       # Database backend: "sqlite" (default), "postgres", or "mysql"
       - DB_BACKEND=sqlite
       # SQLite file path (only used when DB_BACKEND=sqlite)

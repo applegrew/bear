@@ -8,7 +8,7 @@ COPY relay.js db.js ./
 # Create data directory for SQLite (used when DB_BACKEND=sqlite)
 RUN mkdir -p /data
 
-ARG RELAY_VERSION=0.1.5
+ARG RELAY_VERSION=0.1.6
 ENV RELAY_VERSION=${RELAY_VERSION}
 
 EXPOSE 8080 8081

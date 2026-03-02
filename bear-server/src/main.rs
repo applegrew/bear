@@ -59,7 +59,10 @@ async fn main() -> anyhow::Result<()> {
     let (provider_url, provider_model) = match config.llm_provider {
         LlmProvider::Ollama => (&config.ollama_url, &config.ollama_model),
         LlmProvider::OpenAI => (&config.openai_url, &config.openai_model),
-        LlmProvider::Gemini => (&"https://generativelanguage.googleapis.com".to_string(), &config.gemini_model),
+        LlmProvider::Gemini => (
+            &"https://generativelanguage.googleapis.com".to_string(),
+            &config.gemini_model,
+        ),
     };
     tracing::info!(
         "{:?} configured: url={} model={}",
