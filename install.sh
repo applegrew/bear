@@ -162,8 +162,18 @@ if [ "$IN_PATH" = false ]; then
 
   # Prompt user if not already in profile
   if [ "$ALREADY_IN_PROFILE" = false ]; then
-    printf "Add %s to PATH in %s? [Y/n] " "$INSTALL_DIR" "$PROFILE"
-    read -r response
+    if [ -t 0 ]; then
+      # stdin is a terminal — read directly
+      printf "Add %s to PATH in %s? [Y/n] " "$INSTALL_DIR" "$PROFILE"
+      read -r response
+    elif [ -e /dev/tty ]; then
+      # stdin is a pipe (e.g. curl | sh) — read from tty
+      printf "Add %s to PATH in %s? [Y/n] " "$INSTALL_DIR" "$PROFILE"
+      read -r response < /dev/tty
+    else
+      # no tty available (e.g. CI) — skip
+      response="n"
+    fi
     case "$response" in
       [nN][oO]|[nN])
         echo "  Skipped adding to PATH."
@@ -173,6 +183,7 @@ if [ "$IN_PATH" = false ]; then
         echo "# Bear" >> "$PROFILE"
         echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$PROFILE"
         echo "  Added $INSTALL_DIR to PATH in $PROFILE"
+        echo "  Restart your shell or run 'source $PROFILE' for this to take effect."
         ;;
     esac
   fi
