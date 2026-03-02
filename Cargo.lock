@@ -316,7 +316,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bear"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "bear-core",
@@ -337,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "bear-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -360,7 +360,7 @@ dependencies = [
 
 [[package]]
 name = "bear-server"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",

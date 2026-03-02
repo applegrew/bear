@@ -209,7 +209,7 @@ impl LspClient {
             }]),
             client_info: Some(lsp_types::ClientInfo {
                 name: "bear".to_string(),
-                version: Some("0.1.4".to_string()),
+                version: Some("0.1.5".to_string()),
             }),
             locale: None,
             work_done_progress_params: WorkDoneProgressParams {
