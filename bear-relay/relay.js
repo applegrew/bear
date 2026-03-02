@@ -154,7 +154,7 @@ const CORS_HEADERS = {
 };
 
 function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
+  return new Response(JSON.stringify(data, (_k, v) => typeof v === "bigint" ? Number(v) : v), {
     status,
     headers: { "Content-Type": "application/json", ...CORS_HEADERS },
   });
