@@ -26,6 +26,10 @@ pub enum MenuResult {
 }
 
 pub fn interactive_menu(title: &str, items: &[MenuItem], mode: MenuMode) -> MenuResult {
+    interactive_menu_with_default(title, items, mode, 0)
+}
+
+pub fn interactive_menu_with_default(title: &str, items: &[MenuItem], mode: MenuMode, initial_idx: usize) -> MenuResult {
     if items.is_empty() {
         return MenuResult::Cancelled;
     }
@@ -33,7 +37,7 @@ pub fn interactive_menu(title: &str, items: &[MenuItem], mode: MenuMode) -> Menu
     let mut stdout = io::stdout();
     let _ = terminal::enable_raw_mode();
 
-    let mut cursor_idx: usize = 0;
+    let mut cursor_idx: usize = initial_idx.min(items.len().saturating_sub(1));
     let mut selected: Vec<bool> = vec![false; items.len()];
     let is_multi = matches!(mode, MenuMode::Multi);
 

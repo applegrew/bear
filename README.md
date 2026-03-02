@@ -111,16 +111,29 @@ By default, `bear` connects to `http://127.0.0.1:49321` and will:
 
 ## Configuration
 
-Bear is configured via environment variables on the **server**:
+Bear is configured via environment variables on the **server**, or interactively via the setup wizard on first run (`~/.bear/config.json`).
+
+### Supported LLMs
+
+| Provider | `BEAR_LLM_PROVIDER` | Models | Notes |
+|---|---|---|---|
+| **Ollama** | `ollama` (default) | Any Ollama-supported model (e.g. `llama3.1`, `qwen2.5-coder`, `deepseek-coder-v2`) | Local inference, no API key needed |
+| **OpenAI** | `openai` | `gpt-4`, `gpt-4o`, `gpt-4o-mini`, `o3-mini`, etc. | Requires `BEAR_OPENAI_API_KEY` |
+| **OpenAI-compatible** | `openai` | Any model served by compatible APIs | Works with Azure OpenAI, LM Studio, vLLM, Groq, Together AI, etc. — set `BEAR_OPENAI_URL` |
+| **Google Gemini** | `gemini` | `gemini-2.0-flash`, `gemini-2.5-pro`, `gemini-2.5-flash`, etc. | Requires `BEAR_GEMINI_API_KEY` ([get one here](https://aistudio.google.com/apikey)) |
+
+### Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `BEAR_LLM_PROVIDER` | `ollama` | LLM provider (`ollama` or `openai`) |
+| `BEAR_LLM_PROVIDER` | `ollama` | LLM provider: `ollama`, `openai`, or `gemini` |
+| `BEAR_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama API base URL |
+| `BEAR_OLLAMA_MODEL` | `llama3.1` | Ollama model name |
 | `BEAR_OPENAI_API_KEY` | *(none)* | OpenAI-compatible API key |
 | `BEAR_OPENAI_MODEL` | `gpt-4` | OpenAI model name |
 | `BEAR_OPENAI_URL` | `https://api.openai.com` | OpenAI-compatible API base URL |
-| `BEAR_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama API base URL |
-| `BEAR_OLLAMA_MODEL` | `llama3.1` | Ollama model name |
+| `BEAR_GEMINI_API_KEY` | *(none)* | Google Gemini API key |
+| `BEAR_GEMINI_MODEL` | `gemini-2.0-flash` | Gemini model name |
 | `BEAR_MAX_TOOL_DEPTH` | `100` | Max consecutive tool calls before prompting to continue |
 | `BEAR_MAX_TOOL_OUTPUT_CHARS` | `32000` | Truncation limit for tool output |
 | `BEAR_CONTEXT_BUDGET` | `16000` | Context window budget (characters) for conversation history |
@@ -141,6 +154,9 @@ BEAR_LLM_PROVIDER=openai BEAR_OPENAI_API_KEY=sk-... cargo run -p bear-server
 
 # OpenAI-compatible provider (e.g. LM Studio, vLLM)
 BEAR_LLM_PROVIDER=openai BEAR_OPENAI_URL=http://localhost:1234 BEAR_OPENAI_MODEL=my-model cargo run -p bear-server
+
+# Google Gemini
+BEAR_LLM_PROVIDER=gemini BEAR_GEMINI_API_KEY=AIza... cargo run -p bear-server
 ```
 
 ## Browser client

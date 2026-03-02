@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use crate::config::{AppConfig, LlmProvider};
 
 // ---------------------------------------------------------------------------
-// Unified message format for both Ollama and OpenAI
+// Unified message format for Ollama, OpenAI, and Gemini
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -291,6 +291,150 @@ pub async fn call_openai_streaming(
 }
 
 // ---------------------------------------------------------------------------
+// Gemini API calls (via OpenAI-compatible endpoint)
+// ---------------------------------------------------------------------------
+
+const GEMINI_OPENAI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
+
+/// Non-streaming Gemini call using the OpenAI-compatible endpoint.
+async fn call_gemini(
+    http_client: &reqwest::Client,
+    config: &AppConfig,
+    messages: &[ChatMessage],
+) -> anyhow::Result<ChatMessage> {
+    let url = format!("{}/chat/completions", GEMINI_OPENAI_BASE_URL);
+    let openai_messages: Vec<OpenAiMessage> = messages
+        .iter()
+        .map(|m| OpenAiMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        })
+        .collect();
+    let payload = OpenAiChatRequest {
+        model: config.gemini_model.clone(),
+        messages: openai_messages,
+        stream: false,
+    };
+
+    let mut req = http_client.post(&url).json(&payload);
+    if let Some(ref key) = config.gemini_api_key {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+
+    tracing::info!(
+        "gemini non-streaming request to {url} model={}",
+        config.gemini_model
+    );
+    let response = req.send().await?;
+    tracing::info!("gemini non-streaming response status={}", response.status());
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("gemini returned {status}: {body}");
+    }
+    let body: OpenAiChatResponse = response.json().await?;
+    let msg = body
+        .choices
+        .into_iter()
+        .next()
+        .map(|c| ChatMessage {
+            role: c.message.role,
+            content: c.message.content,
+        })
+        .ok_or_else(|| anyhow::anyhow!("gemini returned no choices"))?;
+    Ok(msg)
+}
+
+/// Streaming Gemini call using the OpenAI-compatible endpoint.
+pub async fn call_gemini_streaming(
+    http_client: &reqwest::Client,
+    config: &AppConfig,
+    messages: &[ChatMessage],
+    chunk_tx: &mpsc::Sender<String>,
+) -> anyhow::Result<ChatMessage> {
+    let url = format!("{}/chat/completions", GEMINI_OPENAI_BASE_URL);
+    let openai_messages: Vec<OpenAiMessage> = messages
+        .iter()
+        .map(|m| OpenAiMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        })
+        .collect();
+    let payload = OpenAiChatRequest {
+        model: config.gemini_model.clone(),
+        messages: openai_messages,
+        stream: true,
+    };
+
+    let mut req = http_client.post(&url).json(&payload);
+    if let Some(ref key) = config.gemini_api_key {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+
+    tracing::info!(
+        "gemini streaming request to {url} model={}",
+        config.gemini_model
+    );
+    let response = req.send().await?;
+    tracing::info!("gemini streaming response status={}", response.status());
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        tracing::error!("gemini returned {status}: {body}");
+        anyhow::bail!("gemini returned {status}: {body}");
+    }
+
+    let mut full_content = String::new();
+    let mut bytes_stream = response.bytes_stream();
+
+    use futures::StreamExt;
+    let mut buffer = String::new();
+
+    while let Some(chunk_result) = bytes_stream.next().await {
+        let chunk_bytes = chunk_result?;
+        let chunk_str = String::from_utf8_lossy(&chunk_bytes);
+        buffer.push_str(&chunk_str);
+
+        while let Some(newline_pos) = buffer.find('\n') {
+            let line = buffer[..newline_pos].trim().to_string();
+            buffer = buffer[newline_pos + 1..].to_string();
+
+            if line.is_empty() || line == "data: [DONE]" {
+                continue;
+            }
+
+            let json_str = line.strip_prefix("data: ").unwrap_or(&line);
+
+            match serde_json::from_str::<OpenAiStreamChunk>(json_str) {
+                Ok(chunk) => {
+                    for choice in &chunk.choices {
+                        if !choice.delta.content.is_empty() {
+                            full_content.push_str(&choice.delta.content);
+                            let _ = chunk_tx.send(choice.delta.content.clone()).await;
+                        }
+                        if choice.finish_reason.is_some() {
+                            return Ok(ChatMessage {
+                                role: "assistant".to_string(),
+                                content: full_content,
+                            });
+                        }
+                    }
+                }
+                Err(_err) => {
+                    // Skip unparseable lines
+                }
+            }
+        }
+    }
+
+    Ok(ChatMessage {
+        role: "assistant".to_string(),
+        content: full_content,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Unified LLM calls
 // ---------------------------------------------------------------------------
 
@@ -303,6 +447,7 @@ pub async fn call_llm_non_streaming(
     match config.llm_provider {
         LlmProvider::Ollama => call_ollama(http_client, config, messages).await,
         LlmProvider::OpenAI => call_openai(http_client, config, messages).await,
+        LlmProvider::Gemini => call_gemini(http_client, config, messages).await,
     }
 }
 
@@ -316,6 +461,7 @@ pub async fn call_llm_streaming(
     match config.llm_provider {
         LlmProvider::Ollama => call_ollama_streaming(http_client, config, messages, chunk_tx).await,
         LlmProvider::OpenAI => call_openai_streaming(http_client, config, messages, chunk_tx).await,
+        LlmProvider::Gemini => call_gemini_streaming(http_client, config, messages, chunk_tx).await,
     }
 }
 

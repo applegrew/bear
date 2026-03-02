@@ -9,6 +9,7 @@ use std::path::PathBuf;
 pub enum LlmProvider {
     Ollama,
     OpenAI,
+    Gemini,
 }
 
 #[derive(Debug, Clone)]
@@ -19,6 +20,8 @@ pub struct AppConfig {
     pub openai_api_key: Option<String>,
     pub openai_model: String,
     pub openai_url: String,
+    pub gemini_api_key: Option<String>,
+    pub gemini_model: String,
     pub max_tool_depth: usize,
     pub max_tool_output_chars: usize,
     pub context_budget: usize,
@@ -39,6 +42,8 @@ pub struct ConfigFile {
     pub openai_api_key: Option<String>,
     pub openai_model: Option<String>,
     pub openai_url: Option<String>,
+    pub gemini_api_key: Option<String>,
+    pub gemini_model: Option<String>,
     pub max_tool_depth: Option<usize>,
     pub max_tool_output_chars: Option<usize>,
     pub context_budget: Option<usize>,
@@ -174,6 +179,7 @@ impl AppConfig {
         let provider_str = env_or_string("BEAR_LLM_PROVIDER", file.llm_provider, "ollama");
         let llm_provider = match provider_str.to_lowercase().as_str() {
             "openai" => LlmProvider::OpenAI,
+            "gemini" => LlmProvider::Gemini,
             _ => LlmProvider::Ollama,
         };
 
@@ -184,6 +190,8 @@ impl AppConfig {
             openai_api_key: env_or_opt("BEAR_OPENAI_API_KEY", file.openai_api_key),
             openai_model: env_or_string("BEAR_OPENAI_MODEL", file.openai_model, "gpt-4"),
             openai_url: env_or_string("BEAR_OPENAI_URL", file.openai_url, "https://api.openai.com"),
+            gemini_api_key: env_or_opt("BEAR_GEMINI_API_KEY", file.gemini_api_key),
+            gemini_model: env_or_string("BEAR_GEMINI_MODEL", file.gemini_model, "gemini-2.0-flash"),
             max_tool_depth: env_or("BEAR_MAX_TOOL_DEPTH", file.max_tool_depth, 100),
             max_tool_output_chars: env_or(
                 "BEAR_MAX_TOOL_OUTPUT_CHARS",
@@ -211,6 +219,7 @@ impl AppConfig {
             std::env::var("BEAR_LLM_PROVIDER").unwrap_or_else(|_| "ollama".to_string());
         let llm_provider = match provider_str.to_lowercase().as_str() {
             "openai" => LlmProvider::OpenAI,
+            "gemini" => LlmProvider::Gemini,
             _ => LlmProvider::Ollama,
         };
 
@@ -225,6 +234,9 @@ impl AppConfig {
                 .unwrap_or_else(|_| "gpt-4".to_string()),
             openai_url: std::env::var("BEAR_OPENAI_URL")
                 .unwrap_or_else(|_| "https://api.openai.com".to_string()),
+            gemini_api_key: std::env::var("BEAR_GEMINI_API_KEY").ok(),
+            gemini_model: std::env::var("BEAR_GEMINI_MODEL")
+                .unwrap_or_else(|_| "gemini-2.0-flash".to_string()),
             max_tool_depth: env_or("BEAR_MAX_TOOL_DEPTH", 100),
             max_tool_output_chars: env_or("BEAR_MAX_TOOL_OUTPUT_CHARS", 32_000),
             context_budget: env_or("BEAR_CONTEXT_BUDGET", 16_000),

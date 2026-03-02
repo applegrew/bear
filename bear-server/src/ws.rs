@@ -2116,6 +2116,7 @@ async fn invoke_llm(
                     let provider_name = match state.config.llm_provider {
                         crate::state::LlmProvider::Ollama => "Ollama",
                         crate::state::LlmProvider::OpenAI => "OpenAI",
+                        crate::state::LlmProvider::Gemini => "Gemini",
                     };
                     bus.send(ServerMessage::Error {
                         text: format!("Cannot reach {}: {err}", provider_name),

@@ -46,6 +46,9 @@ struct Cli {
     /// Revoke the current relay pairing
     #[arg(long)]
     relay_revoke: bool,
+    /// Re-run the LLM setup wizard (reconfigure provider, model, API keys)
+    #[arg(long)]
+    setup: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -82,6 +85,12 @@ async fn main() -> anyhow::Result<()> {
         cfg.relay_disabled = None;
         cfg.save().context("failed to save config")?;
         eprintln!("  Relay enabled.");
+        server::prompt_restart_if_running().await?;
+        return Ok(());
+    }
+
+    if cli.setup {
+        setup::rerun_setup()?;
         server::prompt_restart_if_running().await?;
         return Ok(());
     }
