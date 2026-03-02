@@ -828,7 +828,7 @@ export class BearClient {
       if (event.candidate && this._connId) {
         if (IS_REMOTE) {
           // Remote mode: POST ICE candidates via public server proxy
-          fetch(`${PUBLIC_URL}/relay/${RELAY_ROOM}/ice/${this._connId}/client`, {
+          fetch(`${PUBLIC_URL}/api/signal/${RELAY_ROOM}/ice/${this._connId}/client`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'same-origin',
@@ -905,7 +905,7 @@ export class BearClient {
       await this.pc.setLocalDescription(offer);
 
       // POST offer to public server (proxied to relay internal API)
-      const offerRes = await fetch(`${PUBLIC_URL}/relay/${RELAY_ROOM}/offer`, {
+      const offerRes = await fetch(`${PUBLIC_URL}/api/signal/${RELAY_ROOM}/offer`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
@@ -924,7 +924,7 @@ export class BearClient {
       // Poll public server for answer (proxied from relay internal API)
       const deadline = Date.now() + 30000;
       while (Date.now() < deadline) {
-        const ansRes = await fetch(`${PUBLIC_URL}/relay/${RELAY_ROOM}/answer/${this._connId}`, {
+        const ansRes = await fetch(`${PUBLIC_URL}/api/signal/${RELAY_ROOM}/answer/${this._connId}`, {
           credentials: 'same-origin',
         });
         if (ansRes.status === 200) {
@@ -1004,7 +1004,7 @@ export class BearClient {
     this._icePollTimer = setInterval(async () => {
       if (!this._connId) return;
       try {
-        const res = await fetch(`${PUBLIC_URL}/relay/${RELAY_ROOM}/ice/${this._connId}/server`, {
+        const res = await fetch(`${PUBLIC_URL}/api/signal/${RELAY_ROOM}/ice/${this._connId}/server`, {
           credentials: 'same-origin',
         });
         if (!res.ok) return;
