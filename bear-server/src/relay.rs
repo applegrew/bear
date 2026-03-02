@@ -29,6 +29,8 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use crate::state::ServerState;
 
+const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 // ---------------------------------------------------------------------------
 // Relay status — broadcast to all sessions
 // ---------------------------------------------------------------------------
@@ -106,6 +108,7 @@ impl RelayController {
         match http_client
             .post(&url)
             .header("Authorization", &auth)
+            .header("X-Bear-Server-Version", SERVER_VERSION)
             .json(&serde_json::json!({ "online": false }))
             .timeout(Duration::from_secs(5))
             .send()
@@ -188,6 +191,7 @@ async fn relay_poll_loop(state: ServerState, mut cmd_rx: watch::Receiver<bool>) 
         let result = http_client
             .get(&poll_url)
             .header("Authorization", format!("Bearer {}", relay_cfg.jwt))
+            .header("X-Bear-Server-Version", SERVER_VERSION)
             .timeout(Duration::from_secs(10))
             .send()
             .await;
@@ -538,6 +542,7 @@ async fn handle_relay_offer(
         .http_client
         .post(&answer_url)
         .header("Authorization", format!("Bearer {}", relay_cfg.jwt))
+        .header("X-Bear-Server-Version", SERVER_VERSION)
         .json(&answer_body)
         .send()
         .await
@@ -607,6 +612,7 @@ async fn relay_ice_exchange(
                 match http_client
                     .post(&url)
                     .header("Authorization", &auth)
+                    .header("X-Bear-Server-Version", SERVER_VERSION)
                     .json(&serde_json::json!({ "candidates": candidates }))
                     .send()
                     .await
@@ -626,6 +632,7 @@ async fn relay_ice_exchange(
             match http_client
                 .get(&url)
                 .header("Authorization", &auth)
+                .header("X-Bear-Server-Version", SERVER_VERSION)
                 .send()
                 .await
             {

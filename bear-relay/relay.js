@@ -11,6 +11,7 @@ import { createDatabase } from "./db.js";
 
 const PORT = parseInt(Deno.env.get("PORT") ?? "8080");
 const INTERNAL_PORT = parseInt(Deno.env.get("INTERNAL_PORT") ?? "8081");
+const RELAY_VERSION = Deno.env.get("RELAY_VERSION") ?? "0.1.0";
 const SIGNALING_TTL_MS = 60_000; // 60s for offers/answers/ICE
 const ROOM_PRUNE_DAYS = 30;
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -207,6 +208,7 @@ function matchRoute(method, pathname) {
 }
 
 function matchInternalRoute(method, pathname) {
+  if (method === "GET" && pathname === "/internal/health") return { handler: "health" };
   if (method === "GET" && pathname === "/internal/rooms") return { handler: "listRooms" };
   if (method === "GET" && pathname === "/internal/invites") return { handler: "listInvites" };
   if (method === "POST" && pathname === "/internal/invites") return { handler: "pushInvites" };
@@ -308,15 +310,17 @@ async function handlePostStatus(req, roomId, ip) {
   let body;
   try { body = await req.json(); } catch { return text("invalid JSON", 400); }
 
+  const serverVersion = req.headers.get("x-bear-server-version") || null;
+
   if (body.online === false) {
     // Server is shutting down — set last_poll to 0 to signal offline
-    await db.execute("UPDATE rooms SET last_poll = 0 WHERE room_id = ?", [roomId]);
+    await db.execute("UPDATE rooms SET last_poll = 0, server_version = ? WHERE room_id = ?", [serverVersion, roomId]);
     // Clear any pending signaling data for this room
     offers.delete(roomId);
   } else {
     // Treat as a heartbeat
-    await db.execute("UPDATE rooms SET last_poll = ? WHERE room_id = ?", [
-      Math.floor(Date.now() / 1000), roomId,
+    await db.execute("UPDATE rooms SET last_poll = ?, server_version = ? WHERE room_id = ?", [
+      Math.floor(Date.now() / 1000), serverVersion, roomId,
     ]);
   }
 
@@ -359,9 +363,11 @@ async function handleGetOffer(req, roomId, ip) {
     return text(rows.length === 0 ? "not found" : "unauthorized", rows.length === 0 ? 404 : 401);
   }
 
-  // Update last_poll
-  await db.execute("UPDATE rooms SET last_poll = ? WHERE room_id = ?", [
+  // Update last_poll and server_version
+  const serverVersion = req.headers.get("x-bear-server-version") || null;
+  await db.execute("UPDATE rooms SET last_poll = ?, server_version = ? WHERE room_id = ?", [
     Math.floor(Date.now() / 1000),
+    serverVersion,
     roomId,
   ]);
 
@@ -486,30 +492,40 @@ async function handleGetIce(req, roomId, connId, side, ip) {
 // Internal route handlers (no auth)
 // ---------------------------------------------------------------------------
 
+function handleHealth() {
+  return json({
+    status: "ok",
+    version: RELAY_VERSION,
+    db_backend: db.name,
+    uptime_seconds: Math.floor(performance.now() / 1000),
+  });
+}
+
 async function handleListRooms(url) {
   const limit = parseInt(url.searchParams.get("limit") ?? "100");
   const offset = parseInt(url.searchParams.get("offset") ?? "0");
   const rows = await db.query(
-    "SELECT room_id, created_at, last_poll, invite_code_hash FROM rooms ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    "SELECT room_id, created_at, last_poll, invite_code_hash, server_version FROM rooms ORDER BY created_at DESC LIMIT ? OFFSET ?",
     [limit, offset]
   );
-  const rooms = rows.map(([room_id, created_at, last_poll, invite_code_hash]) => ({
+  const rooms = rows.map(([room_id, created_at, last_poll, invite_code_hash, server_version]) => ({
     room_id,
     created_at,
     last_poll,
     invite_code_hash: invite_code_hash ?? null,
+    server_version: server_version ?? null,
   }));
   return json(rooms);
 }
 
 async function handleGetRoom(roomId) {
   const rows = await db.query(
-    "SELECT room_id, signing_key, created_at, last_poll, invite_code_hash FROM rooms WHERE room_id = ?",
+    "SELECT room_id, signing_key, created_at, last_poll, invite_code_hash, server_version FROM rooms WHERE room_id = ?",
     [roomId]
   );
   if (rows.length === 0) return text("not found", 404);
-  const [rid, signing_key, created_at, last_poll, invite_code_hash] = rows[0];
-  return json({ room_id: rid, signing_key, created_at, last_poll, invite_code_hash: invite_code_hash ?? null });
+  const [rid, signing_key, created_at, last_poll, invite_code_hash, server_version] = rows[0];
+  return json({ room_id: rid, signing_key, created_at, last_poll, invite_code_hash: invite_code_hash ?? null, server_version: server_version ?? null });
 }
 
 async function handleUpdateRoom(req, roomId) {
@@ -644,6 +660,8 @@ async function handleInternal(req) {
   if (!route) return text("not found", 404);
 
   switch (route.handler) {
+    case "health":
+      return handleHealth();
     case "listRooms":
       return handleListRooms(url);
     case "getRoom":
@@ -741,7 +759,7 @@ async function handleInternalGetIce(roomId, connId, side) {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  console.log(`bear-relay starting...`);
+  console.log(`bear-relay v${RELAY_VERSION} starting...`);
 
   db = await createDatabase();
 

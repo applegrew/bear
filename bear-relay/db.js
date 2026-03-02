@@ -22,7 +22,8 @@ const ROOMS_TABLE_SQLITE = `
     signing_key      TEXT NOT NULL,
     created_at       INTEGER NOT NULL,
     last_poll        INTEGER,
-    invite_code_hash TEXT
+    invite_code_hash TEXT,
+    server_version   TEXT
   )
 `;
 
@@ -32,7 +33,8 @@ const ROOMS_TABLE_POSTGRES = `
     signing_key      TEXT NOT NULL,
     created_at       BIGINT NOT NULL,
     last_poll        BIGINT,
-    invite_code_hash TEXT
+    invite_code_hash TEXT,
+    server_version   TEXT
   )
 `;
 
@@ -42,7 +44,8 @@ const ROOMS_TABLE_MYSQL = `
     signing_key      TEXT NOT NULL,
     created_at       BIGINT NOT NULL,
     last_poll        BIGINT,
-    invite_code_hash VARCHAR(255)
+    invite_code_hash VARCHAR(255),
+    server_version   VARCHAR(64)
   )
 `;
 
@@ -94,9 +97,12 @@ class SqliteBackend {
 
   async init() {
     this._db.execute(ROOMS_TABLE_SQLITE);
-    // Migration: add invite_code_hash column if missing (existing DBs)
+    // Migration: add columns if missing (existing DBs)
     try {
       this._db.execute("ALTER TABLE rooms ADD COLUMN invite_code_hash TEXT");
+    } catch { /* column already exists */ }
+    try {
+      this._db.execute("ALTER TABLE rooms ADD COLUMN server_version TEXT");
     } catch { /* column already exists */ }
     this._db.execute(INVITE_CODES_TABLE_SQLITE);
   }

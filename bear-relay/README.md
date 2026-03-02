@@ -52,6 +52,7 @@ Tables:
    - `created_at INTEGER NOT NULL`
    - `last_poll INTEGER`
    - `invite_code_hash TEXT` — SHA-256 hash of the invite code used during pairing (nullable; can be cleared via `PATCH /internal/room/:room_id`)
+   - `server_version TEXT` — version of the `bear-server` that last polled this room (set from `X-Bear-Server-Version` header)
 2. `invite_codes`
    - `code_hash TEXT PRIMARY KEY` — SHA-256 hex hash of the invite code
    - `created_at INTEGER NOT NULL`
@@ -134,8 +135,9 @@ ICE candidates are consumed on read (`GET` clears returned candidates).
 
 ### Internal API (trusted network only)
 
-- `GET /internal/rooms`
-- `GET /internal/room/:room_id` (returns `invite_code_hash` when present)
+- `GET /internal/health` — returns `{ status, version, db_backend, uptime_seconds }`
+- `GET /internal/rooms` (returns `server_version` per room)
+- `GET /internal/room/:room_id` (returns `invite_code_hash` and `server_version` when present)
 - `PATCH /internal/room/:room_id`
   - updates room fields; currently supports `{ "invite_code_hash": "..." | null }`
 - `DELETE /internal/room/:room_id`
