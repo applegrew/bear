@@ -13,6 +13,7 @@ const SERVER_URL = `http://${DEFAULT_HOST}`;
 const RELAY_URL = (typeof BEAR_RELAY_URL !== 'undefined') ? BEAR_RELAY_URL : null;
 const RELAY_ROOM = (typeof BEAR_ROOM_ID !== 'undefined') ? BEAR_ROOM_ID : null;
 const PUBLIC_URL = (typeof BEAR_PUBLIC_URL !== 'undefined') ? BEAR_PUBLIC_URL : '';
+const HOME_URL = (typeof BEAR_HOME !== 'undefined') ? BEAR_HOME : '/dashboard';
 const IS_REMOTE = !!(RELAY_URL && RELAY_ROOM);
 
 // STUN servers for NAT traversal
@@ -598,7 +599,7 @@ export class BearClient {
         ? `  🔍${this._activeSubagents.size}`
         : '';
       const left = `${spinner}  ${session}${subagentInfo}`;
-      const right = '↑↓ history  pgup/pgdn scroll  ctrl+c clear';
+      const right = '↑↓ history  pgup/pgdn scroll  ctrl+c go to home';
 
       const gap = Math.max(1, w - left.length - right.length - 2);
 
@@ -1485,11 +1486,9 @@ export class BearClient {
           continue;
         }
 
-        // Ctrl+C
+        // Ctrl+C — navigate to home
         if (code === 3) {
-          this.inputBuf = '';
-          this.cursorPos = 0;
-          this._drawInputBox();
+          window.location.href = HOME_URL;
           continue;
         }
 
