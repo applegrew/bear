@@ -3,8 +3,8 @@
 // ---------------------------------------------------------------------------
 // version 0.1.11
 // Relay configuration: these globals must be set by the hosting page.
-// The public server proxies offer/answer via the relay's internal API;
-// bear.js obtains a short-lived client JWT from the answer for direct ICE exchange.
+// bear.js communicates exclusively via the public server, which proxies
+// all signaling (offer, answer, ICE) to the relay on behalf of the browser.
 const RELAY_URL = (typeof window !== 'undefined' && window.BEAR_RELAY_URL) ? window.BEAR_RELAY_URL : null;
 const RELAY_ROOM = (typeof window !== 'undefined' && window.BEAR_ROOM_ID) ? window.BEAR_ROOM_ID : null;
 const PUBLIC_URL = (typeof window !== 'undefined' && window.BEAR_PUBLIC_URL != null) ? window.BEAR_PUBLIC_URL : '';
