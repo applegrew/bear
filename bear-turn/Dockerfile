@@ -12,9 +12,9 @@
 #     -v /path/to/certs:/etc/turn/certs:ro \
 #     bear-turn
 
-FROM rust:1.85 AS builder
+FROM rust:latest AS builder
 
-RUN cargo install turn-server --version 4.0.0
+RUN cargo install turn-server --version 3.4.0 --features tcp
 
 FROM debian:bookworm-slim
 

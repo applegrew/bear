@@ -12,23 +12,23 @@ TURN relay server for Bear WebRTC connections, powered by [turn-rs](https://gith
 |---|---|---|
 | UDP | 3478 | Standard TURN |
 | TCP | 3478 | TURN over TCP (firewall fallback) |
-| TLS | 5349 | TURNS — TURN over TLS (requires certs) |
+| TLS | 5349 | TURNS — TURN over TLS (not yet supported in v3.4.0) |
 
 ## Quick start
 
 ### Docker
 
 ```bash
-# Edit turn.toml — set static-auth-secret and external IP
+# Edit turn.toml — set static_auth_secret and external IP
 docker compose up -d
 ```
 
 ### From source
 
-Requires Rust 1.85+:
+Requires Rust 1.88+ (for the `time` crate dependency):
 
 ```bash
-cargo install turn-server --version 4.0.0
+cargo install turn-server --version 3.4.0 --features tcp
 turn-server --config turn.toml
 ```
 
@@ -40,49 +40,33 @@ All configuration is in `turn.toml` (TOML format). Key settings:
 
 ```toml
 [auth]
-static-auth-secret = "your-shared-secret"
+static_auth_secret = "your-shared-secret"
 ```
 
 This **must match** the `TURN_SECRET` environment variable configured in `bear-relay`. The relay mints time-windowed credentials using HMAC-SHA1 over this secret, and the TURN server validates them.
 
 ### Interfaces
 
-Each `[[server.interfaces]]` block defines a listener:
+Each `[[turn.interfaces]]` block defines a listener (v3.4.0 format):
 
 ```toml
 # UDP
-[[server.interfaces]]
+[[turn.interfaces]]
 transport = "udp"
-listen = "0.0.0.0:3478"
+bind = "0.0.0.0:3478"
 external = "YOUR_PUBLIC_IP:3478"
 
-# TCP
-[[server.interfaces]]
+# TCP (requires --features tcp at install time)
+[[turn.interfaces]]
 transport = "tcp"
-listen = "0.0.0.0:3478"
+bind = "0.0.0.0:3478"
 external = "YOUR_PUBLIC_IP:3478"
-
-# TLS (TURNS)
-[[server.interfaces]]
-transport = "tcp"
-listen = "0.0.0.0:5349"
-external = "YOUR_PUBLIC_IP:5349"
-
-[server.interfaces.ssl]
-private-key = "/etc/turn/key.pem"
-certificate-chain = "/etc/turn/cert.pem"
 ```
 
 The `external` address must be your server's **public IP** — this is the address reported to clients in relay candidates.
 
-### Port range
-
-```toml
-[server]
-port-range = { min = 49152, max = 65535 }
-```
-
-Relay allocations use ports in this range. Ensure these ports are open in your firewall/security group.
+> **Note:** TLS/TURNS on port 5349 is not supported in v3.4.0. It requires the v4.x
+> series which is currently in beta (`4.0.0-beta.4`).
 
 ## Credential flow
 
@@ -112,8 +96,12 @@ Default credential TTL: 24 hours (configurable via `TURN_CREDENTIAL_TTL` in bear
 Both services share the same `TURN_SECRET`. Example setup:
 
 ```
-bear-relay:  TURN_SECRET=mysecret  TURN_URLS=turn:turn.example.com:3478,turns:turn.example.com:5349
-bear-turn:   static-auth-secret = "mysecret"  (in turn.toml)
+bear-relay:  TURN_SECRET=mysecret  TURN_URLS=turn:TURN_LB_IP:3478
+bear-turn:   static_auth_secret = "mysecret"  (in turn.toml)
 ```
 
 See `bear-relay/README.md` for relay-side TURN configuration.
+
+## Known limitations
+
+- **No TURNS (TLS) support** — turn-rs v3.4.0 doesn't support it. The v4.x series (`4.0.0-beta.4`) adds TLS but is still in beta. Can revisit when v4.0.0 stable is released.
