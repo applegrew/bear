@@ -811,8 +811,10 @@ export class BearClient {
 
     this.dc.onopen = () => {
       this._startHeartbeat();
-      // DataChannel is open — enter lobby: request session list
-      this._showSessionPicker();
+      // DataChannel is open — lobby session list request is deferred
+      // until the server sends slash_commands (its "lobby ready" signal),
+      // ensuring the server's on_message handler is registered first.
+      this._lobbyPending = true;
     };
 
     this.dc.onclose = () => {
@@ -1013,6 +1015,12 @@ export class BearClient {
       case 'slash_commands':
         this.slashCommands = Array.isArray(msg.commands) ? msg.commands : [];
         this._drawInputBox();
+        // slash_commands is the server's "lobby ready" signal — now safe
+        // to request the session list over the DataChannel.
+        if (this._lobbyPending) {
+          this._lobbyPending = false;
+          this._showSessionPicker();
+        }
         break;
 
       case 'session_list_result': {

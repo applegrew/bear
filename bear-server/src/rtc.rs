@@ -35,16 +35,9 @@ pub async fn handle_relay_data_channel(state: ServerState, dc: Arc<RTCDataChanne
 /// Lobby state: DataChannel is open but not bound to any session.
 /// Handles session management messages, then transitions to the bound relay loop.
 async fn handle_data_channel_lobby(state: ServerState, dc: Arc<RTCDataChannel>) {
-    // Send slash commands immediately (available before session binding)
-    let _ = dc_send_msg(
-        &dc,
-        &ServerMessage::SlashCommands {
-            commands: slash_command_infos(),
-        },
-    )
-    .await;
-
-    // Channel for incoming DataChannel messages
+    // Register message/close handlers FIRST to avoid a race condition:
+    // the client sends session_list immediately on dc.onopen, so we must
+    // be listening before any async work (like sending SlashCommands).
     let (dc_msg_tx, mut dc_msg_rx) = mpsc::channel::<String>(64);
     let tx = dc_msg_tx.clone();
     dc.on_message(Box::new(move |msg| {
@@ -62,6 +55,15 @@ async fn handle_data_channel_lobby(state: ServerState, dc: Arc<RTCDataChannel>) 
             let _ = close_tx.send(()).await;
         })
     }));
+
+    // Send slash commands (available before session binding)
+    let _ = dc_send_msg(
+        &dc,
+        &ServerMessage::SlashCommands {
+            commands: slash_command_infos(),
+        },
+    )
+    .await;
 
     tracing::info!("rtc: lobby — waiting for session selection");
 
