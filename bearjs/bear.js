@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Bear Browser Client — OpenCode-style TUI powered by xterm.js
 // ---------------------------------------------------------------------------
-const BEAR_VERSION = '0.2.1.1';
+const BEAR_VERSION = '0.2.1.2';
 // Relay configuration: these globals must be set by the hosting page.
 // bear.js communicates exclusively via the public server, which proxies
 // all signaling (offer, answer, ICE) to the relay on behalf of the browser.
@@ -818,6 +818,16 @@ export class BearClient {
 
     // Fetch TURN credentials dynamically; fall back to page-injected globals
     const iceServers = await this._buildIceServers();
+    const hasTurn = iceServers.some(s => {
+      const u = Array.isArray(s.urls) ? s.urls : [s.urls];
+      return u.some(x => x.startsWith('turn'));
+    });
+    if (hasTurn) {
+      this._pushLine(`${C.gray}  TURN relay available${C.reset}`);
+    } else {
+      this._pushLine(`${C.yellow}  ⚠ No TURN servers — mobile connections may fail${C.reset}`);
+    }
+    this._fullRepaint();
 
     this.pc = new RTCPeerConnection({ iceServers });
     this.dc = this.pc.createDataChannel('bear', { ordered: true });
