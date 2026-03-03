@@ -42,6 +42,10 @@ const C = {
 // Box drawing
 const BOX = { tl: '┌', tr: '┐', bl: '└', br: '┘', h: '─', v: '│' };
 
+// Tool confirmation picker
+const TOOL_CONFIRM_LABELS = ['Approve', 'Deny', 'Always approve for session'];
+const TOOL_CONFIRM_COLORS = [C.green, C.red, C.yellow];
+
 // Spinner frames
 const SPINNER = ['·····', '●····', '·●···', '··●··', '···●·', '····●', '·····'];
 
@@ -49,6 +53,7 @@ const SPINNER = ['·····', '●····', '·●···', '··●··', '·�
 const INPUT_BOX_H = 3; // top border + input + bottom border
 const STATUS_BAR_H = 1;
 const BOTTOM_H = INPUT_BOX_H + STATUS_BAR_H;
+
 
 // ---------------------------------------------------------------------------
 // Markdown → ANSI rendering
@@ -238,13 +243,20 @@ function visibleLen(s) {
  * Wrap a line into multiple visual rows of at most `max` visible characters,
  * preserving ANSI escape codes across wraps.
  */
+function _ansiCategory(seq) {
+  const params = seq.slice(2, -1); // strip \x1b[ and trailing letter
+  if (params.startsWith('38;') || params.startsWith('38 ')) return 'fg';
+  if (params.startsWith('48;') || params.startsWith('48 ')) return 'bg';
+  return params; // e.g. '1' for bold, '3' for italic
+}
+
 function wrapVisible(s, max) {
   if (max <= 0) return [s];
   const rows = [];
   let current = '';
   let vis = 0;
   let inEsc = false;
-  let activeAnsi = []; // track active ANSI sequences for continuation
+  let activeAnsi = new Map(); // category -> sequence (replaces duplicates)
 
   for (const c of s) {
     if (inEsc) {
@@ -256,9 +268,9 @@ function wrapVisible(s, max) {
         if (escStart !== -1) {
           const seq = current.slice(escStart);
           if (seq === '\x1b[0m' || seq === '\x1b[m') {
-            activeAnsi = [];
+            activeAnsi = new Map();
           } else {
-            activeAnsi.push(seq);
+            activeAnsi.set(_ansiCategory(seq), seq);
           }
         }
       }
@@ -269,7 +281,7 @@ function wrapVisible(s, max) {
       if (vis >= max) {
         current += '\x1b[0m';
         rows.push(current);
-        current = activeAnsi.join('');
+        current = [...activeAnsi.values()].join('');
         vis = 0;
       }
       current += c;
@@ -433,6 +445,15 @@ export class BearClient {
     return this._rows - 1;
   }
 
+  // Compute the scroll offset for the input buffer so the cursor stays visible.
+  _inputScrollStart() {
+    const innerW = Math.max(0, this._cols - 4);
+    const textSpace = Math.max(0, innerW - 6); // promptLen = 6
+    if (this.inputBuf.length <= textSpace || textSpace <= 0) return 0;
+    let start = Math.max(0, this.cursorPos - textSpace + 1);
+    return Math.min(start, this.inputBuf.length - textSpace);
+  }
+
   // -------------------------------------------------------------------------
   // Output buffer
   // -------------------------------------------------------------------------
@@ -445,6 +466,11 @@ export class BearClient {
   _pushLines(lines) {
     for (const l of lines) this._outputLines.push(l);
     this._scrollOffset = 0;
+  }
+
+  _popLines(n) {
+    const count = Math.min(n, this._outputLines.length);
+    this._outputLines.splice(this._outputLines.length - count, count);
   }
 
   _scrollUp(n) {
@@ -503,6 +529,7 @@ export class BearClient {
   }
 
   _drawInputBox() {
+    this.term.write('\x1b[?25l'); // hide cursor during redraw
     const row = this._inputRow() + 1; // 1-indexed
     const w = this._cols;
     const borderW = Math.max(0, w - 2);
@@ -520,8 +547,9 @@ export class BearClient {
     const innerW = Math.max(0, w - 4);
     const promptLen = 6;
     const textSpace = Math.max(0, innerW - promptLen);
+    const scrollStart = this._inputScrollStart();
     const displayText = this.inputBuf.length > textSpace
-      ? this.inputBuf.slice(this.inputBuf.length - textSpace)
+      ? this.inputBuf.slice(scrollStart, scrollStart + textSpace)
       : this.inputBuf;
     const padding = Math.max(0, innerW - promptLen - displayText.length);
 
@@ -537,9 +565,8 @@ export class BearClient {
     this.term.write(`\x1b[${row + 2};1H\x1b[2K`);
     this.term.write(`${C.gray}${BOX.bl}${BOX.h.repeat(borderW)}${BOX.br}${C.reset}`);
 
-    // Position cursor
-    const cursorCol = 3 + promptLen + Math.min(this.cursorPos, textSpace);
-    this.term.write(`\x1b[${row + 1};${cursorCol}H\x1b[?25h`); // show cursor
+    // Position cursor (relative to scroll window)
+    const cursorCol = 3 + promptLen + (this.cursorPos - scrollStart);
 
     // Dropdown above input box
     if (isSlash) {
@@ -561,17 +588,19 @@ export class BearClient {
           }
         }
         this._dropdownLines = matches.length;
-        // Restore cursor
-        this.term.write(`\x1b[${row + 1};${cursorCol}H`);
       } else {
         this._dropdownLines = 0;
       }
     } else {
       this._dropdownLines = 0;
     }
+
+    // Position cursor and show it only after all rendering is complete
+    this.term.write(`\x1b[${row + 1};${cursorCol}H\x1b[?25h`);
   }
 
   _drawStatusBar() {
+    this.term.write('\x1b[?25l'); // hide cursor during redraw
     const row = this._statusRow() + 1; // 1-indexed
     const w = this._cols;
 
@@ -608,10 +637,8 @@ export class BearClient {
 
     // Restore cursor to input box
     const inputRow = this._inputRow() + 2; // 1-indexed, +1 for input line within box
-    const promptLen = 6;
-    const innerW = Math.max(0, w - 4);
-    const textSpace = Math.max(0, innerW - promptLen);
-    const cursorCol = 3 + promptLen + Math.min(this.cursorPos, textSpace);
+    const scrollStart = this._inputScrollStart();
+    const cursorCol = 3 + 6 + (this.cursorPos - scrollStart);
     this.term.write(`\x1b[${inputRow};${cursorCol}H\x1b[?25h`);
   }
 
@@ -727,10 +754,7 @@ export class BearClient {
 
     // Remove previous picker lines
     if (this.pickerRendered) {
-      const removeCount = items.length + 1; // items + hint
-      for (let i = 0; i < removeCount; i++) {
-        this._outputLines.pop();
-      }
+      this._popLines(items.length + 1); // items + hint
     }
     this.pickerRendered = true;
 
@@ -813,7 +837,14 @@ export class BearClient {
       // Reassemble chunked messages from the server
       if (msg.__chunk) {
         if (!this._chunkBufs) this._chunkBufs = {};
-        const buf = this._chunkBufs[msg.id] || (this._chunkBufs[msg.id] = { parts: [], total: msg.total });
+        // Evict stale chunk buffers (incomplete for >30s)
+        const now = Date.now();
+        for (const id of Object.keys(this._chunkBufs)) {
+          if (now - this._chunkBufs[id].createdAt > 30000) {
+            delete this._chunkBufs[id];
+          }
+        }
+        const buf = this._chunkBufs[msg.id] || (this._chunkBufs[msg.id] = { parts: [], total: msg.total, createdAt: now });
         buf.parts[msg.idx] = msg.data;
         const received = buf.parts.filter(p => p !== undefined).length;
         if (received < buf.total) return; // still waiting for more chunks
@@ -1042,6 +1073,7 @@ export class BearClient {
     if (this.pc) { try { this.pc.close(); } catch {} this.pc = null; }
     if (this.ws) { this.ws.close(); this.ws = null; }
     this._connId = null;
+    this._chunkBufs = {};
   }
 
   _isConnected() {
@@ -1074,7 +1106,7 @@ export class BearClient {
       case 'assistant_text':
         // Remove the "Thinking…" line if present (before streaming check)
         if (this._thinkingLineShown) {
-          this._outputLines.pop();
+          this._popLines(1);
           this._thinkingLineShown = false;
         }
         if (!this._streaming) {
@@ -1194,7 +1226,7 @@ export class BearClient {
           this.inToolConfirm = false;
           this.toolConfirmCall = null;
           // Remove picker lines (3 options + hint)
-          for (let i = 0; i < 4; i++) this._outputLines.pop();
+          this._popLines(TOOL_CONFIRM_LABELS.length + 1);
           const label = msg.approved
             ? `${C.green}  ✓ Approved (by another client)${C.reset}`
             : `${C.red}  ✗ Denied (by another client)${C.reset}`;
@@ -1214,8 +1246,7 @@ export class BearClient {
         if (matchesPrompt) {
           this.inUserPrompt = false;
           // Remove prompt picker lines
-          const removeCount = this.userPromptOptions.length + 1; // options + hint
-          for (let i = 0; i < removeCount; i++) this._outputLines.pop();
+          this._popLines(this.userPromptOptions.length + 1); // options + hint
           this._pushLine(`${C.gray}  (resolved by another client)${C.reset}`);
           this._pushLine('');
           this._fullRepaint();
@@ -1553,7 +1584,7 @@ export class BearClient {
     const removeCount = opts.length + 1;
 
     if (this.userPromptRendered) {
-      for (let i = 0; i < removeCount; i++) this._outputLines.pop();
+      this._popLines(removeCount);
     }
     this.userPromptRendered = true;
 
@@ -1596,8 +1627,7 @@ export class BearClient {
 
     // Replace picker lines with selection
     const opts = this.userPromptOptions;
-    const removeCount = opts.length + 1;
-    for (let i = 0; i < removeCount; i++) this._outputLines.pop();
+    this._popLines(opts.length + 1);
 
     if (this.userPromptMulti) {
       for (let i = 0; i < opts.length; i++) {
@@ -1629,28 +1659,26 @@ export class BearClient {
     if (data === '\x1b[A') {
       if (this.toolConfirmIdx > 0) { this.toolConfirmIdx--; this._renderToolConfirm(); }
     } else if (data === '\x1b[B') {
-      if (this.toolConfirmIdx < 2) { this.toolConfirmIdx++; this._renderToolConfirm(); }
+      if (this.toolConfirmIdx < TOOL_CONFIRM_LABELS.length - 1) { this.toolConfirmIdx++; this._renderToolConfirm(); }
     } else if (data === '\r' || data === '\n') {
       this._toolConfirmSelect();
     }
   }
 
   _renderToolConfirm() {
-    const labels = ['Approve', 'Deny', 'Always approve for session'];
-    const colors = [C.green, C.red, C.yellow];
-    const removeCount = labels.length + 1;
+    const removeCount = TOOL_CONFIRM_LABELS.length + 1;
 
     if (this.toolConfirmRendered) {
-      for (let i = 0; i < removeCount; i++) this._outputLines.pop();
+      this._popLines(removeCount);
     }
     this.toolConfirmRendered = true;
 
-    for (let i = 0; i < labels.length; i++) {
+    for (let i = 0; i < TOOL_CONFIRM_LABELS.length; i++) {
       const focused = i === this.toolConfirmIdx;
       if (focused) {
-        this._pushLine(`${C.yellow}  ❯ ${colors[i]}${labels[i]}${C.reset}`);
+        this._pushLine(`${C.yellow}  ❯ ${TOOL_CONFIRM_COLORS[i]}${TOOL_CONFIRM_LABELS[i]}${C.reset}`);
       } else {
-        this._pushLine(`${C.gray}    ${labels[i]}${C.reset}`);
+        this._pushLine(`${C.gray}    ${TOOL_CONFIRM_LABELS[i]}${C.reset}`);
       }
     }
     this._pushLine(`${C.gray}  ↑/↓ navigate, Enter select${C.reset}`);
@@ -1669,8 +1697,7 @@ export class BearClient {
     this.toolConfirmCall = null;
 
     // Replace picker lines with result
-    const removeCount = 4; // 3 options + hint
-    for (let i = 0; i < removeCount; i++) this._outputLines.pop();
+    this._popLines(TOOL_CONFIRM_LABELS.length + 1);
 
     const always = idx === 2;
 
@@ -2127,7 +2154,7 @@ export class BearClient {
         return;
       }
       // Check if we got a pong recently
-      if (Date.now() - this._lastPongAt > 10000) {
+      if (Date.now() - this._lastPongAt > 20000) {
         this._pushLine(`${C.red}  Connection lost (no heartbeat response).${C.reset}`);
         this._stopHeartbeat();
         this._cleanup();
