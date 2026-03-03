@@ -2,23 +2,238 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Bear — Browser Terminal</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { height: 100%; background: #1a1b26; overflow: hidden; }
-  #terminal-container {
-    width: 100%;
-    height: 100%;
-    padding: 4px;
+  :root {
+    --bg:        #1a1b26;
+    --fg:        #c0caf5;
+    --gray:      #565f89;
+    --dark-gray: #414868;
+    --border:    #3b4261;
+    --cyan:      #73daca;
+    --blue:      #7aa2f7;
+    --green:     #9ece6a;
+    --yellow:    #e0af68;
+    --red:       #f7768e;
+    --magenta:   #bb9af7;
+    --white:     #c0caf5;
+    --font:      'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
   }
-  /* Override xterm viewport background to match theme */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    overflow: hidden;
+    font-family: var(--font);
+    color: var(--fg);
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* --- Output area (xterm) --- */
+  #terminal-container {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow: hidden;
+    padding: 4px 4px 0 4px;
+  }
   .xterm { height: 100%; }
+
+  /* --- Slash command dropdown (above input) --- */
+  #slash-dropdown {
+    display: none;
+    background: #24283b;
+    border-top: 1px solid var(--border);
+    max-height: 200px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  #slash-dropdown .dd-item {
+    padding: 10px 16px;
+    font-size: 14px;
+    font-family: var(--font);
+    cursor: pointer;
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    min-height: 44px;
+  }
+  #slash-dropdown .dd-item:active,
+  #slash-dropdown .dd-item.active {
+    background: #3b4261;
+  }
+  #slash-dropdown .dd-cmd { color: var(--yellow); }
+  #slash-dropdown .dd-desc { color: var(--gray); font-size: 13px; }
+
+  /* --- Picker overlay (session/tool confirm/user prompt) --- */
+  #picker-overlay {
+    display: none;
+    background: var(--bg);
+    border-top: 1px solid var(--border);
+    padding: 8px 0;
+    max-height: 50vh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  #picker-overlay .picker-title {
+    padding: 8px 16px;
+    font-size: 14px;
+    font-weight: bold;
+    color: var(--cyan);
+  }
+  #picker-overlay .picker-item {
+    padding: 12px 16px;
+    font-size: 14px;
+    font-family: var(--font);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 48px;
+    transition: background 0.1s;
+  }
+  #picker-overlay .picker-item:active,
+  #picker-overlay .picker-item.active {
+    background: #3b4261;
+  }
+  #picker-overlay .picker-item .pi-indicator {
+    width: 20px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+  #picker-overlay .picker-item .pi-label { color: var(--white); }
+  #picker-overlay .picker-item .pi-detail {
+    color: var(--gray);
+    font-size: 12px;
+    margin-left: auto;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  #picker-overlay .picker-hint {
+    padding: 6px 16px;
+    font-size: 12px;
+    color: var(--gray);
+  }
+  /* Tool confirm specific colors */
+  #picker-overlay .picker-item.tc-approve .pi-label { color: var(--green); }
+  #picker-overlay .picker-item.tc-deny .pi-label { color: var(--red); }
+  #picker-overlay .picker-item.tc-always .pi-label { color: var(--yellow); }
+  /* Tool summary */
+  #picker-overlay .tc-summary {
+    padding: 8px 16px;
+    font-size: 13px;
+    color: var(--white);
+  }
+  #picker-overlay .tc-summary .tc-icon { color: var(--magenta); }
+  /* Multi-select checkbox */
+  #picker-overlay .picker-item .pi-check {
+    width: 20px;
+    text-align: center;
+    flex-shrink: 0;
+    color: var(--gray);
+  }
+  #picker-overlay .picker-item.selected .pi-check { color: var(--yellow); }
+
+  /* --- Input bar --- */
+  #input-bar {
+    display: flex;
+    align-items: center;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    padding: 0 8px;
+    min-height: 48px;
+  }
+  #input-prompt {
+    font-family: var(--font);
+    font-size: 14px;
+    font-weight: bold;
+    color: var(--cyan);
+    white-space: nowrap;
+    padding: 0 4px 0 8px;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #input-field {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--fg);
+    font-family: var(--font);
+    font-size: 16px;  /* >= 16px prevents iOS zoom */
+    line-height: 1.4;
+    padding: 12px 4px;
+    caret-color: var(--blue);
+  }
+  #input-field::placeholder { color: var(--dark-gray); }
+  #send-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--cyan);
+    font-family: var(--font);
+    font-size: 18px;
+    width: 44px;
+    height: 36px;
+    cursor: pointer;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.1s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #send-btn:active { background: #3b4261; }
+
+  /* --- Status bar --- */
+  #status-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 12px;
+    font-size: 12px;
+    color: var(--gray);
+    background: var(--bg);
+    min-height: 24px;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #status-bar .status-left { display: flex; align-items: center; gap: 8px; }
+  #status-bar .status-right { font-size: 11px; }
+  #status-bar .spinner { display: inline-block; width: 40px; text-align: left; }
+  /* Interrupt warning */
+  #status-bar.warning { color: var(--yellow); }
+  #status-bar .warn-bar {
+    height: 2px;
+    background: var(--yellow);
+    transition: width 0.1s linear;
+  }
 </style>
 </head>
 <body>
+
 <div id="terminal-container"></div>
+<div id="slash-dropdown"></div>
+<div id="picker-overlay"></div>
+<div id="input-bar">
+  <span id="input-prompt">bear&gt; </span>
+  <input id="input-field" type="text" autocomplete="off" autocapitalize="off"
+         autocorrect="off" spellcheck="false" placeholder="Ask bear anything…" />
+  <button id="send-btn">↵</button>
+</div>
+<div id="status-bar">
+  <span class="status-left">
+    <span class="spinner">·····</span>
+    <span class="session-name">bear</span>
+  </span>
+  <span class="status-right"></span>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
@@ -56,10 +271,11 @@ const term = new Terminal({
   fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', 'Consolas', monospace",
   fontSize: 14,
   lineHeight: 1.4,
-  cursorBlink: true,
+  cursorBlink: false,
   cursorStyle: 'bar',
   scrollback: 0,
   allowProposedApi: true,
+  disableStdin: true,
 });
 
 const fitAddon = new FitAddon.FitAddon();

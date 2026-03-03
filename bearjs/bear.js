@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Bear Browser Client — OpenCode-style TUI powered by xterm.js
 // ---------------------------------------------------------------------------
-// version 0.2.0
+const BEAR_VERSION = '0.2.0';
 // Relay configuration: these globals must be set by the hosting page.
 // bear.js communicates exclusively via the public server, which proxies
 // all signaling (offer, answer, ICE) to the relay on behalf of the browser.
@@ -35,20 +35,11 @@ const C = {
   bgGray:  '\x1b[48;5;236m',
 };
 
-// Box drawing
-const BOX = { tl: '┌', tr: '┐', bl: '└', br: '┘', h: '─', v: '│' };
-
 // Tool confirmation picker
 const TOOL_CONFIRM_LABELS = ['Approve', 'Deny', 'Always approve for session'];
-const TOOL_CONFIRM_COLORS = [C.green, C.red, C.yellow];
 
 // Spinner frames
 const SPINNER = ['·····', '●····', '·●···', '··●··', '···●·', '····●', '·····'];
-
-// Layout
-const INPUT_BOX_H = 3; // top border + input + bottom border
-const STATUS_BAR_H = 1;
-const BOTTOM_H = INPUT_BOX_H + STATUS_BAR_H;
 
 
 // ---------------------------------------------------------------------------
@@ -361,9 +352,19 @@ export class BearClient {
     this.sessionId = null;
     this._audioCtx = null;
 
-    // Input state
-    this.inputBuf = '';
-    this.cursorPos = 0;
+    // DOM elements
+    this._inputField = document.getElementById('input-field');
+    this._inputPrompt = document.getElementById('input-prompt');
+    this._sendBtn = document.getElementById('send-btn');
+    this._pickerOverlay = document.getElementById('picker-overlay');
+    this._slashDropdown = document.getElementById('slash-dropdown');
+    this._statusBar = document.getElementById('status-bar');
+    this._statusLeft = this._statusBar.querySelector('.status-left');
+    this._statusSpinner = this._statusBar.querySelector('.spinner');
+    this._statusSession = this._statusBar.querySelector('.session-name');
+    this._statusRight = this._statusBar.querySelector('.status-right');
+
+    // Input state — history only; text lives in DOM input
     this.history = [];
     this.historyIdx = -1;
     this.savedInput = '';
@@ -385,8 +386,7 @@ export class BearClient {
     this._outputLines = [];
     this._scrollOffset = 0; // 0 = bottom
 
-    // Slash command dropdown state
-    this._dropdownLines = 0;
+    // Slash command state
     this._dropdownIdx = -1;
     this.slashCommands = [];
 
@@ -404,15 +404,11 @@ export class BearClient {
     // Tool confirmation picker state
     this.inToolConfirm = false;
     this.toolConfirmCall = null;
-    this.toolConfirmIdx = 0;
-    this.toolConfirmRendered = false;
     this._lastExtractedCommands = [];
 
     // Session picker state
     this.inSessionPicker = false;
     this.pickerSessions = [];
-    this.pickerIdx = 0;
-    this.pickerRendered = false;
 
     // User prompt state
     this.inUserPrompt = false;
@@ -421,7 +417,6 @@ export class BearClient {
     this.userPromptMulti = false;
     this.userPromptIdx = 0;
     this.userPromptSelected = [];
-    this.userPromptRendered = false;
 
     // Active subagent tracking
     this._activeSubagents = new Set();
@@ -435,7 +430,11 @@ export class BearClient {
     this._cols = term.cols || 80;
     this._rows = term.rows || 24;
 
-    this._bindTerminal();
+    // Touch scroll state
+    this._touchStartY = null;
+
+    this._bindDomInput();
+    this._bindTouchScroll();
     this._bindResize();
   }
 
@@ -444,24 +443,7 @@ export class BearClient {
   // -------------------------------------------------------------------------
 
   _outputAreaHeight() {
-    return Math.max(1, this._rows - BOTTOM_H);
-  }
-
-  _inputRow() {
-    return this._rows - BOTTOM_H;
-  }
-
-  _statusRow() {
-    return this._rows - 1;
-  }
-
-  // Compute the scroll offset for the input buffer so the cursor stays visible.
-  _inputScrollStart() {
-    const innerW = Math.max(0, this._cols - 4);
-    const textSpace = Math.max(0, innerW - 6); // promptLen = 6
-    if (this.inputBuf.length <= textSpace || textSpace <= 0) return 0;
-    let start = Math.max(0, this.cursorPos - textSpace + 1);
-    return Math.min(start, this.inputBuf.length - textSpace);
+    return Math.max(1, this._rows);
   }
 
   // -------------------------------------------------------------------------
@@ -497,10 +479,7 @@ export class BearClient {
   // -------------------------------------------------------------------------
 
   _fullRepaint() {
-    this.term.write('\x1b[?25l'); // hide cursor
     this._drawOutputArea();
-    this._drawInputBox();
-    this._drawStatusBar();
   }
 
   _drawOutputArea() {
@@ -538,118 +517,100 @@ export class BearClient {
     }
   }
 
-  _drawInputBox() {
-    this.term.write('\x1b[?25l'); // hide cursor during redraw
-    const row = this._inputRow() + 1; // 1-indexed
-    const w = this._cols;
-    const borderW = Math.max(0, w - 2);
+  // -------------------------------------------------------------------------
+  // DOM: Input prompt label (updates color/text based on input prefix)
+  // -------------------------------------------------------------------------
 
-    // Top border
-    this.term.write(`\x1b[${row};1H\x1b[2K`);
-    this.term.write(`${C.gray}${BOX.tl}${BOX.h.repeat(borderW)}${BOX.tr}${C.reset}`);
-
-    // Input line
-    this.term.write(`\x1b[${row + 1};1H\x1b[2K`);
-    const isSlash = this.inputBuf.startsWith('/');
-    const isShell = this.inputBuf.startsWith('!');
-    const prompt = isSlash ? 'cmd-> ' : isShell ? 'shell>' : 'bear> ';
-    const promptColor = isSlash ? C.yellow : isShell ? C.magenta : C.cyan;
-    const innerW = Math.max(0, w - 4);
-    const promptLen = 6;
-    const textSpace = Math.max(0, innerW - promptLen);
-    const scrollStart = this._inputScrollStart();
-    const displayText = this.inputBuf.length > textSpace
-      ? this.inputBuf.slice(scrollStart, scrollStart + textSpace)
-      : this.inputBuf;
-    const padding = Math.max(0, innerW - promptLen - displayText.length);
-
-    this.term.write(
-      `${C.gray}${BOX.v} ${C.reset}` +
-      `${promptColor}${C.bold}${prompt}${C.reset}` +
-      `${displayText}` +
-      `${' '.repeat(padding)}` +
-      `${C.gray} ${BOX.v}${C.reset}`
-    );
-
-    // Bottom border
-    this.term.write(`\x1b[${row + 2};1H\x1b[2K`);
-    this.term.write(`${C.gray}${BOX.bl}${BOX.h.repeat(borderW)}${BOX.br}${C.reset}`);
-
-    // Position cursor (relative to scroll window)
-    const cursorCol = 3 + promptLen + (this.cursorPos - scrollStart);
-
-    // Dropdown above input box
+  _updatePromptLabel() {
+    const val = this._inputField.value;
+    const isSlash = val.startsWith('/');
+    const isShell = val.startsWith('!');
     if (isSlash) {
-      const matches = matchingSlashCommands(this.inputBuf, this.slashCommands);
-      if (matches.length > 0) {
-        if (this._dropdownIdx >= matches.length) {
-          this._dropdownIdx = matches.length - 1;
-        }
-        const ddStart = row - matches.length; // rows above input box
-        for (let i = 0; i < matches.length; i++) {
-          const r = ddStart + i;
-          if (r < 1) continue;
-          this.term.write(`\x1b[${r};1H\x1b[2K`);
-          const { cmd, desc } = matches[i];
-          if (i === this._dropdownIdx) {
-            this.term.write(`${C.yellow}  ❯ ${C.white}${cmd}${C.gray}  ${desc}${C.reset}`);
-          } else {
-            this.term.write(`${C.gray}    ${C.yellow}${cmd}${C.gray}  ${desc}${C.reset}`);
-          }
-        }
-        this._dropdownLines = matches.length;
-      } else {
-        this._dropdownLines = 0;
-      }
+      this._inputPrompt.textContent = 'cmd-> ';
+      this._inputPrompt.style.color = 'var(--yellow)';
+    } else if (isShell) {
+      this._inputPrompt.textContent = 'shell>';
+      this._inputPrompt.style.color = 'var(--magenta)';
     } else {
-      this._dropdownLines = 0;
+      this._inputPrompt.textContent = 'bear> ';
+      this._inputPrompt.style.color = 'var(--cyan)';
     }
-
-    // Position cursor and show it only after all rendering is complete
-    this.term.write(`\x1b[${row + 1};${cursorCol}H\x1b[?25h`);
   }
 
+  // -------------------------------------------------------------------------
+  // DOM: Slash command dropdown
+  // -------------------------------------------------------------------------
+
+  _updateSlashDropdown() {
+    const val = this._inputField.value;
+    if (!val.startsWith('/') || this.slashCommands.length === 0) {
+      this._hideSlashDropdown();
+      return;
+    }
+    const matches = matchingSlashCommands(val, this.slashCommands);
+    if (matches.length === 0) {
+      this._hideSlashDropdown();
+      return;
+    }
+    if (this._dropdownIdx >= matches.length) {
+      this._dropdownIdx = matches.length - 1;
+    }
+    let html = '';
+    for (let i = 0; i < matches.length; i++) {
+      const cls = i === this._dropdownIdx ? 'dd-item active' : 'dd-item';
+      html += `<div class="${cls}" data-idx="${i}">` +
+        `<span class="dd-cmd">${this._esc(matches[i].cmd)}</span>` +
+        `<span class="dd-desc">${this._esc(matches[i].desc)}</span>` +
+        `</div>`;
+    }
+    this._slashDropdown.innerHTML = html;
+    this._slashDropdown.style.display = 'block';
+    this.fitAddon.fit();
+  }
+
+  _hideSlashDropdown() {
+    if (this._slashDropdown.style.display !== 'none') {
+      this._slashDropdown.style.display = 'none';
+      this._slashDropdown.innerHTML = '';
+      this._dropdownIdx = -1;
+      this.fitAddon.fit();
+    }
+  }
+
+  _acceptDropdown() {
+    const val = this._inputField.value;
+    const matches = matchingSlashCommands(val, this.slashCommands);
+    const idx = this._dropdownIdx >= 0 ? this._dropdownIdx : 0;
+    if (idx < matches.length) {
+      this._inputField.value = matches[idx].cmd + ' ';
+      this._updatePromptLabel();
+    }
+    this._hideSlashDropdown();
+  }
+
+  // -------------------------------------------------------------------------
+  // DOM: Status bar
+  // -------------------------------------------------------------------------
+
   _drawStatusBar() {
-    this.term.write('\x1b[?25l'); // hide cursor during redraw
-    const row = this._statusRow() + 1; // 1-indexed
-    const w = this._cols;
-
-    this.term.write(`\x1b[${row};1H\x1b[2K`);
-
     const remainingMs = this._interruptWarningRemainingMs();
-
     if (remainingMs > 0) {
-      const warnText = 'LLM is busy \u2014 press Enter again to interrupt';
-      const barMax = warnText.length;
-      const barLen = Math.min(barMax, Math.floor(barMax * remainingMs / 6000));
-
-      this.term.write(`\x1b[${row};2H${C.yellow}${warnText}${C.reset}`);
-      if (barLen > 0) {
-        const barStart = Math.max(1, w - barLen);
-        this.term.write(`\x1b[${row};${barStart}H\x1b[38;5;136m${'▁'.repeat(barLen)}${C.reset}`);
-      }
+      this._statusBar.classList.add('warning');
+      this._statusLeft.innerHTML = '<span>LLM is busy \u2014 tap Send again to interrupt</span>';
+      this._statusRight.textContent = '';
     } else {
+      this._statusBar.classList.remove('warning');
       const spinner = this._streaming
         ? SPINNER[this._spinnerFrame % SPINNER.length]
         : '·····';
       const session = this._sessionName || 'bear';
-
       const subagentInfo = this._activeSubagents.size > 0
-        ? `  🔍${this._activeSubagents.size}`
+        ? `  \uD83D\uDD0D${this._activeSubagents.size}`
         : '';
-      const left = `${spinner}  ${session}${subagentInfo}`;
-      const right = '↑↓ history  pgup/pgdn scroll  ctrl+c go to home';
-
-      const gap = Math.max(1, w - left.length - right.length - 2);
-
-      this.term.write(`${C.gray} ${left}${' '.repeat(gap)}${right} ${C.reset}`);
+      this._statusSpinner.textContent = spinner;
+      this._statusSession.textContent = session + subagentInfo;
+      this._statusRight.textContent = '';
     }
-
-    // Restore cursor to input box
-    const inputRow = this._inputRow() + 2; // 1-indexed, +1 for input line within box
-    const scrollStart = this._inputScrollStart();
-    const cursorCol = 3 + 6 + (this.cursorPos - scrollStart);
-    this.term.write(`\x1b[${inputRow};${cursorCol}H\x1b[?25h`);
   }
 
   _interruptWarningRemainingMs() {
@@ -665,6 +626,7 @@ export class BearClient {
       clearInterval(this._interruptWarningTimer);
       this._interruptWarningTimer = null;
     }
+    this._drawStatusBar();
   }
 
   // -------------------------------------------------------------------------
@@ -684,6 +646,12 @@ export class BearClient {
       clearInterval(this._spinnerTimer);
       this._spinnerTimer = null;
     }
+    this._drawStatusBar();
+  }
+
+  // HTML escaping helper
+  _esc(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   // -------------------------------------------------------------------------
@@ -715,7 +683,7 @@ export class BearClient {
     this._pushLine(`${C.yellow}  ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠛⠒⠚⠙⠷⠶⠞⠉⠉⠀⠓⠒⠚⠁⠀⠀⠀⠀⠀${C.reset}`);
     this._pushLine('');
     this._pushLine(`${C.bold}${C.cyan}    Welcome to Bear coding agent${C.reset}`);
-    this._pushLine(`${C.gray}    Type /help for commands${C.reset}`);
+    this._pushLine(`${C.gray}    v${BEAR_VERSION}  •  Type /help for commands${C.reset}`);
     this._pushLine('');
     this._fullRepaint();
 
@@ -741,54 +709,62 @@ export class BearClient {
   _showSessionPickerUI() {
     this.inSessionPicker = true;
     this.pickerIdx = 0;
-
     this._pushLine(`${C.bold}${C.white}  Select a session:${C.reset}`);
-    this._pushLine('');
-
-    this.pickerRendered = false;
-    this._renderPicker();
+    this._fullRepaint();
+    this._renderSessionPicker();
   }
 
-  _renderPicker() {
+  _renderSessionPicker() {
     const items = [
       { label: '+ New Session', detail: '' },
       ...this.pickerSessions.map(s => ({
-        label: s.name || s.id.substring(0, 8) + '…',
+        label: s.name || s.id.substring(0, 8) + '\u2026',
         detail: s.cwd,
       })),
     ];
-
-    // Remove previous picker lines
-    if (this.pickerRendered) {
-      this._popLines(items.length + 1); // items + hint
-    }
-    this.pickerRendered = true;
-
+    let html = '<div class="picker-title">Select a session</div>';
     for (let i = 0; i < items.length; i++) {
-      const selected = i === this.pickerIdx;
-      const prefix = selected ? `${C.bold}${C.blue}  ❯ ` : `${C.gray}    `;
-      const labelColor = selected ? C.white : C.gray;
-      const detailStr = items[i].detail ? `  ${C.dim}${C.gray}${items[i].detail}${C.reset}` : '';
-      this._pushLine(`${prefix}${labelColor}${items[i].label}${C.reset}${detailStr}`);
+      const cls = i === this.pickerIdx ? 'picker-item active' : 'picker-item';
+      const ind = i === this.pickerIdx ? '\u276F' : ' ';
+      const det = items[i].detail
+        ? `<span class="pi-detail">${this._esc(items[i].detail)}</span>` : '';
+      html += `<div class="${cls}" data-idx="${i}">` +
+        `<span class="pi-indicator">${ind}</span>` +
+        `<span class="pi-label">${this._esc(items[i].label)}</span>${det}</div>`;
     }
-    this._pushLine(`${C.gray}  ↑/↓ navigate, Enter select${C.reset}`);
-    this._fullRepaint();
+    html += '<div class="picker-hint">Tap to select</div>';
+    this._pickerOverlay.innerHTML = html;
+    this._pickerOverlay.style.display = 'block';
+    this.fitAddon.fit();
+    // Bind tap/click
+    this._pickerOverlay.querySelectorAll('.picker-item').forEach(el => {
+      el.addEventListener('click', () => {
+        this.pickerIdx = parseInt(el.dataset.idx);
+        this._pickerSelectSession();
+      });
+    });
   }
 
-  _pickerSelect() {
+  _pickerSelectSession() {
     this.inSessionPicker = false;
-    this._pushLine('');
+    this._hidePicker();
 
     if (this.pickerIdx === 0) {
-      this._pushLine(`${C.gray}  Creating new session…${C.reset}`);
+      this._pushLine(`${C.gray}  Creating new session\u2026${C.reset}`);
       this._fullRepaint();
       this._sendJson({ type: 'session_create', cwd: null });
     } else {
       const session = this.pickerSessions[this.pickerIdx - 1];
-      this._pushLine(`${C.gray}  Connecting to session ${session.id.substring(0, 8)}…${C.reset}`);
+      this._pushLine(`${C.gray}  Connecting to session ${session.id.substring(0, 8)}\u2026${C.reset}`);
       this._fullRepaint();
       this._sendJson({ type: 'session_select', session_id: session.id });
     }
+  }
+
+  _hidePicker() {
+    this._pickerOverlay.style.display = 'none';
+    this._pickerOverlay.innerHTML = '';
+    this.fitAddon.fit();
   }
 
   // -------------------------------------------------------------------------
@@ -798,10 +774,10 @@ export class BearClient {
   _connectRelay() {
     this.inToolConfirm = false;
     this.toolConfirmCall = null;
-    this.toolConfirmIdx = 0;
-    this.toolConfirmRendered = false;
+    this.inSessionPicker = false;
     this.inUserPrompt = false;
     this._activeSubagents = new Set();
+    this._hidePicker();
 
     this._cleanup();
 
@@ -1033,7 +1009,7 @@ export class BearClient {
     switch (msg.type) {
       case 'slash_commands':
         this.slashCommands = Array.isArray(msg.commands) ? msg.commands : [];
-        this._drawInputBox();
+        this._updateSlashDropdown();
         // slash_commands is the server's "lobby ready" signal — now safe
         // to request the session list over the DataChannel.
         if (this._lobbyPending) {
@@ -1118,8 +1094,7 @@ export class BearClient {
 
         // Enter picker mode
         this.toolConfirmCall = tc;
-        this.toolConfirmIdx = 0;
-        this.toolConfirmRendered = false;
+        this._tcIdx = 0;
         this.inToolConfirm = true;
         this._playAlert();
         this._renderToolConfirm();
@@ -1195,8 +1170,7 @@ export class BearClient {
         if (this.inToolConfirm && this.toolConfirmCall && this.toolConfirmCall.id === msg.tool_call_id) {
           this.inToolConfirm = false;
           this.toolConfirmCall = null;
-          // Remove picker lines (summary + options + hint)
-          this._popLines(this._toolConfirmPickerLines());
+          this._hidePicker();
           const label = msg.approved
             ? `${C.green}  ✓ Approved (by another client)${C.reset}`
             : `${C.red}  ✗ Denied (by another client)${C.reset}`;
@@ -1215,8 +1189,7 @@ export class BearClient {
         );
         if (matchesPrompt) {
           this.inUserPrompt = false;
-          // Remove prompt picker lines
-          this._popLines(this.userPromptOptions.length + 1); // options + hint
+          this._hidePicker();
           this._pushLine(`${C.gray}  (resolved by another client)${C.reset}`);
           this._pushLine('');
           this._fullRepaint();
@@ -1264,9 +1237,8 @@ export class BearClient {
         this.userPromptMulti = msg.multi;
         this.userPromptIdx = 0;
         this.userPromptSelected = new Array(msg.options.length).fill(false);
-        this.userPromptRendered = false;
         this._pushLine(`${C.bold}${C.cyan}  ${msg.question}${C.reset}`);
-        this._pushLine('');
+        this._fullRepaint();
         this._playAlert();
         this._renderUserPrompt();
         break;
@@ -1289,9 +1261,8 @@ export class BearClient {
         this.userPromptMulti = false;
         this.userPromptIdx = 0;
         this.userPromptSelected = [false, false];
-        this.userPromptRendered = false;
         this._pushLine(`${C.bold}${C.cyan}  Execute this plan?${C.reset}`);
-        this._pushLine('');
+        this._fullRepaint();
         this._playAlert();
         this._renderUserPrompt();
         break;
@@ -1377,17 +1348,102 @@ export class BearClient {
   }
 
   // -------------------------------------------------------------------------
-  // Terminal input binding
+  // DOM: Input binding (replaces _bindTerminal)
   // -------------------------------------------------------------------------
 
-  _bindTerminal() {
-    // Mouse wheel / trackpad scroll → viewport scroll.
-    // xterm.js attaches its own wheel handler on an internal child
-    // element (.xterm-viewport) and translates wheel events into
-    // \x1b[A / \x1b[B arrow-key sequences via onData, which would
-    // trigger history navigation.  We intercept on the *document* at
-    // the capture phase so we fire before any element-level handlers,
-    // then stopImmediatePropagation to prevent xterm.js from seeing it.
+  _bindDomInput() {
+    // --- Input field events ---
+    this._inputField.addEventListener('input', () => {
+      this._updatePromptLabel();
+      this._updateSlashDropdown();
+      if (this._interruptPendingText !== null) this._dismissInterruptWarning();
+    });
+
+    this._inputField.addEventListener('keydown', (e) => {
+      // If a picker is active, route arrow keys to it
+      if (this.inSessionPicker || this.inToolConfirm || this.inUserPrompt) {
+        if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          this._handlePickerKeyboard(e.key);
+          return;
+        }
+      }
+
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        this._handleEnter();
+        return;
+      }
+
+      if (e.key === 'ArrowUp') {
+        // Slash dropdown navigation
+        if (this._slashDropdown.style.display === 'block') {
+          e.preventDefault();
+          const matches = matchingSlashCommands(this._inputField.value, this.slashCommands);
+          if (matches.length > 0) {
+            this._dropdownIdx = this._dropdownIdx <= 0 ? matches.length - 1 : this._dropdownIdx - 1;
+            this._updateSlashDropdown();
+          }
+          return;
+        }
+        // History navigation
+        e.preventDefault();
+        this._historyUp();
+        return;
+      }
+
+      if (e.key === 'ArrowDown') {
+        if (this._slashDropdown.style.display === 'block') {
+          e.preventDefault();
+          const matches = matchingSlashCommands(this._inputField.value, this.slashCommands);
+          if (matches.length > 0) {
+            this._dropdownIdx = (this._dropdownIdx < 0 || this._dropdownIdx >= matches.length - 1) ? 0 : this._dropdownIdx + 1;
+            this._updateSlashDropdown();
+          }
+          return;
+        }
+        e.preventDefault();
+        this._historyDown();
+        return;
+      }
+
+      if (e.key === 'Tab') {
+        if (this._slashDropdown.style.display === 'block') {
+          e.preventDefault();
+          this._acceptDropdown();
+        }
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        this._inputField.value = '';
+        this._updatePromptLabel();
+        this._hideSlashDropdown();
+        return;
+      }
+
+      // Page up/down for scrolling
+      if (e.key === 'PageUp') { e.preventDefault(); this._scrollUp(5); this._fullRepaint(); return; }
+      if (e.key === 'PageDown') { e.preventDefault(); this._scrollDown(5); this._fullRepaint(); return; }
+    });
+
+    // --- Send button ---
+    this._sendBtn.addEventListener('click', () => {
+      this._handleEnter();
+      this._inputField.focus();
+    });
+
+    // --- Slash dropdown click ---
+    this._slashDropdown.addEventListener('click', (e) => {
+      const item = e.target.closest('.dd-item');
+      if (item) {
+        this._dropdownIdx = parseInt(item.dataset.idx);
+        this._acceptDropdown();
+        this._inputField.focus();
+      }
+    });
+
+    // --- Mouse wheel scroll on xterm output ---
     const termEl = this.term.element;
     document.addEventListener('wheel', (e) => {
       if (!termEl.contains(e.target)) return;
@@ -1400,287 +1456,150 @@ export class BearClient {
       }
       this._fullRepaint();
     }, { passive: false, capture: true });
+  }
 
-    this.term.onData((data) => {
-      if (this.inSessionPicker) { this._handlePickerKey(data); return; }
-      if (this.inToolConfirm) { this._handleToolConfirmKey(data); return; }
-      if (this.inUserPrompt) { this._handleUserPromptKey(data); return; }
+  _handleEnter() {
+    // If slash dropdown is visible and an item is selected, accept it
+    if (this._slashDropdown.style.display === 'block' && this._dropdownIdx >= 0) {
+      this._acceptDropdown();
+      return;
+    }
+    // Double-Enter interrupt: if warning is active, confirm the interrupt
+    if (this._interruptPendingText !== null && this._interruptWarningRemainingMs() > 0) {
+      const text = this._interruptPendingText;
+      this._dismissInterruptWarning();
+      this._awaitingInputEcho = true;
+      this._sendJson({ type: 'input', text });
+      this._fullRepaint();
+      return;
+    }
+    // If LLM is busy and user typed non-empty text, show warning
+    if (this._streaming && this._inputField.value.trim()) {
+      this._submitInputToWarning();
+      return;
+    }
+    // Normal submit
+    this._dismissInterruptWarning();
+    this._submitInput();
+  }
 
-      for (let i = 0; i < data.length; i++) {
-        const ch = data[i];
-        const code = ch.charCodeAt(0);
-
-        // ESC sequence
-        if (ch === '\x1b' && data[i + 1] === '[') {
-          const arrow = data[i + 2];
-          i += 2;
-
-          if (this._dropdownActive()) {
-            if (arrow === 'A') { this._dropdownUp(); this._drawInputBox(); continue; }
-            if (arrow === 'B') { this._dropdownDown(); this._drawInputBox(); continue; }
-            this._dropdownIdx = -1;
-          }
-
-          if (arrow === 'A') { this._historyUp(); continue; }
-          if (arrow === 'B') { this._historyDown(); continue; }
-          if (arrow === 'C') { this._cursorRight(); continue; }
-          if (arrow === 'D') { this._cursorLeft(); continue; }
-
-          // Page up/down: \x1b[5~ and \x1b[6~
-          if (arrow === '5' && data[i + 1] === '~') { i++; this._scrollUp(5); this._fullRepaint(); continue; }
-          if (arrow === '6' && data[i + 1] === '~') { i++; this._scrollDown(5); this._fullRepaint(); continue; }
-          continue;
-        }
-
-        // Bare Esc
-        if (code === 27) {
-          if (this._dropdownActive()) {
-            this.inputBuf = '';
-            this.cursorPos = 0;
-            this._dropdownIdx = -1;
-            this._drawInputBox();
-          }
-          continue;
-        }
-
-        // Tab
-        if (code === 9) {
-          if (this._dropdownActive()) {
-            this._acceptDropdown();
-            this._drawInputBox();
-          }
-          continue;
-        }
-
-        // Enter
-        if (ch === '\r' || ch === '\n') {
-          if (this._dropdownActive() && this._dropdownIdx >= 0) {
-            this._acceptDropdown();
-            this._drawInputBox();
-            continue;
-          }
-          // Double-Enter interrupt: if warning is active, confirm the interrupt
-          if (this._interruptPendingText !== null && this._interruptWarningRemainingMs() > 0) {
-            const text = this._interruptPendingText;
-            this._dismissInterruptWarning();
-            this._awaitingInputEcho = true;
-            this._sendJson({ type: 'input', text });
-            this._fullRepaint();
-            continue;
-          }
-          // If LLM is busy and user typed non-empty text, show warning instead of sending
-          if (this._streaming && this.inputBuf.trim()) {
-            this._submitInputToWarning();
-            continue;
-          }
-          // Normal submit
-          this._dismissInterruptWarning();
-          this._submitInput();
-          continue;
-        }
-
-        // Backspace
-        if (code === 127 || code === 8) {
-          this._dropdownIdx = -1;
-          if (this._interruptPendingText !== null) this._dismissInterruptWarning();
-          this._backspace();
-          continue;
-        }
-
-        // Ctrl+C — navigate to home
-        if (code === 3) {
-          window.location.href = HOME_URL;
-          continue;
-        }
-
-        // Ctrl+D
-        if (code === 4) continue;
-
-        // Ctrl+U
-        if (code === 21) {
-          this.inputBuf = '';
-          this.cursorPos = 0;
-          this._drawInputBox();
-          continue;
-        }
-
-        // Printable
-        if (code >= 32) {
-          this._dropdownIdx = -1;
-          if (this._interruptPendingText !== null) this._dismissInterruptWarning();
-          this.inputBuf = this.inputBuf.slice(0, this.cursorPos) + ch + this.inputBuf.slice(this.cursorPos);
-          this.cursorPos++;
-          this._drawInputBox();
-        }
+  // Handle keyboard on active picker overlays (session, tool confirm, user prompt)
+  _handlePickerKeyboard(key) {
+    if (this.inSessionPicker) {
+      const totalItems = this.pickerSessions.length + 1;
+      if (key === 'ArrowUp' && this.pickerIdx > 0) {
+        this.pickerIdx--;
+        this._renderSessionPicker();
+      } else if (key === 'ArrowDown' && this.pickerIdx < totalItems - 1) {
+        this.pickerIdx++;
+        this._renderSessionPicker();
+      } else if (key === 'Enter') {
+        this._pickerSelectSession();
       }
+    } else if (this.inToolConfirm) {
+      if (key === 'ArrowUp' && this._tcIdx > 0) {
+        this._tcIdx--;
+        this._renderToolConfirm();
+      } else if (key === 'ArrowDown' && this._tcIdx < TOOL_CONFIRM_LABELS.length - 1) {
+        this._tcIdx++;
+        this._renderToolConfirm();
+      } else if (key === 'Enter') {
+        this._toolConfirmSelect(this._tcIdx);
+      }
+    } else if (this.inUserPrompt) {
+      const total = this.userPromptOptions.length;
+      if (key === 'ArrowUp' && this.userPromptIdx > 0) {
+        this.userPromptIdx--;
+        this._renderUserPrompt();
+      } else if (key === 'ArrowDown' && this.userPromptIdx < total - 1) {
+        this.userPromptIdx++;
+        this._renderUserPrompt();
+      } else if (key === ' ' && this.userPromptMulti) {
+        this.userPromptSelected[this.userPromptIdx] = !this.userPromptSelected[this.userPromptIdx];
+        this._renderUserPrompt();
+      } else if (key === 'Enter') {
+        this._userPromptSelect();
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // DOM: Touch scroll on xterm output
+  // -------------------------------------------------------------------------
+
+  _bindTouchScroll() {
+    const termEl = this.term.element;
+    termEl.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 1) {
+        this._touchStartY = e.touches[0].clientY;
+      }
+    }, { passive: true });
+
+    termEl.addEventListener('touchmove', (e) => {
+      if (this._touchStartY === null || e.touches.length !== 1) return;
+      const dy = this._touchStartY - e.touches[0].clientY;
+      const threshold = 20; // pixels per scroll step
+      if (Math.abs(dy) >= threshold) {
+        const steps = Math.floor(Math.abs(dy) / threshold);
+        if (dy > 0) {
+          this._scrollDown(steps);
+        } else {
+          this._scrollUp(steps);
+        }
+        this._touchStartY = e.touches[0].clientY;
+        this._fullRepaint();
+      }
+    }, { passive: true });
+
+    termEl.addEventListener('touchend', () => {
+      this._touchStartY = null;
+    }, { passive: true });
+  }
+
+  // -------------------------------------------------------------------------
+  // DOM: Tool confirmation picker
+  // -------------------------------------------------------------------------
+
+  _renderToolConfirm() {
+    if (this._tcIdx === undefined) this._tcIdx = 0;
+    const tc = this.toolConfirmCall;
+    const summary = tc ? toolSummary(tc.name, tc.arguments || {}) : '';
+    const tcClasses = ['tc-approve', 'tc-deny', 'tc-always'];
+
+    let html = `<div class="tc-summary"><span class="tc-icon">\u26A1</span> ${this._esc(summary)}</div>`;
+    for (let i = 0; i < TOOL_CONFIRM_LABELS.length; i++) {
+      const cls = `picker-item ${tcClasses[i]}` + (i === this._tcIdx ? ' active' : '');
+      const ind = i === this._tcIdx ? '\u276F' : ' ';
+      html += `<div class="${cls}" data-idx="${i}">` +
+        `<span class="pi-indicator">${ind}</span>` +
+        `<span class="pi-label">${this._esc(TOOL_CONFIRM_LABELS[i])}</span></div>`;
+    }
+    html += '<div class="picker-hint">Tap to select</div>';
+    this._pickerOverlay.innerHTML = html;
+    this._pickerOverlay.style.display = 'block';
+    this.fitAddon.fit();
+
+    this._pickerOverlay.querySelectorAll('.picker-item').forEach(el => {
+      el.addEventListener('click', () => {
+        this._toolConfirmSelect(parseInt(el.dataset.idx));
+      });
     });
   }
 
-  // -------------------------------------------------------------------------
-  // Picker key handling
-  // -------------------------------------------------------------------------
-
-  _handlePickerKey(data) {
-    const totalItems = this.pickerSessions.length + 1;
-    if (data === '\x1b[A') {
-      if (this.pickerIdx > 0) { this.pickerIdx--; this._renderPicker(); }
-    } else if (data === '\x1b[B') {
-      if (this.pickerIdx < totalItems - 1) { this.pickerIdx++; this._renderPicker(); }
-    } else if (data === '\r' || data === '\n') {
-      this._pickerSelect();
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // User prompt
-  // -------------------------------------------------------------------------
-
-  _handleUserPromptKey(data) {
-    const total = this.userPromptOptions.length;
-    if (data === '\x1b[A') {
-      if (this.userPromptIdx > 0) { this.userPromptIdx--; this._renderUserPrompt(); }
-    } else if (data === '\x1b[B') {
-      if (this.userPromptIdx < total - 1) { this.userPromptIdx++; this._renderUserPrompt(); }
-    } else if (data === ' ' && this.userPromptMulti) {
-      this.userPromptSelected[this.userPromptIdx] = !this.userPromptSelected[this.userPromptIdx];
-      this._renderUserPrompt();
-    } else if (data === '\r' || data === '\n') {
-      this._userPromptSelect();
-    }
-  }
-
-  _renderUserPrompt() {
-    const opts = this.userPromptOptions;
-    const removeCount = opts.length + 1;
-
-    if (this.userPromptRendered) {
-      this._popLines(removeCount);
-    }
-    this.userPromptRendered = true;
-
-    for (let i = 0; i < opts.length; i++) {
-      const focused = i === this.userPromptIdx;
-      if (this.userPromptMulti) {
-        const check = this.userPromptSelected[i] ? '[x]' : '[ ]';
-        if (focused) {
-          this._pushLine(`${C.bold}${C.yellow}  ${check} ${C.white}${opts[i]}${C.reset}`);
-        } else {
-          this._pushLine(`${C.gray}  ${check} ${opts[i]}${C.reset}`);
-        }
-      } else {
-        if (focused) {
-          this._pushLine(`${C.bold}${C.blue}  ❯ ${C.white}${opts[i]}${C.reset}`);
-        } else {
-          this._pushLine(`${C.gray}    ${opts[i]}${C.reset}`);
-        }
-      }
-    }
-
-    const hint = this.userPromptMulti
-      ? `${C.gray}  ↑/↓ navigate, Space toggle, Enter confirm${C.reset}`
-      : `${C.gray}  ↑/↓ navigate, Enter select${C.reset}`;
-    this._pushLine(hint);
-    this._fullRepaint();
-  }
-
-  _userPromptSelect() {
-    this.inUserPrompt = false;
-    let selected;
-    if (this.userPromptMulti) {
-      selected = [];
-      for (let i = 0; i < this.userPromptSelected.length; i++) {
-        if (this.userPromptSelected[i]) selected.push(i);
-      }
-    } else {
-      selected = [this.userPromptIdx];
-    }
-
-    // Replace picker lines with selection
-    const opts = this.userPromptOptions;
-    this._popLines(opts.length + 1);
-
-    if (this.userPromptMulti) {
-      for (let i = 0; i < opts.length; i++) {
-        if (this.userPromptSelected[i]) {
-          this._pushLine(`${C.green}  [x] ${C.white}${opts[i]}${C.reset}`);
-        }
-      }
-    } else {
-      this._pushLine(`${C.yellow}  ❯ ${C.white}${opts[this.userPromptIdx]}${C.reset}`);
-    }
-    this._pushLine('');
-
-    // Check if this is a task plan confirmation (reused prompt picker)
-    if (this.userPromptId && this.userPromptId.startsWith('__taskplan__')) {
-      const planId = this.userPromptId.replace('__taskplan__', '');
-      const approved = selected[0] === 0; // 0 = Approve, 1 = Reject
-      this._sendJson({ type: 'task_plan_response', plan_id: planId, approved });
-    } else {
-      this._sendJson({ type: 'user_prompt_response', prompt_id: this.userPromptId, selected });
-    }
-    this._fullRepaint();
-  }
-
-  // -------------------------------------------------------------------------
-  // Tool confirmation picker
-  // -------------------------------------------------------------------------
-
-  _handleToolConfirmKey(data) {
-    if (data === '\x1b[A') {
-      if (this.toolConfirmIdx > 0) { this.toolConfirmIdx--; this._renderToolConfirm(); }
-    } else if (data === '\x1b[B') {
-      if (this.toolConfirmIdx < TOOL_CONFIRM_LABELS.length - 1) { this.toolConfirmIdx++; this._renderToolConfirm(); }
-    } else if (data === '\r' || data === '\n') {
-      this._toolConfirmSelect();
-    }
-  }
-
-  _toolConfirmPickerLines() {
-    return TOOL_CONFIRM_LABELS.length + 2; // summary + options + hint
-  }
-
-  _renderToolConfirm() {
-    if (this.toolConfirmRendered) {
-      this._popLines(this._toolConfirmPickerLines());
-    }
-    this.toolConfirmRendered = true;
-
-    // Summary line so the command is always visible in the picker area
-    const tc = this.toolConfirmCall;
-    const summary = tc ? toolSummary(tc.name, tc.arguments || {}) : '';
-    this._pushLine(`${C.magenta}  ⚡ ${C.white}${summary}${C.reset}`);
-
-    for (let i = 0; i < TOOL_CONFIRM_LABELS.length; i++) {
-      const focused = i === this.toolConfirmIdx;
-      if (focused) {
-        this._pushLine(`${C.yellow}  ❯ ${TOOL_CONFIRM_COLORS[i]}${TOOL_CONFIRM_LABELS[i]}${C.reset}`);
-      } else {
-        this._pushLine(`${C.gray}    ${TOOL_CONFIRM_LABELS[i]}${C.reset}`);
-      }
-    }
-    this._pushLine(`${C.gray}  ↑/↓ navigate, Enter select${C.reset}`);
-    this._fullRepaint();
-  }
-
-  _toolConfirmSelect() {
+  _toolConfirmSelect(idx) {
     const tc = this.toolConfirmCall;
     if (!tc) return;
 
-    const cmds = this._lastExtractedCommands || [this._extractBaseCommand(tc)];
-    const idx = this.toolConfirmIdx;
     const approved = idx !== 1;
+    const always = idx === 2;
 
     this.inToolConfirm = false;
     this.toolConfirmCall = null;
-
-    // Replace picker lines with result
-    this._popLines(this._toolConfirmPickerLines());
-
-    const always = idx === 2;
+    this._hidePicker();
 
     const verdict = approved
-      ? (always ? `${C.yellow}  ✓ Always approved${C.reset}` : `${C.green}  ✓ Approved${C.reset}`)
-      : `${C.red}  ✗ Denied${C.reset}`;
+      ? (always ? `${C.yellow}  \u2713 Always approved${C.reset}` : `${C.green}  \u2713 Approved${C.reset}`)
+      : `${C.red}  \u2717 Denied${C.reset}`;
     this._pushLine(verdict);
     this._pushLine('');
 
@@ -1704,100 +1623,136 @@ export class BearClient {
   }
 
   // -------------------------------------------------------------------------
-  // Dropdown
+  // DOM: User prompt picker
   // -------------------------------------------------------------------------
 
-  _dropdownActive() {
-    return this._dropdownLines > 0 && this.inputBuf.startsWith('/');
-  }
-
-  _dropdownUp() {
-    const matches = matchingSlashCommands(this.inputBuf, this.slashCommands);
-    if (matches.length === 0) return;
-    this._dropdownIdx = this._dropdownIdx <= 0 ? matches.length - 1 : this._dropdownIdx - 1;
-  }
-
-  _dropdownDown() {
-    const matches = matchingSlashCommands(this.inputBuf, this.slashCommands);
-    if (matches.length === 0) return;
-    this._dropdownIdx = (this._dropdownIdx < 0 || this._dropdownIdx >= matches.length - 1) ? 0 : this._dropdownIdx + 1;
-  }
-
-  _acceptDropdown() {
-    const matches = matchingSlashCommands(this.inputBuf, this.slashCommands);
-    const idx = this._dropdownIdx >= 0 ? this._dropdownIdx : 0;
-    if (idx < matches.length) {
-      this.inputBuf = matches[idx].cmd + ' ';
-      this.cursorPos = this.inputBuf.length;
+  _renderUserPrompt() {
+    const opts = this.userPromptOptions;
+    let html = '';
+    for (let i = 0; i < opts.length; i++) {
+      const active = i === this.userPromptIdx ? ' active' : '';
+      const sel = this.userPromptSelected[i] ? ' selected' : '';
+      if (this.userPromptMulti) {
+        const check = this.userPromptSelected[i] ? '[x]' : '[ ]';
+        html += `<div class="picker-item${active}${sel}" data-idx="${i}">` +
+          `<span class="pi-check">${check}</span>` +
+          `<span class="pi-label">${this._esc(opts[i])}</span></div>`;
+      } else {
+        const ind = i === this.userPromptIdx ? '\u276F' : ' ';
+        html += `<div class="picker-item${active}" data-idx="${i}">` +
+          `<span class="pi-indicator">${ind}</span>` +
+          `<span class="pi-label">${this._esc(opts[i])}</span></div>`;
+      }
     }
-    this._dropdownIdx = -1;
-    this._dropdownLines = 0;
+    const hintText = this.userPromptMulti ? 'Tap to toggle, then confirm' : 'Tap to select';
+    html += `<div class="picker-hint">${hintText}</div>`;
+    if (this.userPromptMulti) {
+      html += `<div class="picker-item tc-approve" data-action="confirm">` +
+        `<span class="pi-indicator">\u2713</span>` +
+        `<span class="pi-label">Confirm selection</span></div>`;
+    }
+    this._pickerOverlay.innerHTML = html;
+    this._pickerOverlay.style.display = 'block';
+    this.fitAddon.fit();
+
+    this._pickerOverlay.querySelectorAll('.picker-item').forEach(el => {
+      el.addEventListener('click', () => {
+        if (el.dataset.action === 'confirm') {
+          this._userPromptSelect();
+          return;
+        }
+        const idx = parseInt(el.dataset.idx);
+        if (this.userPromptMulti) {
+          this.userPromptSelected[idx] = !this.userPromptSelected[idx];
+          this.userPromptIdx = idx;
+          this._renderUserPrompt();
+        } else {
+          this.userPromptIdx = idx;
+          this._userPromptSelect();
+        }
+      });
+    });
+  }
+
+  _userPromptSelect() {
+    this.inUserPrompt = false;
+    let selected;
+    if (this.userPromptMulti) {
+      selected = [];
+      for (let i = 0; i < this.userPromptSelected.length; i++) {
+        if (this.userPromptSelected[i]) selected.push(i);
+      }
+    } else {
+      selected = [this.userPromptIdx];
+    }
+
+    this._hidePicker();
+
+    // Show selection in output
+    const opts = this.userPromptOptions;
+    if (this.userPromptMulti) {
+      for (let i = 0; i < opts.length; i++) {
+        if (this.userPromptSelected[i]) {
+          this._pushLine(`${C.green}  [x] ${C.white}${opts[i]}${C.reset}`);
+        }
+      }
+    } else {
+      this._pushLine(`${C.yellow}  \u276F ${C.white}${opts[this.userPromptIdx]}${C.reset}`);
+    }
+    this._pushLine('');
+
+    // Check if this is a task plan confirmation (reused prompt picker)
+    if (this.userPromptId && this.userPromptId.startsWith('__taskplan__')) {
+      const planId = this.userPromptId.replace('__taskplan__', '');
+      const approved = selected[0] === 0; // 0 = Approve, 1 = Reject
+      this._sendJson({ type: 'task_plan_response', plan_id: planId, approved });
+    } else {
+      this._sendJson({ type: 'user_prompt_response', prompt_id: this.userPromptId, selected });
+    }
+    this._fullRepaint();
   }
 
   // -------------------------------------------------------------------------
-  // Input editing
+  // History navigation (reads/writes DOM input)
   // -------------------------------------------------------------------------
-
-  _backspace() {
-    if (this.cursorPos > 0) {
-      this.inputBuf = this.inputBuf.slice(0, this.cursorPos - 1) + this.inputBuf.slice(this.cursorPos);
-      this.cursorPos--;
-      this._drawInputBox();
-    }
-  }
-
-  _cursorLeft() {
-    if (this.cursorPos > 0) {
-      this.cursorPos--;
-      this._drawInputBox();
-    }
-  }
-
-  _cursorRight() {
-    if (this.cursorPos < this.inputBuf.length) {
-      this.cursorPos++;
-      this._drawInputBox();
-    }
-  }
 
   _historyUp() {
     if (this.history.length === 0) return;
     if (this.historyIdx === -1) {
-      this.savedInput = this.inputBuf;
+      this.savedInput = this._inputField.value;
       this.historyIdx = this.history.length - 1;
     } else if (this.historyIdx > 0) {
       this.historyIdx--;
     }
-    this.inputBuf = this.history[this.historyIdx];
-    this.cursorPos = this.inputBuf.length;
-    this._drawInputBox();
+    this._inputField.value = this.history[this.historyIdx];
+    this._updatePromptLabel();
+    this._updateSlashDropdown();
   }
 
   _historyDown() {
     if (this.historyIdx === -1) return;
     if (this.historyIdx < this.history.length - 1) {
       this.historyIdx++;
-      this.inputBuf = this.history[this.historyIdx];
+      this._inputField.value = this.history[this.historyIdx];
     } else {
       this.historyIdx = -1;
-      this.inputBuf = this.savedInput;
+      this._inputField.value = this.savedInput;
     }
-    this.cursorPos = this.inputBuf.length;
-    this._drawInputBox();
+    this._updatePromptLabel();
+    this._updateSlashDropdown();
   }
 
   // -------------------------------------------------------------------------
-  // Submit
+  // Submit (reads DOM input)
   // -------------------------------------------------------------------------
 
   _submitInputToWarning() {
-    this._dropdownIdx = -1;
-    this._dropdownLines = 0;
-    const text = this.inputBuf.trim();
-    this.inputBuf = '';
-    this.cursorPos = 0;
+    const text = this._inputField.value.trim();
+    this._inputField.value = '';
+    this._updatePromptLabel();
+    this._hideSlashDropdown();
 
-    if (!text) { this._drawInputBox(); return; }
+    if (!text) return;
 
     // Show submitted line in output
     const prompt = text.startsWith('/') ? 'cmd-> ' : text.startsWith('!') ? 'shell>' : 'bear> ';
@@ -1821,21 +1776,17 @@ export class BearClient {
       this._drawStatusBar();
     }, 100);
 
-    this._drawInputBox();
     this._drawStatusBar();
+    this._fullRepaint();
   }
 
   _submitInput() {
-    this._dropdownIdx = -1;
-    this._dropdownLines = 0;
-    const text = this.inputBuf.trim();
-    this.inputBuf = '';
-    this.cursorPos = 0;
+    const text = this._inputField.value.trim();
+    this._inputField.value = '';
+    this._updatePromptLabel();
+    this._hideSlashDropdown();
 
-    if (!text) {
-      this._drawInputBox();
-      return;
-    }
+    if (!text) return;
 
     // Show submitted line in output
     const prompt = text.startsWith('/') ? 'cmd-> ' : text.startsWith('!') ? 'shell>' : 'bear> ';
