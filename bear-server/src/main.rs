@@ -228,7 +228,7 @@ async fn do_relay_pair(state: &ServerState, payload: RelayPairRequest) -> anyhow
 
             let hash_hex = hex_sha256(invite_code.as_bytes());
             let room_id = Uuid::new_v4().to_string();
-            let jwt = mint_rs256_jwt(&private_key, &room_id, None)?;
+            let jwt = mint_rs256_jwt(&private_key, &room_id, Some(365 * 24 * 3600))?;
 
             let priv_pem = private_key
                 .to_pkcs8_pem(pkcs8::LineEnding::LF)
