@@ -854,8 +854,14 @@ export class BearClient {
     };
 
     this._pendingIceCandidates = [];
+    this._iceLocalCount = 0;
+    this._iceRemoteCount = 0;
     this.pc.onicecandidate = (event) => {
       if (!event.candidate) return;
+      this._iceLocalCount++;
+      const typ = event.candidate.candidate.match(/typ (\w+)/)?.[1] || '?';
+      this._pushLine(`${C.dim}  [ice] local #${this._iceLocalCount} ${typ}${C.reset}`);
+      this._fullRepaint();
       const c = {
         candidate: event.candidate.candidate,
         sdpMid: event.candidate.sdpMid,
@@ -869,7 +875,19 @@ export class BearClient {
       }
     };
 
+    this.pc.onicegatheringstatechange = () => {
+      this._pushLine(`${C.dim}  [ice] gathering: ${this.pc.iceGatheringState}${C.reset}`);
+      this._fullRepaint();
+    };
+
+    this.pc.oniceconnectionstatechange = () => {
+      this._pushLine(`${C.dim}  [ice] conn: ${this.pc.iceConnectionState}${C.reset}`);
+      this._fullRepaint();
+    };
+
     this.pc.onconnectionstatechange = () => {
+      this._pushLine(`${C.dim}  [ice] peer: ${this.pc.connectionState}${C.reset}`);
+      this._fullRepaint();
       if (this.pc.connectionState === 'failed' || this.pc.connectionState === 'disconnected') {
         this._pushLine(`${C.red}  Connection lost.${C.reset}`);
         this._stopSpinner();
@@ -986,8 +1004,13 @@ export class BearClient {
         if (!res.ok) { console.log(`[ICE] GET server candidates status=${res.status}`); return; }
         const data = await res.json();
         const cands = data.candidates || [];
-        if (cands.length > 0) console.log(`[ICE] GET ${cands.length} server candidates`);
+        if (cands.length > 0) {
+          console.log(`[ICE] GET ${cands.length} server candidates`);
+          this._pushLine(`${C.dim}  [ice] remote +${cands.length} (total ${this._iceRemoteCount + cands.length})${C.reset}`);
+          this._fullRepaint();
+        }
         for (const c of cands) {
+          this._iceRemoteCount++;
           if (typeof c === 'string') {
             console.log('[ICE] adding server candidate (string):', c);
             await this.pc.addIceCandidate(new RTCIceCandidate({ candidate: c }));
