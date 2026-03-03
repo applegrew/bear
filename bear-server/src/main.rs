@@ -98,8 +98,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Clone http_client before state is consumed by the router
+    // Clone handles before state is consumed by the router
     let shutdown_http_client = state.http_client.clone();
+    let shutdown_lsp_manager = state.lsp_manager.clone();
 
     let app = Router::new()
         .route("/sessions", get(list_sessions).post(create_session))
@@ -139,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
                 _ = sigint.recv() => {},
             }
             tracing::info!("shutting down gracefully...");
+            shutdown_lsp_manager.shutdown_all().await;
             relay::RelayController::notify_offline(&shutdown_http_client).await;
             cleanup_pid_file();
         });

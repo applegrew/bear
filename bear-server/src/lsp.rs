@@ -93,8 +93,7 @@ struct JsonRpcError {
 // ---------------------------------------------------------------------------
 
 struct LspClient {
-    #[allow(dead_code)]
-    child: Child,
+    child: Mutex<Option<Child>>,
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
     next_id: Arc<Mutex<u64>>,
     /// Pending request responses: id -> oneshot sender
@@ -155,7 +154,7 @@ impl LspClient {
         });
 
         let client = Self {
-            child,
+            child: Mutex::new(Some(child)),
             stdin: Arc::new(Mutex::new(stdin)),
             next_id: Arc::new(Mutex::new(1)),
             pending,
@@ -307,6 +306,16 @@ impl LspClient {
             .await
             .map_err(|e| format!("Flush LSP stdin: {e}"))?;
         Ok(())
+    }
+
+    /// Send the LSP shutdown/exit sequence and kill the child process.
+    async fn shutdown(&self) {
+        // Best-effort: send LSP shutdown request, then exit notification.
+        let _ = self.send_request("shutdown", None).await;
+        let _ = self.send_notification("exit", None).await;
+        if let Some(mut child) = self.child.lock().await.take() {
+            let _ = child.kill().await;
+        }
     }
 
     /// Ensure a file is opened in the LSP server (sends didOpen if needed).
@@ -641,6 +650,15 @@ impl LspManager {
         let client = Arc::new(LspClient::spawn(&cmd, workspace_root).await?);
         servers.insert(lang_id.to_string(), client.clone());
         Ok(client)
+    }
+
+    /// Shut down all managed LSP server processes gracefully.
+    pub async fn shutdown_all(&self) {
+        let servers = self.servers.lock().await;
+        for (lang, client) in servers.iter() {
+            tracing::info!("Shutting down LSP server for {lang}");
+            client.shutdown().await;
+        }
     }
 
     // -- Public tool methods --------------------------------------------------

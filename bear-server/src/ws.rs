@@ -579,6 +579,9 @@ async fn session_worker(
                     if let Some(session) = sessions.get_mut(&session_id) {
                         if session.input_history.last().map(|s| s.as_str()) != Some(&text) {
                             session.input_history.push(text.clone());
+                            if session.input_history.len() > 500 {
+                                session.input_history.remove(0);
+                            }
                         }
                     }
                 }
@@ -625,6 +628,9 @@ async fn session_worker(
                         let entry = format!("!{command}");
                         if session.input_history.last().map(|s| s.as_str()) != Some(&entry) {
                             session.input_history.push(entry);
+                            if session.input_history.len() > 500 {
+                                session.input_history.remove(0);
+                            }
                         }
                     }
                 }

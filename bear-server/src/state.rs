@@ -14,11 +14,22 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:49321";
 // Session bus: offset-based pub-sub (Kafka-like topic per session)
 // ---------------------------------------------------------------------------
 
+/// Maximum number of messages retained in a single topic log before
+/// the oldest entries are drained. Consumer offsets are absolute so
+/// eviction is transparent to consumers — `read_from` adjusts for the
+/// base offset automatically.
+const MAX_TOPIC_LOG_SIZE: usize = 10_000;
+
 /// Append-only message log shared by all consumers of a session.
 /// The producer appends messages and notifies waiting consumers.
+/// When the log exceeds `MAX_TOPIC_LOG_SIZE`, the oldest messages are
+/// drained and `base_offset` is incremented accordingly.
 #[derive(Clone)]
 pub struct TopicLog {
     messages: Arc<tokio::sync::Mutex<Vec<ServerMessage>>>,
+    /// Number of messages that have been drained from the front of `messages`.
+    /// Consumer offsets are absolute (base_offset + vec index).
+    base_offset: Arc<tokio::sync::Mutex<usize>>,
     notify: Arc<Notify>,
 }
 
@@ -26,17 +37,26 @@ impl TopicLog {
     pub fn new() -> Self {
         Self {
             messages: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            base_offset: Arc::new(tokio::sync::Mutex::new(0)),
             notify: Arc::new(Notify::new()),
         }
     }
 
     /// Append a message and wake all waiting consumers.
     pub async fn push(&self, msg: ServerMessage) {
-        self.messages.lock().await.push(msg);
+        let mut log = self.messages.lock().await;
+        log.push(msg);
+        if log.len() > MAX_TOPIC_LOG_SIZE {
+            let drain_count = log.len() - MAX_TOPIC_LOG_SIZE;
+            log.drain(..drain_count);
+            let mut base = self.base_offset.lock().await;
+            *base += drain_count;
+        }
+        drop(log);
         self.notify.notify_waiters();
     }
 
-    /// Create a consumer starting at offset 0 (will replay all history).
+    /// Create a consumer starting at offset 0 (will replay all available history).
     pub fn consumer(&self) -> TopicConsumer {
         TopicConsumer {
             log: self.clone(),
@@ -44,18 +64,26 @@ impl TopicLog {
         }
     }
 
-    /// Read messages from `start` to current end. Returns the messages and
-    /// the new offset (end of log at time of read).
+    /// Read messages from absolute offset `start` to current end.
+    /// Returns the messages and the new absolute offset (end of log at
+    /// time of read). If `start` is behind the base offset (messages
+    /// already evicted), reading begins from the earliest available.
     async fn read_from(&self, start: usize) -> (Vec<ServerMessage>, usize) {
         let log = self.messages.lock().await;
-        let end = log.len();
-        let msgs = log[start..end].to_vec();
-        (msgs, end)
+        let base = *self.base_offset.lock().await;
+        let abs_end = base + log.len();
+        let effective_start = start.max(base);
+        let local_start = effective_start - base;
+        let local_end = log.len();
+        let msgs = log[local_start..local_end].to_vec();
+        (msgs, abs_end)
     }
 
-    /// Current length of the log.
+    /// Current absolute length of the log (base_offset + vec len).
     async fn len(&self) -> usize {
-        self.messages.lock().await.len()
+        let log = self.messages.lock().await;
+        let base = *self.base_offset.lock().await;
+        base + log.len()
     }
 }
 

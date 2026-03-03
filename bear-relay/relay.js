@@ -134,8 +134,8 @@ async function verifyJwt(authHeader, roomId) {
     if (!valid) return null;
     const payload = JSON.parse(new TextDecoder().decode(base64UrlDecode(parts[1])));
     if (payload.room_id !== roomId) return null;
-    // Reject expired tokens
-    if (payload.exp && Math.floor(Date.now() / 1000) > payload.exp) return null;
+    // Reject tokens without exp or with expired exp
+    if (!payload.exp || Math.floor(Date.now() / 1000) > payload.exp) return null;
     return payload;
   } catch {
     return null;

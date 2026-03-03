@@ -1455,40 +1455,49 @@ pub fn html_to_markdown(html: &str) -> String {
     }
 }
 
+/// Case-insensitive prefix check on a byte slice without allocating a
+/// lowercased copy of the entire input.
+fn starts_with_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.len() >= needle.len()
+        && haystack[..needle.len()]
+            .iter()
+            .zip(needle)
+            .all(|(h, n)| h.to_ascii_lowercase() == *n)
+}
+
 /// Simple HTML tag stripper — removes tags, decodes common entities, collapses whitespace.
-/// All indexing uses **byte** offsets into the lowercased string so that
-/// multi-byte UTF-8 characters (e.g. `·`) never cause a panic.
+/// All indexing uses **byte** offsets so that multi-byte UTF-8 characters
+/// (e.g. `·`) never cause a panic. Text content preserves original casing.
 pub fn strip_html_tags(html: &str) -> String {
     let mut result = String::with_capacity(html.len());
     let mut in_tag = false;
     let mut in_script = false;
     let mut in_style = false;
 
-    let lower = html.to_lowercase();
-    let bytes = lower.as_bytes();
+    let bytes = html.as_bytes();
     let len = bytes.len();
     let mut i = 0;
 
     while i < len {
-        if !in_tag && lower[i..].starts_with("<script") {
+        if !in_tag && starts_with_ignore_ascii_case(&bytes[i..], b"<script") {
             in_script = true;
             in_tag = true;
             i += 1;
             continue;
         }
-        if in_script && lower[i..].starts_with("</script>") {
+        if in_script && starts_with_ignore_ascii_case(&bytes[i..], b"</script>") {
             in_script = false;
             in_tag = false;
             i += 9;
             continue;
         }
-        if !in_tag && lower[i..].starts_with("<style") {
+        if !in_tag && starts_with_ignore_ascii_case(&bytes[i..], b"<style") {
             in_style = true;
             in_tag = true;
             i += 1;
             continue;
         }
-        if in_style && lower[i..].starts_with("</style>") {
+        if in_style && starts_with_ignore_ascii_case(&bytes[i..], b"</style>") {
             in_style = false;
             in_tag = false;
             i += 8;
@@ -1501,16 +1510,16 @@ pub fn strip_html_tags(html: &str) -> String {
 
         if bytes[i] == b'<' {
             in_tag = true;
-            let rest = &lower[i..];
-            if rest.starts_with("<br")
-                || rest.starts_with("<p ")
-                || rest.starts_with("<p>")
-                || rest.starts_with("<div")
-                || rest.starts_with("<li")
-                || rest.starts_with("<h1")
-                || rest.starts_with("<h2")
-                || rest.starts_with("<h3")
-                || rest.starts_with("<tr")
+            let rest = &bytes[i..];
+            if starts_with_ignore_ascii_case(rest, b"<br")
+                || starts_with_ignore_ascii_case(rest, b"<p ")
+                || starts_with_ignore_ascii_case(rest, b"<p>")
+                || starts_with_ignore_ascii_case(rest, b"<div")
+                || starts_with_ignore_ascii_case(rest, b"<li")
+                || starts_with_ignore_ascii_case(rest, b"<h1")
+                || starts_with_ignore_ascii_case(rest, b"<h2")
+                || starts_with_ignore_ascii_case(rest, b"<h3")
+                || starts_with_ignore_ascii_case(rest, b"<tr")
             {
                 result.push('\n');
             }
@@ -1555,7 +1564,7 @@ pub fn strip_html_tags(html: &str) -> String {
                     continue;
                 }
             }
-            if let Some(ch) = lower[i..].chars().next() {
+            if let Some(ch) = html[i..].chars().next() {
                 result.push(ch);
                 i += ch.len_utf8();
             } else {
