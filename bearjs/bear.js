@@ -335,6 +335,20 @@ function formatToolDescription(name, args) {
   }
 }
 
+/** One-line summary of a tool call for the approval picker. */
+function toolSummary(name, args) {
+  switch (name) {
+    case 'run_command': return `$ ${args.command || '(unknown)'}`;
+    case 'read_file':   return `read ${args.path || '?'}`;
+    case 'write_file':  return `write ${args.path || '?'}`;
+    case 'edit_file':   return `edit ${args.path || '?'}`;
+    case 'patch_file':  return `patch ${args.path || '?'}`;
+    case 'list_files':  return `ls ${args.path || '.'}`;
+    case 'search_text': return `grep "${args.pattern || '?'}"`;
+    default:            return name;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // BearClient class
 // ---------------------------------------------------------------------------
@@ -1225,8 +1239,8 @@ export class BearClient {
         if (this.inToolConfirm && this.toolConfirmCall && this.toolConfirmCall.id === msg.tool_call_id) {
           this.inToolConfirm = false;
           this.toolConfirmCall = null;
-          // Remove picker lines (3 options + hint)
-          this._popLines(TOOL_CONFIRM_LABELS.length + 1);
+          // Remove picker lines (summary + options + hint)
+          this._popLines(this._toolConfirmPickerLines());
           const label = msg.approved
             ? `${C.green}  ✓ Approved (by another client)${C.reset}`
             : `${C.red}  ✗ Denied (by another client)${C.reset}`;
@@ -1665,13 +1679,20 @@ export class BearClient {
     }
   }
 
-  _renderToolConfirm() {
-    const removeCount = TOOL_CONFIRM_LABELS.length + 1;
+  _toolConfirmPickerLines() {
+    return TOOL_CONFIRM_LABELS.length + 2; // summary + options + hint
+  }
 
+  _renderToolConfirm() {
     if (this.toolConfirmRendered) {
-      this._popLines(removeCount);
+      this._popLines(this._toolConfirmPickerLines());
     }
     this.toolConfirmRendered = true;
+
+    // Summary line so the command is always visible in the picker area
+    const tc = this.toolConfirmCall;
+    const summary = tc ? toolSummary(tc.name, tc.arguments || {}) : '';
+    this._pushLine(`${C.magenta}  ⚡ ${C.white}${summary}${C.reset}`);
 
     for (let i = 0; i < TOOL_CONFIRM_LABELS.length; i++) {
       const focused = i === this.toolConfirmIdx;
@@ -1697,7 +1718,7 @@ export class BearClient {
     this.toolConfirmCall = null;
 
     // Replace picker lines with result
-    this._popLines(TOOL_CONFIRM_LABELS.length + 1);
+    this._popLines(this._toolConfirmPickerLines());
 
     const always = idx === 2;
 
