@@ -1015,11 +1015,20 @@ export class BearClient {
         this._drawInputBox();
         break;
 
-      case 'session_list_result':
+      case 'session_list_result': {
         // Lobby response: populate session picker with received sessions
-        this.pickerSessions = Array.isArray(msg.sessions) ? msg.sessions : [];
-        this._showSessionPickerUI();
+        const sessions = Array.isArray(msg.sessions) ? msg.sessions : [];
+        if (sessions.length === 0) {
+          // No existing sessions — auto-create one (matches native bear behaviour)
+          this._pushLine(`${C.gray}  Creating new session…${C.reset}`);
+          this._fullRepaint();
+          this._sendJson({ type: 'session_create', cwd: null });
+        } else {
+          this.pickerSessions = sessions;
+          this._showSessionPickerUI();
+        }
         break;
+      }
 
       case 'session_created':
         // Server created and auto-bound to the new session;
