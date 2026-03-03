@@ -180,6 +180,16 @@ pub enum ClientMessage {
         plan_id: String,
         approved: bool,
     },
+    /// Request the list of available sessions (used by browser client over DataChannel).
+    SessionList,
+    /// Create a new session (used by browser client over DataChannel).
+    SessionCreate {
+        cwd: Option<String>,
+    },
+    /// Select/bind to an existing session (used by browser client over DataChannel).
+    SessionSelect {
+        session_id: Uuid,
+    },
     /// Native client tells server to (re-)read relay.json and start polling.
     RelayStart,
     /// Native client tells server to stop relay polling for this run.
@@ -294,6 +304,14 @@ pub enum ServerMessage {
         text: String,
     },
     Thinking,
+    /// Response to SessionList: list of available sessions.
+    SessionListResult {
+        sessions: Vec<SessionInfo>,
+    },
+    /// Response to SessionCreate: the newly created session.
+    SessionCreated {
+        session: SessionInfo,
+    },
     /// Relay health status broadcast to all connected clients.
     RelayStatus {
         /// One of: "connected", "backoff", "failed", "revoked", "disabled"

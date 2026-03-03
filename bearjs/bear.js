@@ -2,19 +2,13 @@
 // Bear Browser Client — OpenCode-style TUI powered by xterm.js
 // ---------------------------------------------------------------------------
 
-const DEFAULT_HOST = '127.0.0.1:49321';
-const SERVER_URL = `http://${DEFAULT_HOST}`;
-
-// Remote relay mode: set these globals (e.g. from the public server) to enable
-// signaling via the relay instead of direct HTTP to bear-server.
-// When both RELAY_URL and RELAY_ROOM are set, bear.js uses relay signaling.
+// Relay configuration: these globals must be set by the hosting page.
 // The public server proxies offer/answer via the relay's internal API;
 // bear.js obtains a short-lived client JWT from the answer for direct ICE exchange.
 const RELAY_URL = (typeof window !== 'undefined' && window.BEAR_RELAY_URL) ? window.BEAR_RELAY_URL : null;
 const RELAY_ROOM = (typeof window !== 'undefined' && window.BEAR_ROOM_ID) ? window.BEAR_ROOM_ID : null;
 const PUBLIC_URL = (typeof window !== 'undefined' && window.BEAR_PUBLIC_URL != null) ? window.BEAR_PUBLIC_URL : '';
 const HOME_URL = (typeof window !== 'undefined' && window.BEAR_HOME) ? window.BEAR_HOME : '/dashboard';
-const IS_REMOTE = !!(RELAY_URL && RELAY_ROOM);
 
 // STUN servers for NAT traversal
 const ICE_SERVERS = [
@@ -723,32 +717,28 @@ export class BearClient {
     this._pushLine('');
     this._fullRepaint();
 
-    try {
-      await fetch(SERVER_URL + '/sessions');
-    } catch {
-      this._pushLine(`${C.red}Cannot reach bear-server at ${SERVER_URL}${C.reset}`);
-      this._pushLine(`${C.red}Start it with: cargo run -p bear-server${C.reset}`);
+    if (!RELAY_URL || !RELAY_ROOM) {
+      this._pushLine(`${C.red}  Relay not configured. Set BEAR_RELAY_URL and BEAR_ROOM_ID.${C.reset}`);
       this._fullRepaint();
       return;
     }
-    await this._showSessionPicker();
+
+    this._connectRelay();
   }
 
   // -------------------------------------------------------------------------
   // Session picker
   // -------------------------------------------------------------------------
 
-  async _showSessionPicker() {
+  _showSessionPicker() {
+    // Request session list over the DataChannel; the response arrives
+    // as a session_list_result message and is handled in _handleServerMessage.
+    this._sendJson({ type: 'session_list' });
+  }
+
+  _showSessionPickerUI() {
     this.inSessionPicker = true;
     this.pickerIdx = 0;
-
-    try {
-      const res = await fetch(SERVER_URL + '/sessions');
-      const data = await res.json();
-      this.pickerSessions = data.sessions || [];
-    } catch {
-      this.pickerSessions = [];
-    }
 
     this._pushLine(`${C.bold}${C.white}  Select a session:${C.reset}`);
     this._pushLine('');
@@ -783,28 +773,19 @@ export class BearClient {
     this._fullRepaint();
   }
 
-  async _pickerSelect() {
+  _pickerSelect() {
     this.inSessionPicker = false;
     this._pushLine('');
 
     if (this.pickerIdx === 0) {
       this._pushLine(`${C.gray}  Creating new session…${C.reset}`);
       this._fullRepaint();
-      try {
-        const res = await fetch(SERVER_URL + '/sessions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cwd: null }),
-        });
-        const data = await res.json();
-        this._connectToSession(data.session.id);
-      } catch (e) {
-        this._pushLine(`${C.red}  Failed to create session: ${e.message}${C.reset}`);
-        this._fullRepaint();
-      }
+      this._sendJson({ type: 'session_create', cwd: null });
     } else {
       const session = this.pickerSessions[this.pickerIdx - 1];
-      this._connectToSession(session.id);
+      this._pushLine(`${C.gray}  Connecting to session ${session.id.substring(0, 8)}…${C.reset}`);
+      this._fullRepaint();
+      this._sendJson({ type: 'session_select', session_id: session.id });
     }
   }
 
@@ -812,8 +793,7 @@ export class BearClient {
   // WebRTC DataChannel connection
   // -------------------------------------------------------------------------
 
-  _connectToSession(sid) {
-    this.sessionId = sid;
+  _connectRelay() {
     this.inToolConfirm = false;
     this.toolConfirmCall = null;
     this.toolConfirmIdx = 0;
@@ -831,6 +811,8 @@ export class BearClient {
 
     this.dc.onopen = () => {
       this._startHeartbeat();
+      // DataChannel is open — enter lobby: request session list
+      this._showSessionPicker();
     };
 
     this.dc.onclose = () => {
@@ -872,30 +854,16 @@ export class BearClient {
 
     this.pc.onicecandidate = (event) => {
       if (event.candidate && this._connId) {
-        if (IS_REMOTE) {
-          // Remote mode: POST ICE candidates via public server proxy
-          fetch(`${PUBLIC_URL}/api/signal/${RELAY_ROOM}/ice/${this._connId}/client`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({ candidates: [{
-              candidate: event.candidate.candidate,
-              sdpMid: event.candidate.sdpMid,
-              sdpMLineIndex: event.candidate.sdpMLineIndex,
-            }] }),
-          }).catch(() => {});
-        } else {
-          // Local mode: POST ICE candidates to bear-server
-          fetch(`${SERVER_URL}/rtc/${sid}/ice/${this._connId}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              candidate: event.candidate.candidate,
-              sdp_mid: event.candidate.sdpMid,
-              sdp_mline_index: event.candidate.sdpMLineIndex,
-            }),
-          }).catch(() => {});
-        }
+        fetch(`${PUBLIC_URL}/api/signal/${RELAY_ROOM}/ice/${this._connId}/client`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ candidates: [{
+            candidate: event.candidate.candidate,
+            sdpMid: event.candidate.sdpMid,
+            sdpMLineIndex: event.candidate.sdpMLineIndex,
+          }] }),
+        }).catch(() => {});
       }
     };
 
@@ -907,42 +875,7 @@ export class BearClient {
       }
     };
 
-    this._doSignaling(sid);
-  }
-
-  async _doSignaling(sid) {
-    if (IS_REMOTE) {
-      return this._doRelaySignaling();
-    }
-    try {
-      const offer = await this.pc.createOffer();
-      await this.pc.setLocalDescription(offer);
-
-      const res = await fetch(`${SERVER_URL}/rtc/${sid}/offer`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sdp: offer.sdp }),
-      });
-
-      if (!res.ok) {
-        this._pushLine(`${C.red}  Signaling failed: ${res.status}${C.reset}`);
-        this._fullRepaint();
-        return;
-      }
-
-      const data = await res.json();
-      this._connId = data.conn_id;
-
-      await this.pc.setRemoteDescription(
-        new RTCSessionDescription({ type: 'answer', sdp: data.sdp })
-      );
-
-      await this._showSasCode();
-      this._startIcePoll(sid);
-    } catch (e) {
-      this._pushLine(`${C.red}  Signaling error: ${e.message}${C.reset}`);
-      this._fullRepaint();
-    }
+    this._doRelaySignaling();
   }
 
   async _doRelaySignaling() {
@@ -1023,28 +956,6 @@ export class BearClient {
     } catch { /* ignore */ }
   }
 
-  _startIcePoll(sid) {
-    this._stopIcePoll();
-    this._icePollTimer = setInterval(async () => {
-      if (!this._connId) return;
-      try {
-        const res = await fetch(`${SERVER_URL}/rtc/${sid}/candidates/${this._connId}`, {
-          method: 'POST',
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        for (const c of data.candidates || []) {
-          await this.pc.addIceCandidate(new RTCIceCandidate({
-            candidate: c.candidate,
-            sdpMid: c.sdp_mid || null,
-            sdpMLineIndex: c.sdp_mline_index ?? null,
-          }));
-        }
-      } catch { /* ignore */ }
-    }, 200);
-    setTimeout(() => this._stopIcePoll(), 30000);
-  }
-
   _startRelayIcePoll() {
     this._stopIcePoll();
     this._icePollTimer = setInterval(async () => {
@@ -1085,14 +996,12 @@ export class BearClient {
     this._dismissInterruptWarning();
     if (this.dc) { try { this.dc.close(); } catch {} this.dc = null; }
     if (this.pc) { try { this.pc.close(); } catch {} this.pc = null; }
-    if (this.ws) { this.ws.close(); this.ws = null; }
     this._connId = null;
     this._chunkBufs = {};
   }
 
   _isConnected() {
-    return (this.dc && this.dc.readyState === 'open') ||
-           (this.ws && this.ws.readyState === WebSocket.OPEN);
+    return this.dc && this.dc.readyState === 'open';
   }
 
   // -------------------------------------------------------------------------
@@ -1104,6 +1013,17 @@ export class BearClient {
       case 'slash_commands':
         this.slashCommands = Array.isArray(msg.commands) ? msg.commands : [];
         this._drawInputBox();
+        break;
+
+      case 'session_list_result':
+        // Lobby response: populate session picker with received sessions
+        this.pickerSessions = Array.isArray(msg.sessions) ? msg.sessions : [];
+        this._showSessionPickerUI();
+        break;
+
+      case 'session_created':
+        // Server created and auto-bound to the new session;
+        // session_info will follow from the bound relay loop.
         break;
 
       case 'session_info':
@@ -1902,20 +1822,20 @@ export class BearClient {
 
     if (text === '/end') {
       if (this._isConnected()) this._sendJson({ type: 'session_end' });
-      this._pushLine(`${C.gray}  Session ended.${C.reset}`);
-      this._cleanup();
+      this._pushLine(`${C.gray}  Session ended. Reconnecting…${C.reset}`);
       this._pushLine('');
       this._fullRepaint();
-      this._showSessionPicker();
+      // Re-establish WebRTC connection to get back to lobby
+      this._connectRelay();
       return;
     }
 
     if (text === '/exit') {
-      this._pushLine(`${C.gray}  Disconnecting. Session preserved.${C.reset}`);
-      this._cleanup();
+      this._pushLine(`${C.gray}  Disconnecting. Session preserved. Reconnecting…${C.reset}`);
       this._pushLine('');
       this._fullRepaint();
-      this._showSessionPicker();
+      // Re-establish WebRTC connection to get back to lobby
+      this._connectRelay();
       return;
     }
 
@@ -2197,10 +2117,8 @@ export class BearClient {
     const payload = JSON.stringify(obj);
     if (this.dc && this.dc.readyState === 'open') {
       this.dc.send(payload);
-    } else if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(payload);
     } else {
-      console.warn('bear: _sendJson called but no transport is open', obj);
+      console.warn('bear: _sendJson called but DataChannel is not open', obj);
     }
   }
 }

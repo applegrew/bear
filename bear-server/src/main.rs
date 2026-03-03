@@ -81,7 +81,6 @@ async fn main() -> anyhow::Result<()> {
             .timeout(std::time::Duration::from_secs(300))
             .build()
             .expect("failed to build HTTP client"),
-        rtc_peers: rtc::new_rtc_peers(),
         lsp_manager: Arc::new(lsp::LspManager::new()),
         workspace_store: Arc::new(bear_core::workspace::WorkspaceStore::new()),
         relay_controller: Arc::new(relay::RelayController::new()),
@@ -105,12 +104,6 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/sessions", get(list_sessions).post(create_session))
         .route("/ws/:session_id", get(ws_handler))
-        .route("/rtc/:session_id/offer", post(rtc::rtc_offer))
-        .route("/rtc/:session_id/ice/:conn_id", post(rtc::rtc_add_ice))
-        .route(
-            "/rtc/:session_id/candidates/:conn_id",
-            post(rtc::rtc_get_candidates),
-        )
         .route("/relay/pair", post(handle_relay_pair))
         .route("/relay/revoke", post(handle_relay_revoke))
         .with_state(state)
@@ -392,11 +385,13 @@ async fn list_sessions(State(state): State<ServerState>) -> impl IntoResponse {
     Json(SessionListResponse { sessions: items })
 }
 
-async fn create_session(
-    State(state): State<ServerState>,
-    Json(payload): Json<CreateSessionRequest>,
-) -> impl IntoResponse {
-    let cwd = payload.cwd.unwrap_or_else(|| {
+/// Create a new session and insert it into the server state. Returns the SessionInfo.
+/// Shared by the HTTP handler and the DataChannel lobby.
+pub(crate) async fn do_create_session(
+    state: &ServerState,
+    cwd: Option<String>,
+) -> bear_core::SessionInfo {
+    let cwd = cwd.unwrap_or_else(|| {
         env::current_dir()
             .ok()
             .and_then(|p| p.to_str().map(|s| s.to_string()))
@@ -452,7 +447,14 @@ async fn create_session(
 
     let info = session.info.clone();
     state.sessions.write().await.insert(info.id, session);
+    info
+}
 
+async fn create_session(
+    State(state): State<ServerState>,
+    Json(payload): Json<CreateSessionRequest>,
+) -> impl IntoResponse {
+    let info = do_create_session(&state, payload.cwd).await;
     (
         StatusCode::CREATED,
         Json(CreateSessionResponse { session: info }),

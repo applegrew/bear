@@ -981,6 +981,10 @@ async fn session_worker(
                 tracing::info!("relay: stop requested by client");
                 state.relay_controller.stop();
             }
+            // DataChannel lobby messages — handled before session binding, should not reach here
+            ClientMessage::SessionList
+            | ClientMessage::SessionCreate { .. }
+            | ClientMessage::SessionSelect { .. } => {}
         }
     }
 

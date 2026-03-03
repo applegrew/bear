@@ -375,21 +375,6 @@ async fn handle_relay_offer(
     conn_id: String,
     sdp_offer: String,
 ) {
-    // Pick the first available session to bind this connection to.
-    // In the one-server-per-account model there's typically one active session.
-    let session_info = {
-        let sessions = state.sessions.read().await;
-        sessions.values().next().map(|s| s.info.clone())
-    };
-    let Some(info) = session_info else {
-        tracing::warn!("relay: offer received but no active sessions");
-        return;
-    };
-    let session_id = info.id;
-
-    // Ensure a session worker is running (creates bus + worker on demand)
-    let _ = crate::ws::ensure_worker_running(&state, session_id).await;
-
     // Build WebRTC peer connection
     let mut media_engine = MediaEngine::default();
     if let Err(e) = media_engine.register_default_codecs() {
@@ -450,19 +435,17 @@ async fn handle_relay_offer(
         })
     }));
 
-    // When the remote peer creates a DataChannel, start relaying
+    // When the remote peer creates a DataChannel, start lobby (session-less)
     let relay_state = state.clone();
-    let relay_info = info.clone();
     let notify_conn_id = conn_id.clone();
     pc.on_data_channel(Box::new(move |dc| {
         let state = relay_state.clone();
-        let sid = session_id;
-        let info = relay_info.clone();
         let cid = notify_conn_id.clone();
         Box::pin(async move {
             tracing::info!(
-                "relay: data channel '{}' opened for session {sid}",
-                dc.label()
+                "relay: data channel '{}' opened (lobby, conn_id={})",
+                dc.label(),
+                cid,
             );
             broadcast_all_sessions(
                 &state,
@@ -472,7 +455,7 @@ async fn handle_relay_offer(
             )
             .await;
             tokio::spawn(async move {
-                crate::rtc::handle_relay_data_channel(state, sid, info, dc).await;
+                crate::rtc::handle_relay_data_channel(state, dc).await;
             });
         })
     }));
