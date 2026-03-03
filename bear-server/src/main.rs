@@ -236,7 +236,14 @@ async fn do_relay_pair(state: &ServerState, payload: RelayPairRequest) -> anyhow
                 .to_pkcs8_pem(pkcs8::LineEnding::LF)
                 .map_err(|e| anyhow::anyhow!("private key PEM export failed: {e}"))?;
 
-            Ok((pub_pem, priv_pem.to_string(), room_id, hash_hex, jwt, jwt_expires_at))
+            Ok((
+                pub_pem,
+                priv_pem.to_string(),
+                room_id,
+                hash_hex,
+                jwt,
+                jwt_expires_at,
+            ))
         })
         .await
         .map_err(|e| anyhow::anyhow!("keygen task panicked: {e}"))??;
