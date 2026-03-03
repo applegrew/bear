@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Bear Browser Client — OpenCode-style TUI powered by xterm.js
 // ---------------------------------------------------------------------------
-// version 0.1.10
+// version 0.1.11
 // Relay configuration: these globals must be set by the hosting page.
 // The public server proxies offer/answer via the relay's internal API;
 // bear.js obtains a short-lived client JWT from the answer for direct ICE exchange.
