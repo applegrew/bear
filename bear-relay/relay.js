@@ -256,7 +256,7 @@ async function handlePair(req) {
     return text("invalid JSON", 400);
   }
 
-  const { room_id, signing_key, invite_code } = body;
+  const { room_id, signing_key, invite_code, jwt_expires_at } = body;
   if (!room_id || !signing_key || !invite_code) {
     return text("missing required fields: room_id, signing_key, invite_code", 400);
   }
@@ -275,8 +275,8 @@ async function handlePair(req) {
       await tx.execute("DELETE FROM invite_codes WHERE code_hash = ?", [invite_code]);
       await tx.upsert(
         "rooms",
-        ["room_id", "signing_key", "created_at", "invite_code_hash"],
-        [room_id, signing_key, now, invite_code]
+        ["room_id", "signing_key", "created_at", "invite_code_hash", "jwt_expires_at"],
+        [room_id, signing_key, now, invite_code, jwt_expires_at ?? null]
       );
     });
   } catch (e) {
@@ -509,27 +509,28 @@ async function handleListRooms(url) {
   const limit = parseInt(url.searchParams.get("limit") ?? "100");
   const offset = parseInt(url.searchParams.get("offset") ?? "0");
   const rows = await db.query(
-    "SELECT room_id, created_at, last_poll, invite_code_hash, server_version FROM rooms ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    "SELECT room_id, created_at, last_poll, invite_code_hash, server_version, jwt_expires_at FROM rooms ORDER BY created_at DESC LIMIT ? OFFSET ?",
     [limit, offset]
   );
-  const rooms = rows.map(([room_id, created_at, last_poll, invite_code_hash, server_version]) => ({
+  const rooms = rows.map(([room_id, created_at, last_poll, invite_code_hash, server_version, jwt_expires_at]) => ({
     room_id,
     created_at,
     last_poll,
     invite_code_hash: invite_code_hash ?? null,
     server_version: server_version ?? null,
+    jwt_expires_at: jwt_expires_at ?? null,
   }));
   return json(rooms);
 }
 
 async function handleGetRoom(roomId) {
   const rows = await db.query(
-    "SELECT room_id, signing_key, created_at, last_poll, invite_code_hash, server_version FROM rooms WHERE room_id = ?",
+    "SELECT room_id, signing_key, created_at, last_poll, invite_code_hash, server_version, jwt_expires_at FROM rooms WHERE room_id = ?",
     [roomId]
   );
   if (rows.length === 0) return text("not found", 404);
-  const [rid, signing_key, created_at, last_poll, invite_code_hash, server_version] = rows[0];
-  return json({ room_id: rid, signing_key, created_at, last_poll, invite_code_hash: invite_code_hash ?? null, server_version: server_version ?? null });
+  const [rid, signing_key, created_at, last_poll, invite_code_hash, server_version, jwt_expires_at] = rows[0];
+  return json({ room_id: rid, signing_key, created_at, last_poll, invite_code_hash: invite_code_hash ?? null, server_version: server_version ?? null, jwt_expires_at: jwt_expires_at ?? null });
 }
 
 async function handleUpdateRoom(req, roomId) {

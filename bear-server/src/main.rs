@@ -215,7 +215,8 @@ async fn do_relay_pair(state: &ServerState, payload: RelayPairRequest) -> anyhow
     //      (done in spawn_blocking because RSA keygen is CPU-heavy and
     //       rsa types are not Send across await points)
     let invite_code = payload.invite_code.clone();
-    let (pub_pem, priv_pem, room_id, hash_hex, jwt) =
+    let ttl_secs: i64 = 365 * 24 * 3600;
+    let (pub_pem, priv_pem, room_id, hash_hex, jwt, jwt_expires_at) =
         tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
             let mut rng = rand::thread_rng();
             let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048)
@@ -228,13 +229,14 @@ async fn do_relay_pair(state: &ServerState, payload: RelayPairRequest) -> anyhow
 
             let hash_hex = hex_sha256(invite_code.as_bytes());
             let room_id = Uuid::new_v4().to_string();
-            let jwt = mint_rs256_jwt(&private_key, &room_id, Some(365 * 24 * 3600))?;
+            let jwt = mint_rs256_jwt(&private_key, &room_id, Some(ttl_secs))?;
+            let jwt_expires_at = chrono::Utc::now().timestamp() + ttl_secs;
 
             let priv_pem = private_key
                 .to_pkcs8_pem(pkcs8::LineEnding::LF)
                 .map_err(|e| anyhow::anyhow!("private key PEM export failed: {e}"))?;
 
-            Ok((pub_pem, priv_pem.to_string(), room_id, hash_hex, jwt))
+            Ok((pub_pem, priv_pem.to_string(), room_id, hash_hex, jwt, jwt_expires_at))
         })
         .await
         .map_err(|e| anyhow::anyhow!("keygen task panicked: {e}"))??;
@@ -261,6 +263,7 @@ async fn do_relay_pair(state: &ServerState, payload: RelayPairRequest) -> anyhow
         "room_id": room_id,
         "signing_key": pub_pem,
         "invite_code": hash_hex,
+        "jwt_expires_at": jwt_expires_at,
     });
     let resp = state
         .http_client

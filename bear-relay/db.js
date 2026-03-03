@@ -24,7 +24,8 @@ const ROOMS_TABLE_SQLITE = `
     created_at       INTEGER NOT NULL,
     last_poll        INTEGER,
     invite_code_hash TEXT,
-    server_version   TEXT
+    server_version   TEXT,
+    jwt_expires_at   INTEGER
   )
 `;
 
@@ -35,7 +36,8 @@ const ROOMS_TABLE_POSTGRES = `
     created_at       BIGINT NOT NULL,
     last_poll        BIGINT,
     invite_code_hash TEXT,
-    server_version   TEXT
+    server_version   TEXT,
+    jwt_expires_at   BIGINT
   )
 `;
 
@@ -46,7 +48,8 @@ const ROOMS_TABLE_MYSQL = `
     created_at       BIGINT NOT NULL,
     last_poll        BIGINT,
     invite_code_hash VARCHAR(255),
-    server_version   VARCHAR(64)
+    server_version   VARCHAR(64),
+    jwt_expires_at   BIGINT
   )
 `;
 
