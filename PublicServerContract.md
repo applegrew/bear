@@ -110,7 +110,7 @@ MIIBIjANBgkqhki...
 <script src="/bear.js"></script>
 ```
 
-When `BEAR_RELAY_URL` and `BEAR_ROOM_ID` are both set, `bear.js` automatically switches to relay signaling mode.
+`bear.js` requires `BEAR_RELAY_URL` and `BEAR_ROOM_ID` to connect — it uses relay signaling exclusively.
 
 ### 6. Map rooms to users
 

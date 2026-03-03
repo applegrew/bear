@@ -161,7 +161,7 @@ BEAR_LLM_PROVIDER=gemini BEAR_GEMINI_API_KEY=AIza... cargo run -p bear-server
 
 ## Browser client
 
-Open `html/index.html` in a browser to use the xterm.js-based terminal client (`bearjs/bear.js`). It connects to `bear-server` via WebRTC DataChannels with HTTP signaling, enabling NAT traversal.
+Open `html/index.html` in a browser to use the xterm.js-based terminal client (`bearjs/bear.js`). It connects to `bear-server` via WebRTC DataChannels — signaling is proxied through the relay, enabling NAT traversal.
 
 ## Remote access (relay)
 
@@ -309,7 +309,7 @@ bear/
 ├── bear-server/    # Server: session management, LLM, tools, LSP, WebRTC, relay polling
 ├── bear/           # Native terminal client (crossterm TUI)
 ├── bear-relay/     # Relay server (Deno + SQLite, Dockerized)
-├── bearjs/         # Browser client (xterm.js TUI, dual-mode signaling)
+├── bearjs/         # Browser client (xterm.js TUI, relay signaling)
 └── html/           # Browser client HTML entry point
 ```
 
