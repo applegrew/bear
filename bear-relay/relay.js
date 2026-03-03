@@ -16,6 +16,7 @@ const SIGNALING_TTL_MS = 60_000; // 60s for offers/answers/ICE
 const ROOM_PRUNE_DAYS = 30;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_FAILURES = 5;
+const TRUST_PROXY = Deno.env.get("TRUST_PROXY") === "true";
 
 // ---------------------------------------------------------------------------
 // Database setup (initialized at startup)
@@ -165,8 +166,11 @@ function text(msg, status = 200) {
 }
 
 function getIp(req, connInfo) {
-  return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
-    connInfo?.remoteAddr?.hostname ?? "unknown";
+  if (TRUST_PROXY) {
+    const xff = req.headers.get("x-forwarded-for");
+    if (xff) return xff.split(",")[0].trim();
+  }
+  return connInfo?.remoteAddr?.hostname ?? "unknown";
 }
 
 // ---------------------------------------------------------------------------
@@ -627,6 +631,7 @@ async function handleExternal(req, connInfo) {
 
   switch (route.handler) {
     case "pair":
+      if (!checkRateLimit(ip)) return text("rate limited", 429);
       return handlePair(req);
     case "revoke":
       return handleRevoke(req, route.roomId, ip);

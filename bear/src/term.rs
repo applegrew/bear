@@ -1057,6 +1057,8 @@ impl TermState {
 
     fn draw_input_box(&mut self) {
         let mut out = io::stdout();
+        // Hide cursor during intermediate draws to prevent flicker (M5)
+        let _ = execute!(out, cursor::Hide);
         let width = self.term_width as usize;
         let input_row = self.term_height.saturating_sub(BOTTOM_RESERVE);
         let border_w = width.saturating_sub(2);
@@ -1092,12 +1094,26 @@ impl TermState {
         let inner_w = width.saturating_sub(4);
         let prompt_len = 6usize;
         let text_space = inner_w.saturating_sub(prompt_len);
-        let display_text = if self.input_buf.len() > text_space {
-            &self.input_buf[self.input_buf.len() - text_space..]
+
+        // Compute a scroll window that keeps the cursor visible (M4).
+        // `scroll_start` is the char offset into input_buf where the visible
+        // portion begins.  We work in chars to handle multi-byte correctly.
+        let char_count = self.input_buf.chars().count();
+        let cursor_char = self.cursor_pos.min(char_count);
+        let scroll_start = if cursor_char < text_space {
+            0
         } else {
-            &self.input_buf
+            cursor_char - text_space + 1
         };
-        let padding = inner_w.saturating_sub(prompt_len + display_text.len());
+        let visible_chars: String = self
+            .input_buf
+            .chars()
+            .skip(scroll_start)
+            .take(text_space)
+            .collect();
+        let display_text = &visible_chars;
+        let visible_char_count = visible_chars.chars().count();
+        let padding = inner_w.saturating_sub(prompt_len + visible_char_count);
 
         let _ = execute!(
             out,
@@ -1130,25 +1146,19 @@ impl TermState {
             ResetColor,
         );
 
-        // Cursor
-        let cursor_col = 2 + prompt_len + self.cursor_pos.min(text_space);
+        // If dropdown was previously shown, redraw the output area to restore those rows
+        if self.last_dropdown_count > 0 {
+            self.last_dropdown_count = 0;
+            self.draw_output_area();
+        }
+
+        // Cursor position: account for scroll offset (M4)
+        let cursor_col = 2 + prompt_len + (cursor_char - scroll_start).min(text_space);
         let _ = execute!(
             out,
             cursor::MoveTo(cursor_col as u16, input_row + 1),
             cursor::Show
         );
-
-        // If dropdown was previously shown, redraw the output area to restore those rows
-        if self.last_dropdown_count > 0 {
-            self.last_dropdown_count = 0;
-            self.draw_output_area();
-            // Re-position cursor after output redraw
-            let _ = execute!(
-                out,
-                cursor::MoveTo(cursor_col as u16, input_row + 1),
-                cursor::Show
-            );
-        }
 
         // Dropdown above input box
         if self.input_buf.starts_with('/') {

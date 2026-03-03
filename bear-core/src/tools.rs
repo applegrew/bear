@@ -256,6 +256,19 @@ async fn execute_tool_inner(
                 Ok(p) => p,
                 Err(e) => return e,
             };
+            const MAX_READ_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+            match tokio::fs::metadata(&full_path).await {
+                Ok(meta) if meta.len() > MAX_READ_SIZE => {
+                    return format!(
+                        "Error: file is {} bytes ({:.1} MB) which exceeds the 10 MB limit. \
+                         Use run_command with head/tail to read portions of large files.",
+                        meta.len(),
+                        meta.len() as f64 / (1024.0 * 1024.0),
+                    );
+                }
+                Err(err) => return format!("Error reading {full_path}: {err}"),
+                _ => {}
+            }
             match tokio::fs::read_to_string(&full_path).await {
                 Ok(content) => content,
                 Err(err) => format!("Error reading {full_path}: {err}"),
