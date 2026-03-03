@@ -151,13 +151,17 @@ ICE candidates are consumed on read (`GET` clears returned candidates).
   - returns `{ conn_id }`
 - `GET /internal/room/:room_id/answer/:conn_id`
   - returns `204` when pending, else `{ sdp }` + passthrough metadata (`client_jwt`, `offer_hash`, `signature`) when present
+- `POST /internal/room/:room_id/ice/:conn_id/:side`
+  - accepts `{ "candidates": [...] }` — stores ICE candidates for the given side (`server` or `client`)
+- `GET /internal/room/:room_id/ice/:conn_id/:side`
+  - returns `{ "candidates": [...] }` — consumes (deletes) returned candidates on read
 
 ### Public server expectations
 
 - Authenticate browser users via session cookies.
-- Proxy offer/answer signaling through the internal API routes above.
+- Proxy all signaling (offer, answer, ICE) through the internal API routes above.
 - Preserve relay payload fields unchanged (do not strip/rename signaling metadata).
-- Provide `BEAR_RELAY_URL`, `BEAR_ROOM_ID`, `BEAR_PUBLIC_URL`, and `BEAR_ROOM_KEY` to `bear.js`.
+- Provide `BEAR_ROOM_ID`, `BEAR_PUBLIC_URL`, and `BEAR_ROOM_KEY` as JavaScript globals for `bear.js`.
 - Use `invite_code_hash` on rooms (via `GET /internal/rooms` or `GET /internal/room/:room_id`) to map rooms to users. Optionally clear it via `PATCH /internal/room/:room_id` with `{ "invite_code_hash": null }` after mapping is established.
 
 ## Podman build

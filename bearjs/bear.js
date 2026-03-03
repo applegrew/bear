@@ -5,7 +5,6 @@
 // Relay configuration: these globals must be set by the hosting page.
 // bear.js communicates exclusively via the public server, which proxies
 // all signaling (offer, answer, ICE) to the relay on behalf of the browser.
-const RELAY_URL = (typeof window !== 'undefined' && window.BEAR_RELAY_URL) ? window.BEAR_RELAY_URL : null;
 const RELAY_ROOM = (typeof window !== 'undefined' && window.BEAR_ROOM_ID) ? window.BEAR_ROOM_ID : null;
 const PUBLIC_URL = (typeof window !== 'undefined' && window.BEAR_PUBLIC_URL != null) ? window.BEAR_PUBLIC_URL : '';
 const HOME_URL = (typeof window !== 'undefined' && window.BEAR_HOME) ? window.BEAR_HOME : '/dashboard';
@@ -717,8 +716,8 @@ export class BearClient {
     this._pushLine('');
     this._fullRepaint();
 
-    if (!RELAY_URL || !RELAY_ROOM) {
-      this._pushLine(`${C.red}  Relay not configured. Set BEAR_RELAY_URL and BEAR_ROOM_ID.${C.reset}`);
+    if (!RELAY_ROOM) {
+      this._pushLine(`${C.red}  Relay not configured. Set BEAR_ROOM_ID.${C.reset}`);
       this._fullRepaint();
       return;
     }
