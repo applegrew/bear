@@ -76,6 +76,18 @@ Response:  204 (pending) or 200:
 
 **Critical:** All metadata fields (`offer_hash_enc`, `offer_hash`, `signature`, `client_jwt`) must be passed through **unchanged**. Do not strip, rename, or transform any fields in either direction.
 
+#### TURN credentials (browser → relay)
+
+```
+Browser:   GET <public_server>/api/signal/turn-credentials
+
+Public Server → GET <relay_internal>/internal/turn-credentials
+
+Response:  { "turn_servers": [{ "urls": [...], "username": "...", "credential": "..." }] }
+```
+
+`bear.js` calls this endpoint before creating the `RTCPeerConnection` so that TURN relay candidates are available from the start. This is **required** for connectivity on mobile networks behind symmetric NATs.
+
 ### 4. Expose room public key to browser
 
 Fetch the room's RSA public key from the relay and inject it as a JavaScript global so `bear.js` can verify answer signatures:
@@ -96,7 +108,7 @@ When serving the browser client, inject the following JavaScript globals before 
 | `BEAR_ROOM_ID` | `string` | Room UUID for this user's paired `bear-server` |
 | `BEAR_PUBLIC_URL` | `string` | Public server origin for signaling proxy (empty string if same-origin) |
 | `BEAR_ROOM_KEY` | `string` | RSA public key PEM (`signing_key` from relay) for signature verification |
-| `BEAR_ICE_SERVERS` | `array` | *(optional)* TURN server credentials from relay's `/internal/turn-credentials` endpoint. Array of `{ urls, username, credential }` objects. Omit or set to `[]` if TURN is not configured. |
+| `BEAR_ICE_SERVERS` | `array` | *(optional, legacy)* Pre-injected TURN server credentials. `bear.js` now fetches credentials dynamically via `GET /api/signal/turn-credentials` before each connection, so this global is only used as a fallback. Omit or set to `[]` if not needed. |
 
 To fetch TURN credentials, call the relay's internal API when rendering the page:
 
@@ -172,10 +184,12 @@ When a TURN server is deployed alongside the relay (see `bear-turn/`), the relay
 This ensures the browser's `RTCPeerConnection` is created with TURN server configuration from the start, enabling connectivity on devices behind symmetric NATs.
 
 The credential flow:
-1. Public server calls `GET /internal/turn-credentials` → receives `{ turn_servers: [...] }`
-2. Injects the array as `window.BEAR_ICE_SERVERS` in the page
-3. `bear.js` merges these with STUN defaults when creating the peer connection
+1. `bear.js` calls `GET /api/signal/turn-credentials` before creating the `RTCPeerConnection`
+2. Public server proxies to `GET /internal/turn-credentials` → receives `{ turn_servers: [...] }`
+3. `bear.js` merges the returned TURN servers with STUN defaults when creating the peer connection
 4. The TURN server validates credentials using the same shared secret
+
+As a legacy fallback, the public server can also inject credentials as `window.BEAR_ICE_SERVERS` at page load time. `bear.js` will use whichever source provides TURN servers.
 
 Credentials are time-windowed: `username = expiry_unix_timestamp`, `credential = base64(HMAC-SHA1(secret, username))`. Default TTL: 24 hours.
 

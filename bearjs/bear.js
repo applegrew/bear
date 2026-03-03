@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Bear Browser Client — OpenCode-style TUI powered by xterm.js
 // ---------------------------------------------------------------------------
-const BEAR_VERSION = '0.2.1';
+const BEAR_VERSION = '0.2.1.1';
 // Relay configuration: these globals must be set by the hosting page.
 // bear.js communicates exclusively via the public server, which proxies
 // all signaling (offer, answer, ICE) to the relay on behalf of the browser.
@@ -9,14 +9,15 @@ const RELAY_ROOM = (typeof window !== 'undefined' && window.BEAR_ROOM_ID) ? wind
 const PUBLIC_URL = (typeof window !== 'undefined' && window.BEAR_PUBLIC_URL != null) ? window.BEAR_PUBLIC_URL : '';
 const HOME_URL = (typeof window !== 'undefined' && window.BEAR_HOME) ? window.BEAR_HOME : '/dashboard';
 
-// ICE servers: STUN defaults + optional TURN servers injected by the hosting page
-// The public server sets window.BEAR_ICE_SERVERS (array of {urls, username, credential})
-// by fetching credentials from the relay's /internal/turn-credentials endpoint.
-const ICE_SERVERS = [
+// ICE servers: STUN defaults. TURN servers are fetched dynamically before each
+// connection via GET /api/signal/turn-credentials. The legacy BEAR_ICE_SERVERS
+// global is used as a fallback if the dynamic fetch fails.
+const ICE_STUN = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  ...((typeof window !== 'undefined' && Array.isArray(window.BEAR_ICE_SERVERS)) ? window.BEAR_ICE_SERVERS : []),
 ];
+const ICE_FALLBACK_TURN = (typeof window !== 'undefined' && Array.isArray(window.BEAR_ICE_SERVERS))
+  ? window.BEAR_ICE_SERVERS : [];
 
 // ANSI color helpers (Tokyo Night palette)
 const C = {
@@ -768,10 +769,41 @@ export class BearClient {
   }
 
   // -------------------------------------------------------------------------
+  // ICE server configuration (STUN + dynamic TURN fetch)
+  // -------------------------------------------------------------------------
+
+  async _buildIceServers() {
+    const stun = [...ICE_STUN];
+    let turn = [];
+    try {
+      const res = await fetch(`${PUBLIC_URL}/api/signal/turn-credentials`, {
+        credentials: 'same-origin',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.turn_servers) && data.turn_servers.length > 0) {
+          turn = data.turn_servers;
+        }
+      }
+    } catch (_) {
+      // Fetch failed — fall through to fallback
+    }
+    if (turn.length === 0 && ICE_FALLBACK_TURN.length > 0) {
+      turn = ICE_FALLBACK_TURN;
+    }
+    if (turn.length > 0) {
+      console.log(`[bear] TURN servers: ${turn.map(t => t.urls).flat().join(', ')}`);
+    } else {
+      console.warn('[bear] No TURN servers available — mobile/symmetric NAT connections may fail');
+    }
+    return [...stun, ...turn];
+  }
+
+  // -------------------------------------------------------------------------
   // WebRTC DataChannel connection
   // -------------------------------------------------------------------------
 
-  _connectRelay() {
+  async _connectRelay() {
     this.inToolConfirm = false;
     this.toolConfirmCall = null;
     this.inSessionPicker = false;
@@ -784,7 +816,10 @@ export class BearClient {
     this._pushLine(`${C.gray}  Connecting via WebRTC…${C.reset}`);
     this._fullRepaint();
 
-    this.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    // Fetch TURN credentials dynamically; fall back to page-injected globals
+    const iceServers = await this._buildIceServers();
+
+    this.pc = new RTCPeerConnection({ iceServers });
     this.dc = this.pc.createDataChannel('bear', { ordered: true });
 
     this.dc.onopen = () => {
