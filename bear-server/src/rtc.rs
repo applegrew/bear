@@ -28,19 +28,13 @@ use crate::ws::{ensure_worker_running, slash_command_infos};
 /// Starts in "lobby" state — no session is bound yet. The client must
 /// send SessionList / SessionCreate / SessionSelect messages to pick a
 /// session before normal relay begins.
-pub async fn handle_relay_data_channel(
-    state: ServerState,
-    dc: Arc<RTCDataChannel>,
-) {
+pub async fn handle_relay_data_channel(state: ServerState, dc: Arc<RTCDataChannel>) {
     handle_data_channel_lobby(state, dc).await;
 }
 
 /// Lobby state: DataChannel is open but not bound to any session.
 /// Handles session management messages, then transitions to the bound relay loop.
-async fn handle_data_channel_lobby(
-    state: ServerState,
-    dc: Arc<RTCDataChannel>,
-) {
+async fn handle_data_channel_lobby(state: ServerState, dc: Arc<RTCDataChannel>) {
     // Send slash commands immediately (available before session binding)
     let _ = dc_send_msg(
         &dc,
