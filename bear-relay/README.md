@@ -155,13 +155,16 @@ ICE candidates are consumed on read (`GET` clears returned candidates).
   - accepts `{ "candidates": [...] }` — stores ICE candidates for the given side (`server` or `client`)
 - `GET /internal/room/:room_id/ice/:conn_id/:side`
   - returns `{ "candidates": [...] }` — consumes (deletes) returned candidates on read
+- `GET /internal/turn-credentials`
+  - returns `{ "turn_servers": [{ "urls": [...], "username": "...", "credential": "..." }] }` or `{ "turn_servers": [] }` if TURN is not configured
 
 ### Public server expectations
 
 - Authenticate browser users via session cookies.
 - Proxy all signaling (offer, answer, ICE) through the internal API routes above.
 - Preserve relay payload fields unchanged (do not strip/rename signaling metadata).
-- Provide `BEAR_ROOM_ID`, `BEAR_PUBLIC_URL`, and `BEAR_ROOM_KEY` as JavaScript globals for `bear.js`.
+- Provide `BEAR_ROOM_ID`, `BEAR_PUBLIC_URL`, `BEAR_ROOM_KEY`, and optionally `BEAR_ICE_SERVERS` as JavaScript globals for `bear.js`.
+- Fetch TURN credentials via `GET /internal/turn-credentials` and inject them as `BEAR_ICE_SERVERS` when rendering the page.
 - Use `invite_code_hash` on rooms (via `GET /internal/rooms` or `GET /internal/room/:room_id`) to map rooms to users. Optionally clear it via `PATCH /internal/room/:room_id` with `{ "invite_code_hash": null }` after mapping is established.
 
 ## Podman build
@@ -212,6 +215,27 @@ podman run --rm \
   -e DATABASE_URL=mysql://user:pass@db-host:3306/bear_relay \
   localhost/bear-relay:latest
 ```
+
+## TURN server integration
+
+The relay can mint time-windowed TURN credentials when deployed alongside a TURN server (e.g. [turn-rs](https://github.com/mycrl/turn-rs)). Both services share a secret for HMAC-SHA1 credential validation.
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `TURN_SECRET` | *(empty — disabled)* | Shared HMAC secret. Must match the TURN server's `static-auth-secret`. |
+| `TURN_URLS` | *(empty)* | Comma-separated TURN URLs, e.g. `turn:turn.example.com:3478,turns:turn.example.com:5349` |
+| `TURN_REALM` | `bear` | TURN realm (informational only — not used in credential generation) |
+| `TURN_CREDENTIAL_TTL` | `86400` | Credential lifetime in seconds (default: 24 hours) |
+
+When `TURN_SECRET` and `TURN_URLS` are both set, the relay:
+- Includes `turn_servers` in GET offer responses (consumed by `bear-server`)
+- Exposes `GET /internal/turn-credentials` for the public server to fetch credentials for page injection
+
+Credential format: `username = expiry_unix_timestamp`, `credential = base64(HMAC-SHA1(TURN_SECRET, username))`.
+
+See `bear-turn/README.md` for TURN server deployment.
 
 ## Operational notes
 

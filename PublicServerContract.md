@@ -96,6 +96,14 @@ When serving the browser client, inject the following JavaScript globals before 
 | `BEAR_ROOM_ID` | `string` | Room UUID for this user's paired `bear-server` |
 | `BEAR_PUBLIC_URL` | `string` | Public server origin for signaling proxy (empty string if same-origin) |
 | `BEAR_ROOM_KEY` | `string` | RSA public key PEM (`signing_key` from relay) for signature verification |
+| `BEAR_ICE_SERVERS` | `array` | *(optional)* TURN server credentials from relay's `/internal/turn-credentials` endpoint. Array of `{ urls, username, credential }` objects. Omit or set to `[]` if TURN is not configured. |
+
+To fetch TURN credentials, call the relay's internal API when rendering the page:
+
+```
+GET <relay_internal>/internal/turn-credentials
+→ { "turn_servers": [{ "urls": ["turn:...", "turns:..."], "username": "...", "credential": "..." }] }
+```
 
 Example injection:
 
@@ -106,6 +114,8 @@ Example injection:
   const BEAR_ROOM_KEY = `-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhki...
 -----END PUBLIC KEY-----`;
+  // Optional — omit if TURN is not configured
+  const BEAR_ICE_SERVERS = [{"urls":["turn:turn.example.com:3478","turns:turn.example.com:5349"],"username":"1741024800","credential":"base64hmac..."}];
 </script>
 <script src="/bear.js"></script>
 ```
@@ -151,8 +161,37 @@ The `PATCH` endpoint accepts a JSON body with updatable fields. Currently the on
 | `GET` | `/internal/room/:room_id/answer/:conn_id` | Proxy answer poll |
 | `POST` | `/internal/room/:room_id/ice/:conn_id/client` | Proxy browser ICE candidates |
 | `GET` | `/internal/room/:room_id/ice/:conn_id/server` | Proxy server ICE candidates to browser |
+| `GET` | `/internal/turn-credentials` | Fetch TURN server credentials for page injection |
 
 All internal endpoints run on the relay's `INTERNAL_PORT` (default `8081`) and require **no authentication**. The internal port must only be accessible from the public server's network — never exposed to the internet.
+
+## TURN server integration
+
+When a TURN server is deployed alongside the relay (see `bear-turn/`), the relay mints time-windowed HMAC-SHA1 credentials using a shared secret (`TURN_SECRET`). The public server fetches these credentials when rendering the `bear.js` page and injects them as the `BEAR_ICE_SERVERS` global.
+
+This ensures the browser's `RTCPeerConnection` is created with TURN server configuration from the start, enabling connectivity on devices behind symmetric NATs.
+
+The credential flow:
+1. Public server calls `GET /internal/turn-credentials` → receives `{ turn_servers: [...] }`
+2. Injects the array as `window.BEAR_ICE_SERVERS` in the page
+3. `bear.js` merges these with STUN defaults when creating the peer connection
+4. The TURN server validates credentials using the same shared secret
+
+Credentials are time-windowed: `username = expiry_unix_timestamp`, `credential = base64(HMAC-SHA1(secret, username))`. Default TTL: 24 hours.
+
+If TURN is not configured on the relay, `/internal/turn-credentials` returns `{ "turn_servers": [] }` and the public server can omit `BEAR_ICE_SERVERS` from the page.
+
+### Deployment recommendation
+
+The TURN server (`turn-rs`) uses non-standard ports by default — UDP/TCP 3478 and TLS 5349 — which do not conflict with ports 80/443 used by the public server and relay. This means the TURN server can share the same IP address and hostname as the public server without requiring a separate external IP or DNS entry. Configure `TURN_URLS` using the shared hostname with the appropriate ports, e.g.:
+
+```
+TURN_URLS=turn:bear.example.com:3478,turns:bear.example.com:5349
+```
+
+Ensure the TURN ports (3478 UDP+TCP, 5349 TCP) and the relay port range (default 49152–65535 UDP) are open in your firewall/security group.
+
+> **Note:** Some restrictive networks (corporate firewalls, hotel Wi-Fi) block all traffic except ports 80 and 443. Running TURNS on port 443 helps in those environments but requires a dedicated IP or hostname (since 443 is typically used by the public server's HTTPS). For most networks, including mobile, non-standard ports work fine.
 
 ## Signaling integrity
 

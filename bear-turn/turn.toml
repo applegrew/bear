@@ -1,0 +1,48 @@
+# bear-turn — turn-rs configuration
+#
+# This is an example configuration for the turn-rs TURN server.
+# See https://github.com/mycrl/turn-rs for full documentation.
+#
+# The TURN server shares a secret with bear-relay for time-windowed
+# HMAC-SHA1 credential validation (TURN REST API / RFC 5389 §10.2).
+
+[server]
+realm = "bear"
+port-range = { min = 49152, max = 65535 }
+
+[auth]
+# Shared secret for TURN REST API authentication.
+# Must match the TURN_SECRET configured in bear-relay.
+# Override at runtime via the config file or Docker env substitution.
+static-auth-secret = "CHANGE_ME_TO_A_SECURE_SECRET"
+
+[log]
+level = "info"
+stdout = true
+
+# ---------------------------------------------------------------------------
+# Interfaces — uncomment and configure for your deployment
+# ---------------------------------------------------------------------------
+
+# UDP listener (standard TURN, port 3478)
+[[server.interfaces]]
+transport = "udp"
+listen = "0.0.0.0:3478"
+# Replace with your server's public IP
+external = "0.0.0.0:3478"
+
+# TCP listener (TURN over TCP, port 3478)
+[[server.interfaces]]
+transport = "tcp"
+listen = "0.0.0.0:3478"
+external = "0.0.0.0:3478"
+
+# TLS listener (TURNS, port 5349) — uncomment when TLS certs are available
+# [[server.interfaces]]
+# transport = "tcp"
+# listen = "0.0.0.0:5349"
+# external = "0.0.0.0:5349"
+#
+# [server.interfaces.ssl]
+# private-key = "/etc/turn/key.pem"
+# certificate-chain = "/etc/turn/cert.pem"

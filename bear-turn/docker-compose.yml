@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  bear-turn:
+    build: .
+    ports:
+      - "3478:3478/udp"   # TURN over UDP
+      - "3478:3478/tcp"   # TURN over TCP
+      - "5349:5349/tcp"   # TURNS (TLS) — requires certs
+    volumes:
+      - ./turn.toml:/etc/turn/turn.toml:ro
+      # Uncomment to mount TLS certificates for TURNS
+      # - /path/to/certs:/etc/turn/certs:ro
+    restart: unless-stopped

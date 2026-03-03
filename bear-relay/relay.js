@@ -17,6 +17,10 @@ const ROOM_PRUNE_DAYS = 30;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_FAILURES = 5;
 const TRUST_PROXY = Deno.env.get("TRUST_PROXY") === "true";
+const TURN_SECRET = Deno.env.get("TURN_SECRET") || "";
+const TURN_URLS = (Deno.env.get("TURN_URLS") || Deno.env.get("TURN_URL") || "").split(",").map(u => u.trim()).filter(Boolean);
+const TURN_REALM = Deno.env.get("TURN_REALM") || "bear";
+const TURN_CREDENTIAL_TTL = parseInt(Deno.env.get("TURN_CREDENTIAL_TTL") ?? "86400"); // 24h default
 
 // ---------------------------------------------------------------------------
 // Database setup (initialized at startup)
@@ -34,6 +38,31 @@ const offers = new Map();
 const answers = new Map();
 // ice: Map<`${conn_id}:${side}`, Array<{ candidate, created_at }>>
 const ice = new Map();
+
+// ---------------------------------------------------------------------------
+// TURN credential minting (RFC 5389 long-term credentials)
+// ---------------------------------------------------------------------------
+
+async function generateTurnCredentials(ttlSeconds) {
+  if (!TURN_SECRET || TURN_URLS.length === 0) return null;
+  const expiry = Math.floor(Date.now() / 1000) + ttlSeconds;
+  const username = String(expiry);
+  // HMAC-SHA1 of username with shared secret (matches turn crate LongTermAuthHandler)
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(TURN_SECRET),
+    { name: "HMAC", hash: "SHA-1" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(username));
+  const credential = btoa(String.fromCharCode(...new Uint8Array(sig)));
+  return {
+    urls: TURN_URLS,
+    username,
+    credential,
+  };
+}
 
 let connIdCounter = 0;
 function nextConnId() {
@@ -213,6 +242,7 @@ function matchRoute(method, pathname) {
 
 function matchInternalRoute(method, pathname) {
   if (method === "GET" && pathname === "/internal/health") return { handler: "health" };
+  if (method === "GET" && pathname === "/internal/turn-credentials") return { handler: "turnCredentials" };
   if (method === "GET" && pathname === "/internal/rooms") return { handler: "listRooms" };
   if (method === "GET" && pathname === "/internal/invites") return { handler: "listInvites" };
   if (method === "POST" && pathname === "/internal/invites") return { handler: "pushInvites" };
@@ -391,7 +421,11 @@ async function handleGetOffer(req, roomId, ip) {
   const offer = validOffers.shift();
   offers.set(roomId, validOffers);
 
-  return new Response(JSON.stringify({ conn_id: offer.conn_id, sdp: offer.sdp }), {
+  const offerResult = { conn_id: offer.conn_id, sdp: offer.sdp };
+  const turnCreds = await generateTurnCredentials(TURN_CREDENTIAL_TTL);
+  if (turnCreds) offerResult.turn_servers = [turnCreds];
+
+  return new Response(JSON.stringify(offerResult), {
     status: 200,
     headers: {
       "Content-Type": "application/json",
@@ -418,7 +452,7 @@ async function handlePostAnswer(req, roomId, connId, ip) {
     return text("invalid JSON", 400);
   }
 
-  answers.set(connId, { sdp: body.sdp, client_jwt: body.client_jwt || null, created_at: Date.now() });
+  answers.set(connId, { sdp: body.sdp, client_jwt: body.client_jwt || null, offer_hash: body.offer_hash || null, signature: body.signature || null, created_at: Date.now() });
   return json({ ok: true });
 }
 
@@ -440,6 +474,10 @@ async function handleGetAnswer(req, roomId, connId, ip) {
   answers.delete(connId);
   const result = { sdp: ans.sdp };
   if (ans.client_jwt) result.client_jwt = ans.client_jwt;
+  if (ans.offer_hash) result.offer_hash = ans.offer_hash;
+  if (ans.signature) result.signature = ans.signature;
+  const turnCreds = await generateTurnCredentials(TURN_CREDENTIAL_TTL);
+  if (turnCreds) result.turn_servers = [turnCreds];
   return json(result);
 }
 
@@ -668,6 +706,8 @@ async function handleInternal(req) {
   switch (route.handler) {
     case "health":
       return handleHealth();
+    case "turnCredentials":
+      return handleTurnCredentials();
     case "listRooms":
       return handleListRooms(url);
     case "getRoom":
@@ -726,7 +766,14 @@ async function handleInternalGetAnswer(roomId, connId) {
   answers.delete(connId);
   const result = { sdp: ans.sdp };
   if (ans.client_jwt) result.client_jwt = ans.client_jwt;
+  if (ans.offer_hash) result.offer_hash = ans.offer_hash;
+  if (ans.signature) result.signature = ans.signature;
   return json(result);
+}
+
+async function handleTurnCredentials() {
+  const turnCreds = await generateTurnCredentials(TURN_CREDENTIAL_TTL);
+  return json({ turn_servers: turnCreds ? [turnCreds] : [] });
 }
 
 async function handleInternalPostIce(req, roomId, connId, side) {

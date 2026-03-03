@@ -211,6 +211,7 @@ async fn relay_poll_loop(state: ServerState, mut cmd_rx: watch::Receiver<bool>) 
                         if let Ok(body) = resp.json::<serde_json::Value>().await {
                             let conn_id = body["conn_id"].as_str().unwrap_or_default().to_string();
                             let sdp = body["sdp"].as_str().unwrap_or_default().to_string();
+                            let turn_servers = body["turn_servers"].as_array().cloned().unwrap_or_default();
 
                             if !conn_id.is_empty() && !sdp.is_empty() {
                                 tracing::info!("relay: received offer conn_id={conn_id}");
@@ -219,6 +220,7 @@ async fn relay_poll_loop(state: ServerState, mut cmd_rx: watch::Receiver<bool>) 
                                     relay_cfg.clone(),
                                     conn_id,
                                     sdp,
+                                    turn_servers,
                                 ));
                             }
                         }
@@ -374,6 +376,7 @@ async fn handle_relay_offer(
     relay_cfg: RelayConfig,
     conn_id: String,
     sdp_offer: String,
+    turn_servers: Vec<serde_json::Value>,
 ) {
     // Build WebRTC peer connection
     let mut media_engine = MediaEngine::default();
@@ -396,14 +399,40 @@ async fn handle_relay_offer(
         .with_interceptor_registry(registry)
         .build();
 
-    let config = RTCConfiguration {
-        ice_servers: vec![RTCIceServer {
-            urls: vec![
-                "stun:stun.l.google.com:19302".to_string(),
-                "stun:stun1.l.google.com:19302".to_string(),
-            ],
+    let mut ice_servers = vec![RTCIceServer {
+        urls: vec![
+            "stun:stun.l.google.com:19302".to_string(),
+            "stun:stun1.l.google.com:19302".to_string(),
+        ],
+        ..Default::default()
+    }];
+
+    // Add TURN servers from relay response
+    for ts in &turn_servers {
+        // urls can be a string (legacy) or array of strings
+        let urls: Vec<String> = if let Some(arr) = ts["urls"].as_array() {
+            arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+        } else if let Some(u) = ts["urls"].as_str() {
+            vec![u.to_string()]
+        } else {
+            continue;
+        };
+        if urls.is_empty() {
+            continue;
+        }
+        let username = ts["username"].as_str().unwrap_or_default().to_string();
+        let credential = ts["credential"].as_str().unwrap_or_default().to_string();
+        tracing::info!("relay: using TURN servers {:?}", urls);
+        ice_servers.push(RTCIceServer {
+            urls,
+            username,
+            credential,
             ..Default::default()
-        }],
+        });
+    }
+
+    let config = RTCConfiguration {
+        ice_servers,
         ..Default::default()
     };
 
