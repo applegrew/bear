@@ -187,7 +187,10 @@ pub async fn rtc_offer(
     }));
 
     // Set remote description (client's offer)
-    let offer = RTCSessionDescription::offer(payload.sdp).unwrap();
+    let offer = match RTCSessionDescription::offer(payload.sdp) {
+        Ok(o) => o,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid SDP offer").into_response(),
+    };
     if let Err(e) = pc.set_remote_description(offer).await {
         tracing::error!("rtc: set_remote_description failed: {e}");
         return (StatusCode::BAD_REQUEST, "invalid offer").into_response();

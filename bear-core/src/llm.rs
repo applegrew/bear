@@ -518,7 +518,8 @@ pub async fn compact_history_if_needed(
         let role = &msg.role;
         old_tokens += msg.content.len() / 4 + 1;
         let content = if msg.content.len() > 2000 {
-            format!("{}\n[... truncated ...]", &msg.content[..2000])
+            let end = msg.content.floor_char_boundary(2000);
+            format!("{}\n[... truncated ...]", &msg.content[..end])
         } else {
             msg.content.clone()
         };

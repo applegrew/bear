@@ -546,7 +546,12 @@ pub fn format_tool_description(name: &str, args: &serde_json::Value) -> Vec<Stri
         "edit_file" => {
             let path = args["path"].as_str().unwrap_or("(unknown)");
             let find = args["find"].as_str().unwrap_or("");
-            let preview = if find.len() > 60 { &find[..60] } else { find };
+            let preview = if find.len() > 60 {
+                let end = find.floor_char_boundary(60);
+                &find[..end]
+            } else {
+                find
+            };
             vec![format!("Editing: {path}"), format!("Find: {preview}…")]
         }
         "patch_file" => {

@@ -361,6 +361,11 @@ fn resolve_path(path: &str, cwd: &str) -> String {
 
 /// Resolve a path and validate it stays within the session cwd.
 /// Returns Ok(full_path) or Err(user-friendly error message).
+///
+/// **Note on absolute paths:** Absolute paths are allowed by design because the
+/// LLM legitimately needs to access files outside the working directory (e.g.
+/// `/tmp`, system headers, config files). Every tool call is shown to the user
+/// for approval before execution, so this does not bypass user consent.
 pub fn validate_tool_path(path: &str, cwd: &str) -> Result<String, String> {
     if path.is_empty() {
         return Err("Error: path must not be empty".to_string());
@@ -407,42 +412,36 @@ async fn execute_session_workdir(
         return "Error: path must not be empty".to_string();
     }
 
-    let cmd = format!("cd {trimmed} && pwd");
-    match Command::new("sh")
-        .arg("-lc")
-        .arg(cmd)
-        .current_dir(cwd)
-        .output()
-        .await
-    {
-        Ok(out) if out.status.success() => {
-            let new_cwd = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if new_cwd.is_empty() {
-                return "Error: failed to resolve working directory".to_string();
-            }
-            ctx.set_session_cwd(session_id, new_cwd.clone()).await;
+    // Resolve the target directory without invoking a shell (prevents command injection).
+    let target = if std::path::Path::new(trimmed).is_absolute() {
+        std::path::PathBuf::from(trimmed)
+    } else {
+        std::path::PathBuf::from(cwd).join(trimmed)
+    };
 
-            // Load fresh workspace state from the new directory's .bear/
-            let new_auto_approved = ctx.load_workspace_auto_approved(&new_cwd).await;
-            ctx.reset_session_auto_approved(session_id, new_auto_approved)
-                .await;
+    let canonical = match tokio::fs::canonicalize(&target).await {
+        Ok(p) => p,
+        Err(err) => return format!("Error: {err}"),
+    };
 
-            bus.send(ServerMessage::Notice {
-                text: format!("Working directory set to: {new_cwd}"),
-            })
-            .await;
-            format!("Working directory changed to {new_cwd}")
-        }
-        Ok(out) => {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            if err.is_empty() {
-                "Error: failed to change directory".to_string()
-            } else {
-                format!("Error: {err}")
-            }
-        }
-        Err(err) => format!("Error: {err}"),
+    if !canonical.is_dir() {
+        return format!("Error: '{}' is not a directory", canonical.display());
     }
+
+    let new_cwd = canonical.to_string_lossy().to_string();
+
+    ctx.set_session_cwd(session_id, new_cwd.clone()).await;
+
+    // Load fresh workspace state from the new directory's .bear/
+    let new_auto_approved = ctx.load_workspace_auto_approved(&new_cwd).await;
+    ctx.reset_session_auto_approved(session_id, new_auto_approved)
+        .await;
+
+    bus.send(ServerMessage::Notice {
+        text: format!("Working directory set to: {new_cwd}"),
+    })
+    .await;
+    format!("Working directory changed to {new_cwd}")
 }
 
 // ---------------------------------------------------------------------------
