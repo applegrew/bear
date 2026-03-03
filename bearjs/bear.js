@@ -965,12 +965,14 @@ export class BearClient {
   }
 
   _postIceCandidates(candidates) {
+    console.log(`[ICE] POST ${candidates.length} client candidates to /ice/${this._connId}/client`);
     fetch(`${PUBLIC_URL}/api/signal/${RELAY_ROOM}/ice/${this._connId}/client`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
       body: JSON.stringify({ candidates }),
-    }).catch(() => {});
+    }).then(r => console.log(`[ICE] POST client candidates status=${r.status}`))
+     .catch(e => console.warn('[ICE] POST client candidates failed:', e));
   }
 
   _startRelayIcePoll() {
@@ -981,12 +983,16 @@ export class BearClient {
         const res = await fetch(`${PUBLIC_URL}/api/signal/${RELAY_ROOM}/ice/${this._connId}/server`, {
           credentials: 'same-origin',
         });
-        if (!res.ok) return;
+        if (!res.ok) { console.log(`[ICE] GET server candidates status=${res.status}`); return; }
         const data = await res.json();
-        for (const c of data.candidates || []) {
+        const cands = data.candidates || [];
+        if (cands.length > 0) console.log(`[ICE] GET ${cands.length} server candidates`);
+        for (const c of cands) {
           if (typeof c === 'string') {
+            console.log('[ICE] adding server candidate (string):', c);
             await this.pc.addIceCandidate(new RTCIceCandidate({ candidate: c }));
           } else if (c && c.candidate) {
+            console.log('[ICE] adding server candidate:', c.candidate);
             await this.pc.addIceCandidate(new RTCIceCandidate({
               candidate: c.candidate,
               sdpMid: c.sdpMid ?? null,
