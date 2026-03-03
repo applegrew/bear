@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Bear Browser Client — OpenCode-style TUI powered by xterm.js
 // ---------------------------------------------------------------------------
-
+// version 0.1.10
 // Relay configuration: these globals must be set by the hosting page.
 // The public server proxies offer/answer via the relay's internal API;
 // bear.js obtains a short-lived client JWT from the answer for direct ICE exchange.
@@ -854,18 +854,19 @@ export class BearClient {
       this._handleServerMessage(msg);
     };
 
+    this._pendingIceCandidates = [];
     this.pc.onicecandidate = (event) => {
-      if (event.candidate && this._connId) {
-        fetch(`${PUBLIC_URL}/api/signal/${RELAY_ROOM}/ice/${this._connId}/client`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'same-origin',
-          body: JSON.stringify({ candidates: [{
-            candidate: event.candidate.candidate,
-            sdpMid: event.candidate.sdpMid,
-            sdpMLineIndex: event.candidate.sdpMLineIndex,
-          }] }),
-        }).catch(() => {});
+      if (!event.candidate) return;
+      const c = {
+        candidate: event.candidate.candidate,
+        sdpMid: event.candidate.sdpMid,
+        sdpMLineIndex: event.candidate.sdpMLineIndex,
+      };
+      if (this._connId) {
+        this._postIceCandidates([c]);
+      } else {
+        // Buffer until _connId is available (set after offer POST returns)
+        this._pendingIceCandidates.push(c);
       }
     };
 
@@ -901,6 +902,12 @@ export class BearClient {
 
       const offerData = await offerRes.json();
       this._connId = offerData.conn_id;
+
+      // Flush any ICE candidates buffered before _connId was available
+      if (this._pendingIceCandidates.length > 0) {
+        this._postIceCandidates(this._pendingIceCandidates);
+        this._pendingIceCandidates = [];
+      }
 
       // Poll public server for answer (proxied from relay internal API)
       const deadline = Date.now() + 30000;
@@ -956,6 +963,15 @@ export class BearClient {
       this._pushLine(`  Verification: ${sas}`);
       this._fullRepaint();
     } catch { /* ignore */ }
+  }
+
+  _postIceCandidates(candidates) {
+    fetch(`${PUBLIC_URL}/api/signal/${RELAY_ROOM}/ice/${this._connId}/client`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ candidates }),
+    }).catch(() => {});
   }
 
   _startRelayIcePoll() {
