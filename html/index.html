@@ -223,8 +223,10 @@
 <div id="picker-overlay"></div>
 <div id="input-bar">
   <span id="input-prompt">bear&gt; </span>
-  <input id="input-field" type="text" autocomplete="off" autocapitalize="off"
-         autocorrect="off" spellcheck="false" placeholder="Ask bear anything…" />
+  <input id="input-field" type="text" name="bear-prompt" autocomplete="one-time-code"
+         autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="text"
+         data-form-type="other" data-lpignore="true" data-1p-ignore
+         placeholder="Ask bear anything…" />
   <button id="send-btn">↵</button>
 </div>
 <div id="status-bar">
