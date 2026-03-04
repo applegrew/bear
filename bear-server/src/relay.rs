@@ -489,8 +489,8 @@ async fn handle_relay_offer(
         let cid = notify_conn_id.clone();
         let _pc = pc_keepalive.clone();
         Box::pin(async move {
-            tracing::info!(
-                "relay: data channel '{}' opened (lobby, conn_id={})",
+            tracing::warn!(
+                "relay: DATA CHANNEL '{}' OPENED (lobby, conn_id={})",
                 dc.label(),
                 cid,
             );
@@ -608,6 +608,31 @@ async fn relay_ice_exchange(
     let base = &relay_cfg.relay_url;
     let room = &relay_cfg.room_id;
 
+    // Notify channel: fires when the peer connection reaches a terminal state.
+    // This keeps `pc` alive in this task for the full session lifetime.
+    let done = Arc::new(tokio::sync::Notify::new());
+    let done2 = done.clone();
+    let cid2 = conn_id.clone();
+    pc.on_peer_connection_state_change(Box::new(move |state| {
+        let done = done2.clone();
+        let cid = cid2.clone();
+        Box::pin(async move {
+            use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+            match state {
+                RTCPeerConnectionState::Connected => {
+                    tracing::info!("relay: peer connection connected for conn_id={cid}");
+                }
+                RTCPeerConnectionState::Failed
+                | RTCPeerConnectionState::Closed
+                | RTCPeerConnectionState::Disconnected => {
+                    tracing::info!("relay: peer connection {state} for conn_id={cid}");
+                    done.notify_one();
+                }
+                _ => {}
+            }
+        })
+    }));
+
     // Poll for client ICE candidates and POST server ICE candidates
     // Run for up to 30 seconds (ICE should complete well within this)
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -716,7 +741,8 @@ async fn relay_ice_exchange(
             }
         }
 
-        // Check if connection is established
+        // Check if connection is established — stop the ICE polling loop
+        // but do NOT return yet: we need to keep `pc` alive.
         let conn_state = pc.connection_state();
         if conn_state
             == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Connected
@@ -730,9 +756,24 @@ async fn relay_ice_exchange(
                 == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Closed
         {
             tracing::warn!("relay: ICE failed/closed for conn_id={conn_id}");
-            break;
+            // Already terminal — no need to wait further.
+            return;
         }
 
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+
+    // Log connection state for debugging
+    tracing::info!(
+        "relay: ICE connected, connection_state={:?} ice_state={:?} for conn_id={conn_id}",
+        pc.connection_state(),
+        pc.ice_connection_state(),
+    );
+
+    // ICE polling is done. Keep `pc` alive by waiting for the connection to
+    // reach a terminal state (Failed/Closed/Disconnected). Without this,
+    // dropping `pc` would tear down the underlying ICE transport.
+    tracing::info!("relay: holding peer connection alive for conn_id={conn_id}");
+    done.notified().await;
+    tracing::info!("relay: peer connection ended for conn_id={conn_id}");
 }

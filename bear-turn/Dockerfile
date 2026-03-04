@@ -1,33 +1,20 @@
-# bear-turn — Dockerfile for turn-rs TURN server
+# bear-turn — Dockerfile for coturn TURN server
 #
-# Builds turn-rs from crates.io and runs with the provided config.
+# Uses the official coturn image with our configuration.
 #
 # Build:
 #   docker build -t bear-turn .
 #
 # Run:
 #   docker run -d \
-#     -p 3478:3478/udp -p 3478:3478/tcp -p 5349:5349/tcp \
-#     -v ./turn.toml:/etc/turn/turn.toml:ro \
-#     -v /path/to/certs:/etc/turn/certs:ro \
+#     -p 3478:3478/udp -p 3478:3478/tcp -p 443:443/tcp \
+#     -v ./turnserver.conf:/etc/turnserver.conf:ro \
 #     bear-turn
 
-FROM rust:latest AS builder
+FROM coturn/coturn:latest
 
-RUN cargo install turn-server --version 3.4.0 --features tcp
+COPY turnserver.conf /etc/turnserver.conf
 
-FROM debian:bookworm-slim
+EXPOSE 3478/udp 3478/tcp 443/tcp 49152-65535/udp
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /usr/local/cargo/bin/turn-server /usr/local/bin/turn-server
-
-RUN mkdir -p /etc/turn
-
-COPY turn.toml /etc/turn/turn.toml
-
-EXPOSE 3478/udp 3478/tcp 5349/tcp
-
-CMD ["turn-server", "--config", "/etc/turn/turn.toml"]
+CMD ["turnserver", "-c", "/etc/turnserver.conf"]
