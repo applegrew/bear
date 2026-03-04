@@ -477,12 +477,17 @@ async fn handle_relay_offer(
         })
     }));
 
-    // When the remote peer creates a DataChannel, start lobby (session-less)
+    // When the remote peer creates a DataChannel, start lobby (session-less).
+    // We capture `pc` here so the PeerConnection stays alive for the lifetime
+    // of the data channel handler. Without this, `pc` would be dropped when
+    // `relay_ice_exchange` returns, tearing down the underlying ICE connection.
     let relay_state = state.clone();
     let notify_conn_id = conn_id.clone();
+    let pc_keepalive = pc.clone();
     pc.on_data_channel(Box::new(move |dc| {
         let state = relay_state.clone();
         let cid = notify_conn_id.clone();
+        let _pc = pc_keepalive.clone();
         Box::pin(async move {
             tracing::info!(
                 "relay: data channel '{}' opened (lobby, conn_id={})",
@@ -498,6 +503,8 @@ async fn handle_relay_offer(
             .await;
             tokio::spawn(async move {
                 crate::rtc::handle_relay_data_channel(state, dc).await;
+                // _pc is held here to keep the PeerConnection alive
+                drop(_pc);
             });
         })
     }));
