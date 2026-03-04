@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Bear Browser Client — OpenCode-style TUI powered by xterm.js
 // ---------------------------------------------------------------------------
-const BEAR_VERSION = '0.2.1.3';
+const BEAR_VERSION = '0.2.1.4';
 // Relay configuration: these globals must be set by the hosting page.
 // bear.js communicates exclusively via the public server, which proxies
 // all signaling (offer, answer, ICE) to the relay on behalf of the browser.
@@ -892,8 +892,17 @@ export class BearClient {
     };
 
     this._pendingIceCandidates = [];
+    this._iceTypeCounts = {};
     this.pc.onicecandidate = (event) => {
       if (!event.candidate) return;
+      // Debug: show candidate types on screen
+      const typ = event.candidate.type || 'unknown';
+      this._iceTypeCounts[typ] = (this._iceTypeCounts[typ] || 0) + 1;
+      const summary = Object.entries(this._iceTypeCounts).map(([t, n]) => `${t}:${n}`).join(' ');
+      console.log(`[bear] ICE candidate: ${typ} ${event.candidate.candidate}`);
+      this._pushLine(`${C.gray}  ICE candidates: ${summary}${C.reset}`);
+      this._fullRepaint();
+
       const c = {
         candidate: event.candidate.candidate,
         sdpMid: event.candidate.sdpMid,
