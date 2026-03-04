@@ -211,7 +211,8 @@ async fn relay_poll_loop(state: ServerState, mut cmd_rx: watch::Receiver<bool>) 
                         if let Ok(body) = resp.json::<serde_json::Value>().await {
                             let conn_id = body["conn_id"].as_str().unwrap_or_default().to_string();
                             let sdp = body["sdp"].as_str().unwrap_or_default().to_string();
-                            let turn_servers = body["turn_servers"].as_array().cloned().unwrap_or_default();
+                            let turn_servers =
+                                body["turn_servers"].as_array().cloned().unwrap_or_default();
 
                             if !conn_id.is_empty() && !sdp.is_empty() {
                                 tracing::info!("relay: received offer conn_id={conn_id}");
@@ -411,7 +412,9 @@ async fn handle_relay_offer(
     for ts in &turn_servers {
         // urls can be a string (legacy) or array of strings
         let all_urls: Vec<String> = if let Some(arr) = ts["urls"].as_array() {
-            arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
         } else if let Some(u) = ts["urls"].as_str() {
             vec![u.to_string()]
         } else {
