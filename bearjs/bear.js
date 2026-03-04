@@ -398,6 +398,15 @@ export class BearClient {
     this._heartbeatTimer = null;
     this._lastPongAt = 0;
 
+    // Auto-reconnect state
+    this._reconnectAttempt = 0;
+    this._reconnectTimer = null;
+    this._reconnectMax = 10;
+    this._nonRecoverable = false;
+    this._wasConnected = false;    // true after first successful DataChannel open
+    this._lastSessionId = null;    // for silent auto-rejoin after reconnect
+    this._autoRejoining = false;   // suppresses session_info output during rejoin
+
     // Last tool tracking
     this._lastToolName = '';
     this._lastToolArgs = {};
@@ -599,17 +608,33 @@ export class BearClient {
       this._statusBar.classList.add('warning');
       this._statusLeft.innerHTML = '<span>LLM is busy \u2014 tap Send again to interrupt</span>';
       this._statusRight.textContent = '';
+    } else if (this._nonRecoverable) {
+      this._statusBar.classList.add('warning');
+      this._statusLeft.innerHTML = '<span>Connection lost</span>';
+      this._statusRight.textContent = '';
     } else {
       this._statusBar.classList.remove('warning');
-      const spinner = this._streaming
-        ? SPINNER[this._spinnerFrame % SPINNER.length]
-        : '·····';
-      const session = this._sessionName || 'bear';
-      const subagentInfo = this._activeSubagents.size > 0
-        ? `  \uD83D\uDD0D${this._activeSubagents.size}`
-        : '';
-      this._statusSpinner.textContent = spinner;
-      this._statusSession.textContent = session + subagentInfo;
+      // Restore spinner + session-name children if innerHTML destroyed them
+      if (!this._statusLeft.querySelector('.spinner')) {
+        this._statusLeft.innerHTML = '<span class="spinner">\u00b7\u00b7\u00b7\u00b7\u00b7</span><span class="session-name">bear</span>';
+        this._statusSpinner = this._statusLeft.querySelector('.spinner');
+        this._statusSession = this._statusLeft.querySelector('.session-name');
+      }
+      if (this._reconnectAttempt > 0) {
+        this._statusSpinner.textContent = SPINNER[this._spinnerFrame % SPINNER.length];
+        this._statusSession.textContent = `Reconnecting\u2026 (${this._reconnectAttempt}/${this._reconnectMax})`;
+        if (!this._spinnerTimer) this._startSpinner();
+      } else {
+        const spinner = this._streaming
+          ? SPINNER[this._spinnerFrame % SPINNER.length]
+          : '\u00b7\u00b7\u00b7\u00b7\u00b7';
+        const session = this._sessionName || 'bear';
+        const subagentInfo = this._activeSubagents.size > 0
+          ? `  \uD83D\uDD0D${this._activeSubagents.size}`
+          : '';
+        this._statusSpinner.textContent = spinner;
+        this._statusSession.textContent = session + subagentInfo;
+      }
       this._statusRight.textContent = '';
     }
   }
@@ -804,6 +829,7 @@ export class BearClient {
   // -------------------------------------------------------------------------
 
   async _connectRelay() {
+    this._cancelReconnect();
     this.inToolConfirm = false;
     this.toolConfirmCall = null;
     this.inSessionPicker = false;
@@ -813,8 +839,11 @@ export class BearClient {
 
     this._cleanup();
 
-    this._pushLine(`${C.gray}  Connecting via WebRTC…${C.reset}`);
-    this._fullRepaint();
+    if (this._reconnectAttempt === 0) {
+      this._pushLine(`${C.gray}  Connecting via WebRTC…${C.reset}`);
+      this._fullRepaint();
+    }
+    this._drawStatusBar();
 
     // Fetch TURN credentials dynamically; fall back to page-injected globals
     const iceServers = await this._buildIceServers();
@@ -822,7 +851,7 @@ export class BearClient {
       const u = Array.isArray(s.urls) ? s.urls : [s.urls];
       return u.some(x => x.startsWith('turn'));
     });
-    if (!hasTurn) {
+    if (!hasTurn && this._reconnectAttempt === 0) {
       this._pushLine(`${C.yellow}  ⚠ No TURN servers — mobile connections may fail${C.reset}`);
       this._fullRepaint();
     }
@@ -837,22 +866,35 @@ export class BearClient {
     this.dc = this.pc.createDataChannel('bear', { ordered: true });
 
     this.dc.onopen = () => {
+      this._reconnectAttempt = 0;
+      this._nonRecoverable = false;
+      const wasReconnect = this._wasConnected;
+      this._wasConnected = true;
       this._startHeartbeat();
       // DataChannel is open — lobby session list request is deferred
       // until the server sends slash_commands (its "lobby ready" signal),
       // ensuring the server's on_message handler is registered first.
       this._lobbyPending = true;
+      // If reconnecting and we have a previous session, auto-rejoin silently
+      if (wasReconnect && this._lastSessionId) {
+        this._autoRejoining = true;
+      }
+      this._drawStatusBar();
     };
 
     this.dc.onclose = () => {
-      this._pushLine(`${C.gray}  Disconnected.${C.reset}`);
       this._stopSpinner();
-      this._fullRepaint();
+      if (this._wasConnected && !this._nonRecoverable) {
+        this._cleanup();
+        this._scheduleReconnect();
+      } else {
+        this._pushLine(`${C.gray}  Disconnected.${C.reset}`);
+        this._fullRepaint();
+      }
     };
 
     this.dc.onerror = (e) => {
-      this._pushLine(`${C.red}  DataChannel error: ${e.error?.message || 'unknown'}${C.reset}`);
-      this._fullRepaint();
+      console.warn(`[bear] DataChannel error: ${e.error?.message || 'unknown'}`);
     };
 
     this.dc.onmessage = (event) => {
@@ -900,10 +942,16 @@ export class BearClient {
     };
 
     this.pc.onconnectionstatechange = () => {
-      if (this.pc.connectionState === 'failed' || this.pc.connectionState === 'disconnected') {
-        this._pushLine(`${C.red}  Connection lost.${C.reset}`);
+      const state = this.pc?.connectionState;
+      if (state === 'failed' || state === 'disconnected') {
         this._stopSpinner();
-        this._fullRepaint();
+        if (this._wasConnected && !this._nonRecoverable) {
+          this._cleanup();
+          this._scheduleReconnect();
+        } else {
+          this._pushLine(`${C.red}  Connection lost.${C.reset}`);
+          this._fullRepaint();
+        }
       }
     };
 
@@ -924,8 +972,14 @@ export class BearClient {
       });
 
       if (!offerRes.ok) {
-        this._pushLine(`${C.red}  Relay signaling failed: ${offerRes.status}${C.reset}`);
-        this._fullRepaint();
+        if (offerRes.status === 401 || offerRes.status === 403 || offerRes.status === 404) {
+          this._nonRecoverable = true;
+          this._showRetryOverlay(`Signaling failed: ${offerRes.status} — room may be revoked or not found.`);
+          this._drawStatusBar();
+        } else {
+          this._cleanup();
+          this._scheduleReconnect();
+        }
         return;
       }
 
@@ -959,11 +1013,15 @@ export class BearClient {
         }
         await new Promise(r => setTimeout(r, 500));
       }
-      this._pushLine(`${C.red}  Relay signaling timeout: no answer received${C.reset}`);
-      this._fullRepaint();
+      // Timeout — recoverable
+      console.warn('[bear] Relay signaling timeout: no answer received');
+      this._cleanup();
+      this._scheduleReconnect();
     } catch (e) {
-      this._pushLine(`${C.red}  Relay signaling error: ${e.message}${C.reset}`);
-      this._fullRepaint();
+      // Network error — recoverable
+      console.warn(`[bear] Relay signaling error: ${e.message}`);
+      this._cleanup();
+      this._scheduleReconnect();
     }
   }
 
@@ -1053,6 +1111,58 @@ export class BearClient {
   }
 
   // -------------------------------------------------------------------------
+  // Auto-reconnect
+  // -------------------------------------------------------------------------
+
+  _scheduleReconnect() {
+    if (this._reconnectTimer) return; // already scheduled
+    if (this._nonRecoverable) {
+      this._showRetryOverlay('Connection lost — unable to reach server.');
+      this._drawStatusBar();
+      return;
+    }
+    if (this._reconnectAttempt >= this._reconnectMax) {
+      this._nonRecoverable = true;
+      this._showRetryOverlay('Connection lost — max retries exceeded.');
+      this._drawStatusBar();
+      return;
+    }
+    const delay = Math.min(1000 * Math.pow(2, this._reconnectAttempt), 30000);
+    this._reconnectAttempt++;
+    console.log(`[bear] Reconnecting in ${delay}ms (attempt ${this._reconnectAttempt}/${this._reconnectMax})`);
+    this._drawStatusBar();
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      this._connectRelay();
+    }, delay);
+  }
+
+  _cancelReconnect() {
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+  }
+
+  _showRetryOverlay(message) {
+    let html = '<div class="picker-title">' + this._esc(message) + '</div>';
+    html += `<div class="picker-item" data-idx="0" style="cursor:pointer">` +
+      `<span class="pi-indicator">↻</span>` +
+      `<span class="pi-label">Reconnect</span></div>`;
+    this._pickerOverlay.innerHTML = html;
+    this._pickerOverlay.style.display = 'block';
+    this.fitAddon.fit();
+    this._pickerOverlay.querySelectorAll('.picker-item').forEach(el => {
+      el.addEventListener('click', () => {
+        this._hidePicker();
+        this._nonRecoverable = false;
+        this._reconnectAttempt = 0;
+        this._connectRelay();
+      });
+    });
+  }
+
+  // -------------------------------------------------------------------------
   // Server message dispatch
   // -------------------------------------------------------------------------
 
@@ -1065,11 +1175,22 @@ export class BearClient {
         // to request the session list over the DataChannel.
         if (this._lobbyPending) {
           this._lobbyPending = false;
-          this._showSessionPicker();
+          if (this._autoRejoining && this._lastSessionId) {
+            // Silent auto-rejoin: skip session picker, go straight to last session
+            this._sendJson({ type: 'session_select', session_id: this._lastSessionId });
+          } else {
+            this._showSessionPicker();
+          }
         }
         break;
 
       case 'session_list_result': {
+        // If we get a session list while auto-rejoining, the session_select
+        // failed (session was deleted). Fall back to normal session picker.
+        if (this._autoRejoining) {
+          this._autoRejoining = false;
+          this._lastSessionId = null;
+        }
         // Lobby response: populate session picker with received sessions
         const sessions = Array.isArray(msg.sessions) ? msg.sessions : [];
         if (sessions.length === 0) {
@@ -1092,11 +1213,17 @@ export class BearClient {
       case 'session_info':
         this._sessionName = msg.session.name || msg.session.id.substring(0, 8);
         this._sessionCwd = msg.session.cwd || '';
-        this._pushLine('');
-        this._pushLine(`${C.cyan}  Connected to session ${C.bold}${msg.session.id}${C.reset}`);
-        this._pushLine(`${C.gray}  Working directory: ${msg.session.cwd}${C.reset}`);
-        this._pushLine(`${C.gray}  Type /help for commands${C.reset}`);
-        this._pushLine('');
+        this._lastSessionId = msg.session.id;
+        if (this._autoRejoining) {
+          this._autoRejoining = false;
+          this._pushLine(`${C.gray}  Reconnected.${C.reset}`);
+        } else {
+          this._pushLine('');
+          this._pushLine(`${C.cyan}  Connected to session ${C.bold}${msg.session.id}${C.reset}`);
+          this._pushLine(`${C.gray}  Working directory: ${msg.session.cwd}${C.reset}`);
+          this._pushLine(`${C.gray}  Type /help for commands${C.reset}`);
+          this._pushLine('');
+        }
         this._fullRepaint();
         break;
 
@@ -1863,7 +1990,12 @@ export class BearClient {
       this._pushLine(`${C.gray}  Session ended. Reconnecting…${C.reset}`);
       this._pushLine('');
       this._fullRepaint();
-      // Re-establish WebRTC connection to get back to lobby
+      // Reset reconnect state — intentional reconnect to lobby
+      this._lastSessionId = null;
+      this._autoRejoining = false;
+      this._reconnectAttempt = 0;
+      this._nonRecoverable = false;
+      this._wasConnected = false;
       this._connectRelay();
       return;
     }
@@ -1872,7 +2004,12 @@ export class BearClient {
       this._pushLine(`${C.gray}  Disconnecting. Session preserved. Reconnecting…${C.reset}`);
       this._pushLine('');
       this._fullRepaint();
-      // Re-establish WebRTC connection to get back to lobby
+      // Reset reconnect state — intentional reconnect to lobby
+      this._lastSessionId = null;
+      this._autoRejoining = false;
+      this._reconnectAttempt = 0;
+      this._nonRecoverable = false;
+      this._wasConnected = false;
       this._connectRelay();
       return;
     }
@@ -2134,10 +2271,10 @@ export class BearClient {
       }
       // Check if we got a pong recently
       if (Date.now() - this._lastPongAt > 20000) {
-        this._pushLine(`${C.red}  Connection lost (no heartbeat response).${C.reset}`);
+        console.warn('[bear] Heartbeat timeout — no pong for 20s');
         this._stopHeartbeat();
         this._cleanup();
-        this._fullRepaint();
+        this._scheduleReconnect();
         return;
       }
       this._sendJson({ type: 'ping' });
