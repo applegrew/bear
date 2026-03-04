@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Bear Browser Client — OpenCode-style TUI powered by xterm.js
 // ---------------------------------------------------------------------------
-const BEAR_VERSION = '0.2.2';
+const BEAR_VERSION = '0.2.2.1';
 // Relay configuration: these globals must be set by the hosting page.
 // bear.js communicates exclusively via the public server, which proxies
 // all signaling (offer, answer, ICE) to the relay on behalf of the browser.
@@ -446,6 +446,17 @@ export class BearClient {
     this._bindDomInput();
     this._bindTouchScroll();
     this._bindResize();
+
+    // Prevent xterm from swallowing keyboard events (arrow keys, etc.)
+    // All input goes through the DOM <input> field instead.
+    this.term.attachCustomKeyEventHandler(() => false);
+
+    // Redirect focus from xterm's hidden textarea to our input field
+    // so keyboard always targets the DOM input on laptops/desktops.
+    const xtermTextarea = this.term.element?.querySelector('.xterm-helper-textarea');
+    if (xtermTextarea) {
+      xtermTextarea.addEventListener('focus', () => this._inputField.focus());
+    }
   }
 
   // -------------------------------------------------------------------------
