@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Bear Browser Client — OpenCode-style TUI powered by xterm.js
 // ---------------------------------------------------------------------------
-const BEAR_VERSION = '0.2.1.4';
+const BEAR_VERSION = '0.2.1.5';
 // Relay configuration: these globals must be set by the hosting page.
 // bear.js communicates exclusively via the public server, which proxies
 // all signaling (offer, answer, ICE) to the relay on behalf of the browser.
@@ -822,26 +822,16 @@ export class BearClient {
       const u = Array.isArray(s.urls) ? s.urls : [s.urls];
       return u.some(x => x.startsWith('turn'));
     });
-    if (hasTurn) {
-      const turnUrls = iceServers
-        .filter(s => { const u = Array.isArray(s.urls) ? s.urls : [s.urls]; return u.some(x => x.startsWith('turn')); })
-        .flatMap(s => Array.isArray(s.urls) ? s.urls : [s.urls]);
-      this._pushLine(`${C.gray}  TURN relay available: ${turnUrls.join(', ')}${C.reset}`);
-    } else {
+    if (!hasTurn) {
       this._pushLine(`${C.yellow}  ⚠ No TURN servers — mobile connections may fail${C.reset}`);
+      this._fullRepaint();
     }
-    this._fullRepaint();
 
     this.pc = new RTCPeerConnection({ iceServers });
 
-    // Debug: log ICE candidate errors (e.g. TURN allocation failures)
     this.pc.addEventListener('icecandidateerror', (e) => {
       const { errorCode, errorText, url } = e;
       console.warn(`[bear] ICE candidate error: ${url} code=${errorCode} ${errorText}`);
-      if (url && url.startsWith('turn')) {
-        this._pushLine(`${C.yellow}  ⚠ TURN error: ${url} (${errorCode}: ${errorText})${C.reset}`);
-        this._fullRepaint();
-      }
     });
 
     this.dc = this.pc.createDataChannel('bear', { ordered: true });
@@ -892,16 +882,9 @@ export class BearClient {
     };
 
     this._pendingIceCandidates = [];
-    this._iceTypeCounts = {};
     this.pc.onicecandidate = (event) => {
       if (!event.candidate) return;
-      // Debug: show candidate types on screen
-      const typ = event.candidate.type || 'unknown';
-      this._iceTypeCounts[typ] = (this._iceTypeCounts[typ] || 0) + 1;
-      const summary = Object.entries(this._iceTypeCounts).map(([t, n]) => `${t}:${n}`).join(' ');
-      console.log(`[bear] ICE candidate: ${typ} ${event.candidate.candidate}`);
-      this._pushLine(`${C.gray}  ICE candidates: ${summary}${C.reset}`);
-      this._fullRepaint();
+      console.log(`[bear] ICE candidate: ${event.candidate.type || 'unknown'} ${event.candidate.candidate}`);
 
       const c = {
         candidate: event.candidate.candidate,
