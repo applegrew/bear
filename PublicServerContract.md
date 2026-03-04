@@ -127,7 +127,7 @@ Example injection:
 MIIBIjANBgkqhki...
 -----END PUBLIC KEY-----`;
   // Optional — omit if TURN is not configured
-  const BEAR_ICE_SERVERS = [{"urls":["turn:turn.example.com:3478","turns:turn.example.com:5349"],"username":"1741024800","credential":"base64hmac..."}];
+  const BEAR_ICE_SERVERS = [{"urls":["turn:turn.example.com:443","turn:turn.example.com:443?transport=tcp"],"username":"1741024800","credential":"base64hmac..."}];
 </script>
 <script src="/bear.js"></script>
 ```
@@ -197,15 +197,17 @@ If TURN is not configured on the relay, `/internal/turn-credentials` returns `{ 
 
 ### Deployment recommendation
 
-The TURN server (`turn-rs`) listens on UDP/TCP 3478 by default. For **mobile network connectivity** (4G/5G), a TCP listener on **port 443** is essential — mobile carriers commonly block non-standard UDP ports, but never block 443. Configure `TURN_URLS` to include both:
+The TURN server (`coturn`) listens on **port 443** for both UDP and TCP. Port 443 is used because mobile carriers commonly block non-standard UDP ports (like 3478) but never block 443. This allows mobile clients to use **UDP TURN** (preferred, resilient to brief network hiccups) with TCP TURN as a fallback.
+
+Configure `TURN_URLS` to include both transports:
 
 ```
-TURN_URLS=turn:bear.example.com:3478,turn:bear.example.com:443?transport=tcp
+TURN_URLS=turn:bear.example.com:443,turn:bear.example.com:443?transport=tcp
 ```
 
-The TURN server must have matching listeners in `turn.toml` for all advertised URLs.
+The TURN server must have `listening-port=443` in `turnserver.conf` (coturn listens on both UDP and TCP for the configured port).
 
-Ensure the TURN ports (3478 UDP+TCP, 443 TCP) and the relay port range (default 49152–65535 UDP) are open in your firewall/security group.
+Ensure port 443 (UDP+TCP) and the relay port range (default 49152–65535 UDP) are open in your firewall/security group.
 
 > **Note on `webrtc-rs`:** The Rust `webrtc-rs` library used by `bear-server` does not support TURN over TCP. `bear-server` automatically filters out `?transport=tcp` TURN URLs and uses only UDP TURN. The **browser client** (Safari/Chrome) fully supports TURN TCP, so the `turn:...:443?transport=tcp` URL is used exclusively by the browser side. Both sides get relay candidates through their respective transports; the TURN server mediates between them.
 

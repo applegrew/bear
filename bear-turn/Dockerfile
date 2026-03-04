@@ -7,7 +7,7 @@
 #
 # Run:
 #   docker run -d \
-#     -p 3478:3478/udp -p 3478:3478/tcp -p 443:443/tcp \
+#     -p 443:443/udp -p 443:443/tcp \
 #     -v ./turnserver.conf:/etc/turnserver.conf:ro \
 #     bear-turn
 
@@ -15,6 +15,6 @@ FROM coturn/coturn:latest
 
 COPY turnserver.conf /etc/turnserver.conf
 
-EXPOSE 3478/udp 3478/tcp 443/tcp 49152-65535/udp
+EXPOSE 443/udp 443/tcp 49152-65535/udp
 
 CMD ["turnserver", "-c", "/etc/turnserver.conf"]

@@ -4,12 +4,8 @@ services:
   bear-turn:
     build: .
     ports:
-      - "3478:3478/udp"   # TURN over UDP
-      - "3478:3478/tcp"   # TURN over TCP
-      - "443:443/tcp"     # TURN over TCP on 443 (mobile fallback)
-      - "5349:5349/tcp"   # TURNS (TLS) — requires certs
+      - "443:443/udp"     # TURN over UDP (primary — preferred by all clients)
+      - "443:443/tcp"     # TURN over TCP (fallback when UDP is blocked)
     volumes:
-      - ./turn.toml:/etc/turn/turn.toml:ro
-      # Uncomment to mount TLS certificates for TURNS
-      # - /path/to/certs:/etc/turn/certs:ro
+      - ./turnserver.conf:/etc/turnserver.conf:ro
     restart: unless-stopped

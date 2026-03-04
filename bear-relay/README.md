@@ -218,14 +218,14 @@ podman run --rm \
 
 ## TURN server integration
 
-The relay can mint time-windowed TURN credentials when deployed alongside a TURN server (e.g. [turn-rs](https://github.com/mycrl/turn-rs)). Both services share a secret for HMAC-SHA1 credential validation.
+The relay can mint time-windowed TURN credentials when deployed alongside a TURN server (e.g. [coturn](https://github.com/coturn/coturn)). Both services share a secret for HMAC-SHA1 credential validation.
 
 ### Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `TURN_SECRET` | *(empty — disabled)* | Shared HMAC secret. Must match the TURN server's `static-auth-secret`. |
-| `TURN_URLS` | *(empty)* | Comma-separated TURN URLs, e.g. `turn:turn.example.com:3478,turns:turn.example.com:5349` |
+| `TURN_SECRET` | *(empty — disabled)* | Shared HMAC secret. Must match the TURN server's `static-auth-secret` in `turnserver.conf`. |
+| `TURN_URLS` | *(empty)* | Comma-separated TURN URLs, e.g. `turn:turn.example.com:443,turn:turn.example.com:443?transport=tcp` |
 | `TURN_REALM` | `bear` | TURN realm (informational only — not used in credential generation) |
 | `TURN_CREDENTIAL_TTL` | `86400` | Credential lifetime in seconds (default: 24 hours) |
 
