@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Bear Browser Client — OpenCode-style TUI powered by xterm.js
 // ---------------------------------------------------------------------------
-const BEAR_VERSION = '0.2.2.1';
+const BEAR_VERSION = '0.2.2.2';
 // Relay configuration: these globals must be set by the hosting page.
 // bear.js communicates exclusively via the public server, which proxies
 // all signaling (offer, answer, ICE) to the relay on behalf of the browser.
@@ -701,6 +701,27 @@ export class BearClient {
       this._rows = rows;
       this._fullRepaint();
     });
+
+    // iOS keyboard / rotation: use visualViewport to resize the layout
+    // so the browser never adds its own scrollbar.
+    const vv = window.visualViewport;
+    if (vv) {
+      let resizeRaf = null;
+      const onViewportResize = () => {
+        if (resizeRaf) return;
+        resizeRaf = requestAnimationFrame(() => {
+          resizeRaf = null;
+          const h = vv.height;
+          document.documentElement.style.height = h + 'px';
+          document.body.style.height = h + 'px';
+          // Scroll the page back to top in case iOS shifted it
+          window.scrollTo(0, 0);
+          this.fitAddon.fit();
+        });
+      };
+      vv.addEventListener('resize', onViewportResize);
+      vv.addEventListener('scroll', () => window.scrollTo(0, 0));
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1722,10 +1743,11 @@ export class BearClient {
       if (e.touches.length === 1) {
         this._touchStartY = e.touches[0].clientY;
       }
-    }, { passive: true });
+    }, { passive: false });
 
     termEl.addEventListener('touchmove', (e) => {
       if (this._touchStartY === null || e.touches.length !== 1) return;
+      e.preventDefault(); // stop browser from scrolling the page
       const dy = this._touchStartY - e.touches[0].clientY;
       const threshold = 20; // pixels per scroll step
       if (Math.abs(dy) >= threshold) {
@@ -1738,7 +1760,7 @@ export class BearClient {
         this._touchStartY = e.touches[0].clientY;
         this._fullRepaint();
       }
-    }, { passive: true });
+    }, { passive: false });
 
     termEl.addEventListener('touchend', () => {
       this._touchStartY = null;
