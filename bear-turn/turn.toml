@@ -39,6 +39,15 @@ transport = "tcp"
 bind = "0.0.0.0:3478"
 external = "0.0.0.0:3478"
 
+# TCP listener on port 443 (mobile network fallback)
+# Mobile carriers rarely block port 443, making this essential for
+# connectivity on 4G/5G networks where non-standard ports are blocked.
+[[turn.interfaces]]
+transport = "tcp"
+bind = "0.0.0.0:443"
+# Replace with your server's public IP
+external = "0.0.0.0:443"
+
 # TLS listener (TURNS, port 5349) — uncomment when TLS certs are available
 # [[turn.interfaces]]
 # transport = "tcp"

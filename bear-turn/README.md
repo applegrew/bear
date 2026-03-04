@@ -12,6 +12,7 @@ TURN relay server for Bear WebRTC connections, powered by [turn-rs](https://gith
 |---|---|---|
 | UDP | 3478 | Standard TURN |
 | TCP | 3478 | TURN over TCP (firewall fallback) |
+| TCP | 443 | TURN over TCP on 443 (mobile network fallback) |
 | TLS | 5349 | TURNS — TURN over TLS (not yet supported in v3.4.0) |
 
 ## Quick start

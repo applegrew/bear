@@ -197,15 +197,19 @@ If TURN is not configured on the relay, `/internal/turn-credentials` returns `{ 
 
 ### Deployment recommendation
 
-The TURN server (`turn-rs`) uses non-standard ports by default — UDP/TCP 3478 and TLS 5349 — which do not conflict with ports 80/443 used by the public server and relay. This means the TURN server can share the same IP address and hostname as the public server without requiring a separate external IP or DNS entry. Configure `TURN_URLS` using the shared hostname with the appropriate ports, e.g.:
+The TURN server (`turn-rs`) listens on UDP/TCP 3478 by default. For **mobile network connectivity** (4G/5G), a TCP listener on **port 443** is essential — mobile carriers commonly block non-standard UDP ports, but never block 443. Configure `TURN_URLS` to include both:
 
 ```
-TURN_URLS=turn:bear.example.com:3478,turns:bear.example.com:5349
+TURN_URLS=turn:bear.example.com:3478,turn:bear.example.com:443?transport=tcp
 ```
 
-Ensure the TURN ports (3478 UDP+TCP, 5349 TCP) and the relay port range (default 49152–65535 UDP) are open in your firewall/security group.
+The TURN server must have matching listeners in `turn.toml` for all advertised URLs.
 
-> **Note:** Some restrictive networks (corporate firewalls, hotel Wi-Fi) block all traffic except ports 80 and 443. Running TURNS on port 443 helps in those environments but requires a dedicated IP or hostname (since 443 is typically used by the public server's HTTPS). For most networks, including mobile, non-standard ports work fine.
+Ensure the TURN ports (3478 UDP+TCP, 443 TCP) and the relay port range (default 49152–65535 UDP) are open in your firewall/security group.
+
+> **Note on `webrtc-rs`:** The Rust `webrtc-rs` library used by `bear-server` does not support TURN over TCP. `bear-server` automatically filters out `?transport=tcp` TURN URLs and uses only UDP TURN. The **browser client** (Safari/Chrome) fully supports TURN TCP, so the `turn:...:443?transport=tcp` URL is used exclusively by the browser side. Both sides get relay candidates through their respective transports; the TURN server mediates between them.
+
+> **Note on port 443:** If the public server or relay already uses port 443 on the same IP, the TURN server needs a **separate IP address** for its port 443 listener. Alternatively, deploy the TURN server on a different host.
 
 ## Signaling integrity
 

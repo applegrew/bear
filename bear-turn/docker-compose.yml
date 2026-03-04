@@ -6,6 +6,7 @@ services:
     ports:
       - "3478:3478/udp"   # TURN over UDP
       - "3478:3478/tcp"   # TURN over TCP
+      - "443:443/tcp"     # TURN over TCP on 443 (mobile fallback)
       - "5349:5349/tcp"   # TURNS (TLS) — requires certs
     volumes:
       - ./turn.toml:/etc/turn/turn.toml:ro

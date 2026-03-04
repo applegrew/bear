@@ -410,13 +410,26 @@ async fn handle_relay_offer(
     // Add TURN servers from relay response
     for ts in &turn_servers {
         // urls can be a string (legacy) or array of strings
-        let urls: Vec<String> = if let Some(arr) = ts["urls"].as_array() {
+        let all_urls: Vec<String> = if let Some(arr) = ts["urls"].as_array() {
             arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
         } else if let Some(u) = ts["urls"].as_str() {
             vec![u.to_string()]
         } else {
             continue;
         };
+        // webrtc-rs does not support TURN over TCP — filter out ?transport=tcp
+        // URLs to avoid timeouts that block ICE gathering entirely.
+        let urls: Vec<String> = all_urls
+            .into_iter()
+            .filter(|u| {
+                if u.contains("transport=tcp") {
+                    tracing::debug!("relay: skipping unsupported TURN TCP URL: {u}");
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
         if urls.is_empty() {
             continue;
         }

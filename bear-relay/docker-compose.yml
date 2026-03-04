@@ -22,7 +22,7 @@ services:
       # - DB_POOL_SIZE=5
       # TURN server integration (shared secret with bear-turn / turn-rs)
       # - TURN_SECRET=your-shared-secret
-      # - TURN_URLS=turn:turn.example.com:3478,turns:turn.example.com:5349
+      # - TURN_URLS=turn:turn.example.com:3478,turn:turn.example.com:443?transport=tcp
       # - TURN_REALM=bear
       # - TURN_CREDENTIAL_TTL=86400
     restart: unless-stopped
