@@ -1863,16 +1863,23 @@ async fn execute_task_plan(
                                     }
                                 }
                                 ClientMessage::Input { text } => {
-                                    tracing::info!("execute_task_plan: interrupted by new input: {text:?}");
-                                    // Abort subagents and return to the main loop
-                                    budget.terminated.store(true, Ordering::SeqCst);
-                                    budget.resume.notify_waiters();
-                                    // Broadcast the user's input so all clients see it
-                                    bus.send(ServerMessage::UserInput { text: text.clone() }).await;
-                                    // Re-queue the input so the session worker main loop picks it up
-                                    let _ = client_tx.send(ClientMessage::Input { text }).await;
-                                    // Break out of the subagent wait loop
-                                    break;
+                                    // Slash commands don't go to the LLM — handle inline
+                                    if text.trim().starts_with('/') {
+                                        tracing::info!("execute_task_plan: handling slash command while running: {text:?}");
+                                        bus.send(ServerMessage::UserInput { text: text.clone() }).await;
+                                        handle_slash_command(state, session_id, bus, &text).await;
+                                    } else {
+                                        tracing::info!("execute_task_plan: interrupted by new input: {text:?}");
+                                        // Abort subagents and return to the main loop
+                                        budget.terminated.store(true, Ordering::SeqCst);
+                                        budget.resume.notify_waiters();
+                                        // Broadcast the user's input so all clients see it
+                                        bus.send(ServerMessage::UserInput { text: text.clone() }).await;
+                                        // Re-queue the input so the session worker main loop picks it up
+                                        let _ = client_tx.send(ClientMessage::Input { text }).await;
+                                        // Break out of the subagent wait loop
+                                        break;
+                                    }
                                 }
                                 msg @ ClientMessage::ShellExec { .. } => {
                                     tracing::info!("execute_task_plan: interrupted by ShellExec");
@@ -2524,11 +2531,17 @@ async fn invoke_llm(
                         break;
                     }
                     Some(ClientMessage::Input { text }) => {
-                        tracing::info!("invoke_llm: interrupted by new input: {text}");
-                        llm_handle.abort();
-                        while chunk_rx.try_recv().is_ok() {}
-                        interrupted_input = Some(text);
-                        break;
+                        // Slash commands don't go to the LLM — handle inline
+                        if text.trim().starts_with('/') {
+                            tracing::info!("invoke_llm: handling slash command while streaming: {text}");
+                            handle_slash_command(state, session_id, bus, &text).await;
+                        } else {
+                            tracing::info!("invoke_llm: interrupted by new input: {text}");
+                            llm_handle.abort();
+                            while chunk_rx.try_recv().is_ok() {}
+                            interrupted_input = Some(text);
+                            break;
+                        }
                     }
                     Some(_) => {
                         tracing::debug!("invoke_llm: ignoring client msg during streaming");
