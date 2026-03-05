@@ -427,14 +427,18 @@ pub fn spawn_terminal_thread(
                                 state.interrupt_warning_start = None;
                                 let _ = rt.block_on(event_tx.send(TermEvent::UserLine(text)));
                                 state.full_repaint();
-                            } else if state.streaming && !state.input_buf.trim().is_empty() {
+                            } else if state.streaming
+                                && !state.input_buf.trim().is_empty()
+                                && !state.input_buf.trim().starts_with('/')
+                            {
                                 // LLM is busy and user submitted non-empty text: show warning
+                                // (slash commands bypass this — they don't go to the LLM)
                                 let text = state.submit();
                                 state.interrupt_pending_text = Some(text);
                                 state.interrupt_warning_start = Some(std::time::Instant::now());
                                 state.draw_status_bar();
                             } else {
-                                // Normal submit (LLM idle, or empty input)
+                                // Normal submit (LLM idle, empty input, or slash command)
                                 state.dismiss_interrupt_warning();
                                 let line = state.submit();
                                 let _ = rt.block_on(event_tx.send(TermEvent::UserLine(line)));

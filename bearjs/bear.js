@@ -1753,8 +1753,9 @@ export class BearClient {
       this._fullRepaint();
       return;
     }
-    // If LLM is busy and user typed non-empty text, show warning
-    if (this._streaming && this._inputField.value.trim()) {
+    // If LLM is busy and user typed non-empty non-slash text, show warning
+    // (slash commands bypass this — they don't go to the LLM)
+    if (this._streaming && this._inputField.value.trim() && !this._inputField.value.trim().startsWith('/')) {
       this._submitInputToWarning();
       return;
     }
