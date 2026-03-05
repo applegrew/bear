@@ -984,8 +984,8 @@ impl TermState {
     fn full_repaint(&mut self) {
         let mut out = io::stdout();
         let _ = execute!(out, cursor::Hide);
-        // Clear entire screen to remove ghost rows from resizes, menu leftovers, etc.
-        let _ = execute!(out, cursor::MoveTo(0, 0), terminal::Clear(ClearType::All));
+        // Each draw_* method clears its own rows individually, so no full-screen
+        // clear is needed. Avoiding ClearType::All preserves terminal scrollback.
         self.draw_output_area();
         self.draw_input_box();
         self.draw_status_bar();
