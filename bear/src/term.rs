@@ -122,11 +122,11 @@ pub enum TermEvent {
 
 const SPINNER_DOTS: &[&str] = &[
     "·····",
-    "●····",
-    "·●···",
-    "··●··",
-    "···●·",
-    "····●",
+    "•····",
+    "·•···",
+    "··•··",
+    "···•·",
+    "····•",
     "·····",
 ];
 
@@ -999,6 +999,8 @@ impl TermState {
     fn full_repaint(&mut self) {
         let mut out = io::stdout();
         let _ = execute!(out, cursor::Hide);
+        // Clear entire screen to remove ghost rows from resizes, menu leftovers, etc.
+        let _ = execute!(out, cursor::MoveTo(0, 0), terminal::Clear(ClearType::All));
         self.draw_output_area();
         self.draw_input_box();
         self.draw_status_bar();
@@ -1270,7 +1272,7 @@ impl TermState {
             let subagent_info = if self.active_subagents.is_empty() {
                 String::new()
             } else {
-                format!("  🔍{}", self.active_subagents.len())
+                format!("  [{}]", self.active_subagents.len())
             };
             let left = format!("{spinner}  {session}{subagent_info}");
             // Right: shortcuts
