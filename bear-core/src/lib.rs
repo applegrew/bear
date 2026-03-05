@@ -115,6 +115,8 @@ pub struct Session {
     pub auto_approved: std::collections::HashSet<String>,
     /// Maximum number of concurrent read-only subagents (default 3).
     pub max_subagents: usize,
+    /// Name of the currently active plan (if any). Cleared on session end.
+    pub current_plan: Option<String>,
 }
 
 pub struct PendingToolCall {

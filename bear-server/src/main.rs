@@ -446,6 +446,7 @@ pub(crate) async fn do_create_session(
         input_history: Vec::new(),
         auto_approved,
         max_subagents: 3,
+        current_plan: None,
     };
 
     if !session.auto_approved.is_empty() {

@@ -48,10 +48,18 @@ pub struct PlanStep {
 
 impl SavedPlan {
     /// Recompute the overall plan status from step statuses.
+    ///
+    /// - `draft` — all steps pending
+    /// - `completed` — all steps completed
+    /// - `failed` — at least one failed, none in_progress
+    /// - `in_progress` — at least one step in_progress
+    /// - `partially_implemented` — some completed, some pending (no in_progress)
     pub fn recompute_status(&mut self) {
         let all_pending = self.steps.iter().all(|s| s.status == "pending");
         let any_in_progress = self.steps.iter().any(|s| s.status == "in_progress");
         let all_completed = self.steps.iter().all(|s| s.status == "completed");
+        let any_completed = self.steps.iter().any(|s| s.status == "completed");
+        let any_pending = self.steps.iter().any(|s| s.status == "pending");
         let any_failed = self.steps.iter().any(|s| s.status == "failed");
 
         self.status = if all_pending {
@@ -60,6 +68,10 @@ impl SavedPlan {
             "completed".to_string()
         } else if any_failed && !any_in_progress {
             "failed".to_string()
+        } else if any_in_progress {
+            "in_progress".to_string()
+        } else if any_completed && any_pending {
+            "partially_implemented".to_string()
         } else {
             "in_progress".to_string()
         };
@@ -471,5 +483,12 @@ mod tests {
         plan.steps[1].status = "failed".to_string();
         plan.recompute_status();
         assert_eq!(plan.status, "failed");
+
+        // Simulate adding a new pending step to a completed plan
+        plan.steps[0].status = "completed".to_string();
+        plan.steps[1].status = "completed".to_string();
+        plan.steps.push(PlanStep { id: "3".into(), description: "c".into(), status: "pending".into(), detail: None });
+        plan.recompute_status();
+        assert_eq!(plan.status, "partially_implemented");
     }
 }

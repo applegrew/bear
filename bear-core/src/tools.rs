@@ -181,6 +181,10 @@ pub trait ToolContext: Send + Sync {
     async fn list_plans(&self, cwd: &str) -> Vec<crate::workspace::SavedPlan>;
     async fn delete_plan(&self, cwd: &str, name: &str) -> Result<(), String>;
 
+    // Current plan tracking
+    async fn get_current_plan(&self, session_id: Uuid) -> Option<String>;
+    async fn set_current_plan(&self, session_id: Uuid, name: Option<String>);
+
     // LSP access
     async fn lsp_diagnostics(
         &self,
@@ -1432,7 +1436,10 @@ async fn execute_plan_save(
 ) -> String {
     let name = match ptc.tool_call.arguments["name"].as_str() {
         Some(n) if !n.is_empty() => n.to_string(),
-        _ => return "Error: plan_save requires a 'name' argument.".to_string(),
+        _ => match ctx.get_current_plan(session_id).await {
+            Some(cp) => cp,
+            None => return "Error: plan_save requires a 'name' argument (no current plan set).".to_string(),
+        },
     };
 
     // Validate name: [a-z0-9_-]+ only
@@ -1491,6 +1498,8 @@ async fn execute_plan_save(
 
     match ctx.save_plan(&cwd, &plan).await {
         Ok(()) => {
+            // Set as current plan
+            ctx.set_current_plan(session_id, Some(name.clone())).await;
             bus.send(ServerMessage::PlanUpdate {
                 name: plan.name,
                 title: plan.title,
@@ -1498,7 +1507,7 @@ async fn execute_plan_save(
                 steps: plan.steps,
             })
             .await;
-            format!("Plan '{name}' saved ({} steps).", steps.len())
+            format!("Plan '{name}' saved ({} steps). Now the current plan.", steps.len())
         }
         Err(e) => format!("Error saving plan: {e}"),
     }
@@ -1514,7 +1523,16 @@ async fn execute_plan_read(
         None => return "Error: session not found.".to_string(),
     };
 
-    let name = ptc.tool_call.arguments["name"].as_str().unwrap_or("");
+    let explicit_name = ptc.tool_call.arguments["name"].as_str().unwrap_or("");
+    let current = ctx.get_current_plan(session_id).await;
+    let name = if explicit_name.is_empty() {
+        match &current {
+            Some(cp) => cp.as_str(),
+            None => "",
+        }
+    } else {
+        explicit_name
+    };
 
     if name.is_empty() {
         // List all plans
@@ -1569,7 +1587,10 @@ async fn execute_plan_update(
 ) -> String {
     let name = match ptc.tool_call.arguments["name"].as_str() {
         Some(n) if !n.is_empty() => n.to_string(),
-        _ => return "Error: plan_update requires a 'name' argument.".to_string(),
+        _ => match ctx.get_current_plan(session_id).await {
+            Some(cp) => cp,
+            None => return "Error: plan_update requires a 'name' argument (no current plan set).".to_string(),
+        },
     };
     let step_id = match ptc.tool_call.arguments["step_id"].as_str() {
         Some(s) if !s.is_empty() => s.to_string(),

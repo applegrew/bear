@@ -189,6 +189,18 @@ impl ToolContext for ServerState {
         self.workspace_store.delete_plan(cwd, name).await
     }
 
+    async fn get_current_plan(&self, session_id: uuid::Uuid) -> Option<String> {
+        let sessions = self.sessions.read().await;
+        sessions.get(&session_id).and_then(|s| s.current_plan.clone())
+    }
+
+    async fn set_current_plan(&self, session_id: uuid::Uuid, name: Option<String>) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(&session_id) {
+            session.current_plan = name;
+        }
+    }
+
     async fn lsp_diagnostics(
         &self,
         file_path: &str,

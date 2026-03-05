@@ -117,18 +117,18 @@ Auto-approved. Loads the script from `.bear/scripts/<name>.json`, injects argume
 
 ### 19. plan_save
 Create or replace a persistent task plan in `.bear/plans/`.
-Arguments: {"name": "string", "title": "string", "steps": [{"id": "string", "description": "string", "status?": "pending"}]}
-Auto-approved. Plan names must match [a-z0-9_-]+. Use for multi-step tasks that benefit from persistent tracking. The overall plan status (draft/in_progress/completed/failed) is auto-computed from step statuses.
+Arguments: {"name?": "string", "title": "string", "steps": [{"id": "string", "description": "string", "status?": "pending"}]}
+Auto-approved. Plan names must match [a-z0-9_-]+. The saved plan becomes the session's current plan. If name is omitted, updates the current plan. Only one plan can be active at a time. The overall plan status (draft/in_progress/completed/failed) is auto-computed from step statuses.
 
 ### 20. plan_read
-Read a plan by name, or list all plans if name is omitted.
+Read the current plan, a plan by name, or list all plans if no name and no current plan.
 Arguments: {"name?": "string"}
-Auto-approved. Returns plan details with step statuses.
+Auto-approved. If name is omitted, reads the current plan. Returns plan details with step statuses.
 
 ### 21. plan_update
-Update the status of a single step in an existing plan.
-Arguments: {"name": "string", "step_id": "string", "status": "pending|in_progress|completed|failed", "detail?": "string"}
-Auto-approved. Recalculates overall plan status and broadcasts the update to all clients.
+Update the status of a single step in a plan.
+Arguments: {"name?": "string", "step_id": "string", "status": "pending|in_progress|completed|failed", "detail?": "string"}
+Auto-approved. If name is omitted, updates the current plan. Recalculates overall plan status and broadcasts the update to all clients.
 
 ### 22. git_commit
 Commit all staged and unstaged changes to git with a message.

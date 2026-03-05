@@ -1557,7 +1557,7 @@ export class BearClient {
       }
 
       case 'plan_update': {
-        const statusColors = { completed: C.green, failed: C.red, in_progress: C.yellow, draft: C.gray };
+        const statusColors = { completed: C.green, failed: C.red, in_progress: C.yellow, partially_implemented: C.cyan, draft: C.gray };
         const sc = statusColors[msg.status] || C.gray;
         this._pushLine('');
         this._pushLine(`  ${C.cyan}${C.bold}Plan:${C.reset} ${sc}${msg.title} [${msg.status}]${C.reset}`);

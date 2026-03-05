@@ -68,7 +68,7 @@ pub enum RenderCmd {
         detail: Option<String>,
     },
     PlanUpdate {
-        name: String,
+        _name: String,
         title: String,
         status: String,
         steps: Vec<(String, String, String, Option<String>)>, // (id, description, status, detail)
@@ -1963,7 +1963,7 @@ impl TermState {
                 self.full_repaint();
             }
             RenderCmd::PlanUpdate {
-                name: _,
+                _name: _,
                 title,
                 status,
                 steps,
@@ -1972,6 +1972,7 @@ impl TermState {
                     "completed" => a_green,
                     "failed" => a_red,
                     "in_progress" => a_yellow,
+                    "partially_implemented" => a_cyan,
                     _ => a_gray,
                 };
                 self.push_line("");

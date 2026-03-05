@@ -748,7 +748,7 @@ fn dispatch_server_msg(
                 .map(|s| (s.id.clone(), s.description.clone(), s.status.clone(), s.detail.clone()))
                 .collect();
             let _ = render_tx.send(RenderCmd::PlanUpdate {
-                name: name.clone(),
+                _name: name.clone(),
                 title: title.clone(),
                 status: status.clone(),
                 steps: step_tuples,

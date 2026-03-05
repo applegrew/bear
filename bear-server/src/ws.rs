@@ -489,6 +489,37 @@ async fn session_worker(
     // presents them one at a time when no other prompt is active.
     let (prompt_queue_tx, mut prompt_queue_rx) = mpsc::channel::<QueuedPrompt>(32);
 
+    // Check for in_progress plans from a previous session and notify the user
+    {
+        let cwd = {
+            let sessions = state.sessions.read().await;
+            sessions.get(&session_id).map(|s| s.info.cwd.clone())
+        };
+        if let Some(cwd) = cwd {
+            let plans = state.workspace_store.list_plans(&cwd).await;
+            let active: Vec<_> = plans
+                .iter()
+                .filter(|p| p.status == "in_progress" || p.status == "draft")
+                .collect();
+            if !active.is_empty() {
+                let mut lines = vec!["Unfinished plans found:".to_string()];
+                for p in &active {
+                    let done = p.steps.iter().filter(|s| s.status == "completed").count();
+                    let total = p.steps.len();
+                    lines.push(format!(
+                        "  [{:>11}] {:<20} {} ({}/{} done)",
+                        p.status, p.name, p.title, done, total
+                    ));
+                }
+                lines.push("Use /plan <name> to resume a plan.".to_string());
+                bus.send(ServerMessage::Notice {
+                    text: lines.join("\n"),
+                })
+                .await;
+            }
+        }
+    }
+
     /// Returns true if any user-facing prompt is currently active.
     fn has_active_prompt(
         pending: &Option<PendingToolCall>,
@@ -1199,12 +1230,15 @@ async fn handle_slash_command(
         return true;
     }
 
-    // /plan [name] | /plan delete <name>
+    // /plan [name] | /plan delete <name> | /plan clear
     if trimmed == "/plan" || trimmed.starts_with("/plan ") {
         let rest = trimmed.strip_prefix("/plan").unwrap_or("").trim();
-        let cwd = {
+        let (cwd, current_plan) = {
             let sessions = state.sessions.read().await;
-            sessions.get(&session_id).map(|s| s.info.cwd.clone())
+            match sessions.get(&session_id) {
+                Some(s) => (Some(s.info.cwd.clone()), s.current_plan.clone()),
+                None => (None, None),
+            }
         };
         let Some(cwd) = cwd else {
             bus.send(ServerMessage::Error { text: "Session not found.".to_string() }).await;
@@ -1212,23 +1246,47 @@ async fn handle_slash_command(
         };
 
         if rest.is_empty() {
-            // List all plans
+            // List all plans, mark current
             let plans = state.workspace_store.list_plans(&cwd).await;
             if plans.is_empty() {
-                bus.send(ServerMessage::Notice { text: "No plans found.".to_string() }).await;
+                let cur_str = match &current_plan {
+                    Some(n) => format!(" (current: {n})"),
+                    None => String::new(),
+                };
+                bus.send(ServerMessage::Notice { text: format!("No plans found.{cur_str}") }).await;
             } else {
                 let mut lines = vec!["Plans:".to_string()];
                 for p in &plans {
                     let done = p.steps.iter().filter(|s| s.status == "completed").count();
                     let total = p.steps.len();
-                    lines.push(format!("  [{:>11}] {:<20} {} ({}/{} done)", p.status, p.name, p.title, done, total));
+                    let marker = if current_plan.as_deref() == Some(&p.name) { " *" } else { "" };
+                    lines.push(format!("  [{:>11}] {:<20} {} ({}/{} done){marker}", p.status, p.name, p.title, done, total));
+                }
+                if let Some(ref cp) = current_plan {
+                    lines.push(format!("  (* = current plan: {cp})"));
                 }
                 bus.send(ServerMessage::Notice { text: lines.join("\n") }).await;
             }
+        } else if rest == "clear" {
+            // Unset current plan
+            {
+                let mut sessions = state.sessions.write().await;
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    session.current_plan = None;
+                }
+            }
+            bus.send(ServerMessage::Notice { text: "Current plan cleared.".to_string() }).await;
         } else if let Some(name) = rest.strip_prefix("delete ") {
             let name = name.trim();
             match state.workspace_store.delete_plan(&cwd, name).await {
                 Ok(()) => {
+                    // Clear current plan if it was the deleted one
+                    if current_plan.as_deref() == Some(name) {
+                        let mut sessions = state.sessions.write().await;
+                        if let Some(session) = sessions.get_mut(&session_id) {
+                            session.current_plan = None;
+                        }
+                    }
                     bus.send(ServerMessage::Notice { text: format!("Plan '{name}' deleted.") }).await;
                 }
                 Err(e) => {
@@ -1236,15 +1294,24 @@ async fn handle_slash_command(
                 }
             }
         } else {
-            // View specific plan
+            // View specific plan and set as current
             let name = rest;
             match state.workspace_store.load_plan(&cwd, name).await {
                 Ok(plan) => {
+                    {
+                        let mut sessions = state.sessions.write().await;
+                        if let Some(session) = sessions.get_mut(&session_id) {
+                            session.current_plan = Some(plan.name.clone());
+                        }
+                    }
                     bus.send(ServerMessage::PlanUpdate {
-                        name: plan.name,
+                        name: plan.name.clone(),
                         title: plan.title,
-                        status: plan.status,
+                        status: plan.status.clone(),
                         steps: plan.steps,
+                    }).await;
+                    bus.send(ServerMessage::Notice {
+                        text: format!("Plan '{}' is now the current plan. [{}]", plan.name, plan.status),
                     }).await;
                 }
                 Err(e) => {
@@ -1535,6 +1602,13 @@ async fn execute_task_plan(
     if let Some(ref cwd) = cwd {
         if let Err(e) = state.workspace_store.save_plan(cwd, &disk_plan).await {
             tracing::warn!("failed to auto-persist plan: {e}");
+        }
+        // Set as current plan for the session
+        {
+            let mut sessions = state.sessions.write().await;
+            if let Some(session) = sessions.get_mut(&session_id) {
+                session.current_plan = Some(disk_plan_name.clone());
+            }
         }
         bus.send(ServerMessage::PlanUpdate {
             name: disk_plan.name.clone(),
