@@ -168,16 +168,9 @@ pub trait ToolContext: Send + Sync {
         name: &str,
     ) -> Result<crate::workspace::SavedScript, String>;
     async fn list_scripts(&self, cwd: &str) -> Vec<crate::workspace::SavedScript>;
-    async fn save_plan(
-        &self,
-        cwd: &str,
-        plan: &crate::workspace::SavedPlan,
-    ) -> Result<(), String>;
-    async fn load_plan(
-        &self,
-        cwd: &str,
-        name: &str,
-    ) -> Result<crate::workspace::SavedPlan, String>;
+    async fn save_plan(&self, cwd: &str, plan: &crate::workspace::SavedPlan) -> Result<(), String>;
+    async fn load_plan(&self, cwd: &str, name: &str)
+        -> Result<crate::workspace::SavedPlan, String>;
     async fn list_plans(&self, cwd: &str) -> Vec<crate::workspace::SavedPlan>;
     async fn delete_plan(&self, cwd: &str, name: &str) -> Result<(), String>;
 
@@ -1438,12 +1431,18 @@ async fn execute_plan_save(
         Some(n) if !n.is_empty() => n.to_string(),
         _ => match ctx.get_current_plan(session_id).await {
             Some(cp) => cp,
-            None => return "Error: plan_save requires a 'name' argument (no current plan set).".to_string(),
+            None => {
+                return "Error: plan_save requires a 'name' argument (no current plan set)."
+                    .to_string()
+            }
         },
     };
 
     // Validate name: [a-z0-9_-]+ only
-    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
         return "Error: plan name must match [a-z0-9_-]+.".to_string();
     }
 
@@ -1507,7 +1506,10 @@ async fn execute_plan_save(
                 steps: plan.steps,
             })
             .await;
-            format!("Plan '{name}' saved ({} steps). Now the current plan.", steps.len())
+            format!(
+                "Plan '{name}' saved ({} steps). Now the current plan.",
+                steps.len()
+            )
         }
         Err(e) => format!("Error saving plan: {e}"),
     }
@@ -1570,7 +1572,10 @@ async fn execute_plan_read(
                         .as_ref()
                         .map(|d| format!(" — {d}"))
                         .unwrap_or_default();
-                    lines.push(format!("  {icon} {}: {}{detail_str}", step.id, step.description));
+                    lines.push(format!(
+                        "  {icon} {}: {}{detail_str}",
+                        step.id, step.description
+                    ));
                 }
                 lines.join("\n")
             }
@@ -1589,7 +1594,10 @@ async fn execute_plan_update(
         Some(n) if !n.is_empty() => n.to_string(),
         _ => match ctx.get_current_plan(session_id).await {
             Some(cp) => cp,
-            None => return "Error: plan_update requires a 'name' argument (no current plan set).".to_string(),
+            None => {
+                return "Error: plan_update requires a 'name' argument (no current plan set)."
+                    .to_string()
+            }
         },
     };
     let step_id = match ptc.tool_call.arguments["step_id"].as_str() {

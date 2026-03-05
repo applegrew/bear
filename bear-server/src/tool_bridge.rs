@@ -191,7 +191,9 @@ impl ToolContext for ServerState {
 
     async fn get_current_plan(&self, session_id: uuid::Uuid) -> Option<String> {
         let sessions = self.sessions.read().await;
-        sessions.get(&session_id).and_then(|s| s.current_plan.clone())
+        sessions
+            .get(&session_id)
+            .and_then(|s| s.current_plan.clone())
     }
 
     async fn set_current_plan(&self, session_id: uuid::Uuid, name: Option<String>) {

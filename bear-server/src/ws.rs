@@ -55,7 +55,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/session max_subagents",
         "Set max concurrent subagents (usage: /session max_subagents <count>)",
     ),
-    ("/plan", "List/view/delete plans (usage: /plan [name] | /plan delete <name>)"),
+    (
+        "/plan",
+        "List/view/delete plans (usage: /plan [name] | /plan delete <name>)",
+    ),
     ("/allowed", "Show auto-approved commands"),
     ("/exit", "Disconnect, keep session alive"),
     ("/end", "End session, pick another"),
@@ -1241,7 +1244,10 @@ async fn handle_slash_command(
             }
         };
         let Some(cwd) = cwd else {
-            bus.send(ServerMessage::Error { text: "Session not found.".to_string() }).await;
+            bus.send(ServerMessage::Error {
+                text: "Session not found.".to_string(),
+            })
+            .await;
             return true;
         };
 
@@ -1253,19 +1259,32 @@ async fn handle_slash_command(
                     Some(n) => format!(" (current: {n})"),
                     None => String::new(),
                 };
-                bus.send(ServerMessage::Notice { text: format!("No plans found.{cur_str}") }).await;
+                bus.send(ServerMessage::Notice {
+                    text: format!("No plans found.{cur_str}"),
+                })
+                .await;
             } else {
                 let mut lines = vec!["Plans:".to_string()];
                 for p in &plans {
                     let done = p.steps.iter().filter(|s| s.status == "completed").count();
                     let total = p.steps.len();
-                    let marker = if current_plan.as_deref() == Some(&p.name) { " *" } else { "" };
-                    lines.push(format!("  [{:>11}] {:<20} {} ({}/{} done){marker}", p.status, p.name, p.title, done, total));
+                    let marker = if current_plan.as_deref() == Some(&p.name) {
+                        " *"
+                    } else {
+                        ""
+                    };
+                    lines.push(format!(
+                        "  [{:>11}] {:<20} {} ({}/{} done){marker}",
+                        p.status, p.name, p.title, done, total
+                    ));
                 }
                 if let Some(ref cp) = current_plan {
                     lines.push(format!("  (* = current plan: {cp})"));
                 }
-                bus.send(ServerMessage::Notice { text: lines.join("\n") }).await;
+                bus.send(ServerMessage::Notice {
+                    text: lines.join("\n"),
+                })
+                .await;
             }
         } else if rest == "clear" {
             // Unset current plan
@@ -1275,7 +1294,10 @@ async fn handle_slash_command(
                     session.current_plan = None;
                 }
             }
-            bus.send(ServerMessage::Notice { text: "Current plan cleared.".to_string() }).await;
+            bus.send(ServerMessage::Notice {
+                text: "Current plan cleared.".to_string(),
+            })
+            .await;
         } else if let Some(name) = rest.strip_prefix("delete ") {
             let name = name.trim();
             match state.workspace_store.delete_plan(&cwd, name).await {
@@ -1287,10 +1309,16 @@ async fn handle_slash_command(
                             session.current_plan = None;
                         }
                     }
-                    bus.send(ServerMessage::Notice { text: format!("Plan '{name}' deleted.") }).await;
+                    bus.send(ServerMessage::Notice {
+                        text: format!("Plan '{name}' deleted."),
+                    })
+                    .await;
                 }
                 Err(e) => {
-                    bus.send(ServerMessage::Error { text: format!("Error: {e}") }).await;
+                    bus.send(ServerMessage::Error {
+                        text: format!("Error: {e}"),
+                    })
+                    .await;
                 }
             }
         } else {
@@ -1309,13 +1337,21 @@ async fn handle_slash_command(
                         title: plan.title,
                         status: plan.status.clone(),
                         steps: plan.steps,
-                    }).await;
+                    })
+                    .await;
                     bus.send(ServerMessage::Notice {
-                        text: format!("Plan '{}' is now the current plan. [{}]", plan.name, plan.status),
-                    }).await;
+                        text: format!(
+                            "Plan '{}' is now the current plan. [{}]",
+                            plan.name, plan.status
+                        ),
+                    })
+                    .await;
                 }
                 Err(e) => {
-                    bus.send(ServerMessage::Error { text: format!("Error: {e}") }).await;
+                    bus.send(ServerMessage::Error {
+                        text: format!("Error: {e}"),
+                    })
+                    .await;
                 }
             }
         }
@@ -1583,18 +1619,29 @@ async fn execute_task_plan(
     let plan_title = if tasks.len() == 1 {
         tasks[0].description.clone()
     } else {
-        format!("{} ({} tasks)", tasks[0].description.split_once('.').map(|(s, _)| s).unwrap_or(&tasks[0].description), tasks.len())
+        format!(
+            "{} ({} tasks)",
+            tasks[0]
+                .description
+                .split_once('.')
+                .map(|(s, _)| s)
+                .unwrap_or(&tasks[0].description),
+            tasks.len()
+        )
     };
     let now = chrono::Utc::now().to_rfc3339();
     let mut disk_plan = bear_core::workspace::SavedPlan {
         name: disk_plan_name.clone(),
         title: plan_title.clone(),
-        steps: tasks.iter().map(|t| bear_core::workspace::PlanStep {
-            id: t.id.clone(),
-            description: t.description.clone(),
-            status: "pending".to_string(),
-            detail: None,
-        }).collect(),
+        steps: tasks
+            .iter()
+            .map(|t| bear_core::workspace::PlanStep {
+                id: t.id.clone(),
+                description: t.description.clone(),
+                status: "pending".to_string(),
+                detail: None,
+            })
+            .collect(),
         status: "draft".to_string(),
         created_at: now.clone(),
         updated_at: now,
@@ -1615,7 +1662,8 @@ async fn execute_task_plan(
             title: disk_plan.title.clone(),
             status: disk_plan.status.clone(),
             steps: disk_plan.steps.clone(),
-        }).await;
+        })
+        .await;
     }
 
     // Collect read-only tasks and write tasks
@@ -1647,7 +1695,16 @@ async fn execute_task_plan(
                     detail: None,
                 })
                 .await;
-                persist_step_status(&state.workspace_store, cwd.as_deref(), &mut disk_plan, &task.id, "in_progress", None, bus).await;
+                persist_step_status(
+                    &state.workspace_store,
+                    cwd.as_deref(),
+                    &mut disk_plan,
+                    &task.id,
+                    "in_progress",
+                    None,
+                    bus,
+                )
+                .await;
 
                 let subagent_id = format!("sa_{}", Uuid::new_v4());
                 bus.send(ServerMessage::SubagentUpdate {
@@ -1859,7 +1916,16 @@ async fn execute_task_plan(
                     detail: None,
                 })
                 .await;
-                persist_step_status(&state.workspace_store, cwd.as_deref(), &mut disk_plan, task_id, "completed", None, bus).await;
+                persist_step_status(
+                    &state.workspace_store,
+                    cwd.as_deref(),
+                    &mut disk_plan,
+                    task_id,
+                    "completed",
+                    None,
+                    bus,
+                )
+                .await;
             }
 
             // Inject subagent results into session history as context
@@ -1891,7 +1957,16 @@ async fn execute_task_plan(
                 detail: Some("Terminated by user".to_string()),
             })
             .await;
-            persist_step_status(&state.workspace_store, cwd.as_deref(), &mut disk_plan, &task.id, "failed", Some("Terminated by user"), bus).await;
+            persist_step_status(
+                &state.workspace_store,
+                cwd.as_deref(),
+                &mut disk_plan,
+                &task.id,
+                "failed",
+                Some("Terminated by user"),
+                bus,
+            )
+            .await;
             continue;
         }
 
@@ -1902,7 +1977,16 @@ async fn execute_task_plan(
             detail: None,
         })
         .await;
-        persist_step_status(&state.workspace_store, cwd.as_deref(), &mut disk_plan, &task.id, "in_progress", None, bus).await;
+        persist_step_status(
+            &state.workspace_store,
+            cwd.as_deref(),
+            &mut disk_plan,
+            &task.id,
+            "in_progress",
+            None,
+            bus,
+        )
+        .await;
 
         // Inject the task description as a user message so the LLM knows what to do
         {
@@ -1938,7 +2022,16 @@ async fn execute_task_plan(
             detail: None,
         })
         .await;
-        persist_step_status(&state.workspace_store, cwd.as_deref(), &mut disk_plan, &task.id, "completed", None, bus).await;
+        persist_step_status(
+            &state.workspace_store,
+            cwd.as_deref(),
+            &mut disk_plan,
+            &task.id,
+            "completed",
+            None,
+            bus,
+        )
+        .await;
     }
 }
 

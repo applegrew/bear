@@ -745,7 +745,14 @@ fn dispatch_server_msg(
         } => {
             let step_tuples: Vec<(String, String, String, Option<String>)> = steps
                 .iter()
-                .map(|s| (s.id.clone(), s.description.clone(), s.status.clone(), s.detail.clone()))
+                .map(|s| {
+                    (
+                        s.id.clone(),
+                        s.description.clone(),
+                        s.status.clone(),
+                        s.detail.clone(),
+                    )
+                })
                 .collect();
             let _ = render_tx.send(RenderCmd::PlanUpdate {
                 _name: name.clone(),

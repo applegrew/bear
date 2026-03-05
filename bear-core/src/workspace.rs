@@ -418,8 +418,18 @@ mod tests {
             name: "refactor".to_string(),
             title: "Refactor auth module".to_string(),
             steps: vec![
-                PlanStep { id: "1".into(), description: "Read code".into(), status: "completed".into(), detail: None },
-                PlanStep { id: "2".into(), description: "Write tests".into(), status: "pending".into(), detail: None },
+                PlanStep {
+                    id: "1".into(),
+                    description: "Read code".into(),
+                    status: "completed".into(),
+                    detail: None,
+                },
+                PlanStep {
+                    id: "2".into(),
+                    description: "Write tests".into(),
+                    status: "pending".into(),
+                    detail: None,
+                },
             ],
             status: "in_progress".to_string(),
             created_at: "2025-01-01T00:00:00Z".to_string(),
@@ -461,12 +471,25 @@ mod tests {
     #[tokio::test]
     async fn plan_recompute_status() {
         let mut plan = SavedPlan {
-            name: "t".into(), title: "t".into(),
+            name: "t".into(),
+            title: "t".into(),
             steps: vec![
-                PlanStep { id: "1".into(), description: "a".into(), status: "pending".into(), detail: None },
-                PlanStep { id: "2".into(), description: "b".into(), status: "pending".into(), detail: None },
+                PlanStep {
+                    id: "1".into(),
+                    description: "a".into(),
+                    status: "pending".into(),
+                    detail: None,
+                },
+                PlanStep {
+                    id: "2".into(),
+                    description: "b".into(),
+                    status: "pending".into(),
+                    detail: None,
+                },
             ],
-            status: "".into(), created_at: "".into(), updated_at: "".into(),
+            status: "".into(),
+            created_at: "".into(),
+            updated_at: "".into(),
         };
         plan.recompute_status();
         assert_eq!(plan.status, "draft");
@@ -487,7 +510,12 @@ mod tests {
         // Simulate adding a new pending step to a completed plan
         plan.steps[0].status = "completed".to_string();
         plan.steps[1].status = "completed".to_string();
-        plan.steps.push(PlanStep { id: "3".into(), description: "c".into(), status: "pending".into(), detail: None });
+        plan.steps.push(PlanStep {
+            id: "3".into(),
+            description: "c".into(),
+            status: "pending".into(),
+            detail: None,
+        });
         plan.recompute_status();
         assert_eq!(plan.status, "partially_implemented");
     }
