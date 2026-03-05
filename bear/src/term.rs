@@ -85,12 +85,7 @@ pub enum RenderCmd {
 
 pub fn cleanup_terminal() {
     let mut out = io::stdout();
-    let _ = execute!(
-        out,
-        event::DisableMouseCapture,
-        cursor::Show,
-        terminal::LeaveAlternateScreen
-    );
+    let _ = execute!(out, cursor::Show, terminal::LeaveAlternateScreen);
     let _ = terminal::disable_raw_mode();
 }
 
@@ -326,21 +321,6 @@ pub fn spawn_terminal_thread(
             // Poll terminal events (50ms)
             if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
                 let ev = event::read();
-                // Handle mouse scroll for viewport scrolling
-                if let Ok(Event::Mouse(mouse)) = &ev {
-                    match mouse.kind {
-                        event::MouseEventKind::ScrollUp => {
-                            state.scroll_up(3);
-                            state.full_repaint();
-                        }
-                        event::MouseEventKind::ScrollDown => {
-                            state.scroll_down(3);
-                            state.full_repaint();
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
                 if let Ok(Event::Key(key)) = ev {
                     let action = map_key(key);
 
@@ -933,12 +913,7 @@ impl TermState {
         terminal::enable_raw_mode()?;
         let (w, h) = terminal::size().unwrap_or((80, 24));
         let mut out = io::stdout();
-        let _ = execute!(
-            out,
-            terminal::EnterAlternateScreen,
-            cursor::Hide,
-            event::EnableMouseCapture
-        );
+        let _ = execute!(out, terminal::EnterAlternateScreen, cursor::Hide);
         Ok(Self {
             input_buf: String::new(),
             cursor_pos: 0,
@@ -1278,7 +1253,12 @@ impl TermState {
             let subagent_info = if self.active_subagents.is_empty() {
                 String::new()
             } else {
-                format!("  [{}]", self.active_subagents.len())
+                let n = self.active_subagents.len();
+                if n == 1 {
+                    "  [1 sub-agent]".to_string()
+                } else {
+                    format!("  [{n} sub-agents]")
+                }
             };
             let left = format!("{spinner}  {session}{subagent_info}");
             // Right: shortcuts
@@ -1589,12 +1569,35 @@ impl TermState {
         self.push_line(&a_gray("  ↑↓ navigate  ⏎ select"));
         self.full_repaint();
 
-        // Play bell
+        // Drain pending messages — if the resolution is already queued (replay),
+        // skip the bell and return immediately.
+        while let Ok(cmd) = render_rx.try_recv() {
+            if let RenderCmd::ToolResolved {
+                tool_call_id: resolved_id,
+                approved,
+            } = &cmd
+            {
+                if resolved_id == tool_call_id {
+                    self.output_lines.truncate(picker_start);
+                    let label = if *approved {
+                        a_green("Approved (by another client)")
+                    } else {
+                        a_red("Denied (by another client)")
+                    };
+                    self.push_line(&format!("  {} {}", a_yellow("❯"), label));
+                    self.push_line("");
+                    return None; // resolved externally — no bell
+                }
+            }
+            self.deferred_cmds.push(cmd);
+        }
+
+        // Play bell (only if prompt is genuinely waiting for user input)
         let _ = execute!(io::stdout(), Print("\x07"));
         let _ = io::stdout().flush();
 
         loop {
-            // Check if another client already resolved this tool confirmation
+            // Check if another client resolved this tool confirmation
             if let Ok(cmd) = render_rx.try_recv() {
                 if let RenderCmd::ToolResolved {
                     tool_call_id: resolved_id,
@@ -1719,6 +1722,26 @@ impl TermState {
         self.scroll_offset = 0;
         self.full_repaint();
 
+        // Drain pending messages — if the resolution is already queued (replay),
+        // skip the bell and return immediately.
+        while let Ok(cmd) = render_rx.try_recv() {
+            if let Some(pid) = prompt_id {
+                if let RenderCmd::PromptResolved {
+                    prompt_id: resolved_id,
+                } = &cmd
+                {
+                    if resolved_id == pid {
+                        self.output_lines.truncate(menu_start);
+                        self.push_line(&format!("  {}", a_gray("(resolved by another client)")));
+                        self.push_line("");
+                        return None; // resolved externally — no bell
+                    }
+                }
+            }
+            self.deferred_cmds.push(cmd);
+        }
+
+        // Play bell (only if prompt is genuinely waiting for user input)
         let _ = execute!(io::stdout(), Print("\x07"));
         let _ = io::stdout().flush();
 

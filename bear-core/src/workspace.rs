@@ -76,6 +76,127 @@ impl SavedPlan {
             "in_progress".to_string()
         };
     }
+
+    /// Serialize this plan to a Markdown string with YAML frontmatter.
+    pub fn to_markdown(&self) -> Result<String, String> {
+        let mut out = String::new();
+        out.push_str("---\n");
+        out.push_str(&format!("name: {}\n", self.name));
+        out.push_str(&format!("title: {}\n", self.title));
+        out.push_str(&format!("status: {}\n", self.status));
+        out.push_str(&format!("created_at: {}\n", self.created_at));
+        out.push_str(&format!("updated_at: {}\n", self.updated_at));
+        out.push_str("---\n\n");
+        out.push_str(&format!("# {}\n\n", self.title));
+        for step in &self.steps {
+            let check = match step.status.as_str() {
+                "completed" => "[x]",
+                "in_progress" => "[>]",
+                "failed" => "[-]",
+                _ => "[ ]",
+            };
+            let detail_str = step
+                .detail
+                .as_ref()
+                .map(|d| format!(" — {d}"))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "- {} **{}**: {}{detail_str}\n",
+                check, step.id, step.description
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Parse a plan from a Markdown string with YAML frontmatter.
+    pub fn from_markdown(content: &str) -> Result<Self, String> {
+        let content = content.trim_start_matches('\u{feff}'); // strip BOM
+        if !content.starts_with("---") {
+            return Err("plan file missing frontmatter delimiter".to_string());
+        }
+        let after_first = &content[3..].trim_start_matches('\n');
+        let end_idx = after_first
+            .find("\n---")
+            .ok_or_else(|| "plan file missing closing frontmatter delimiter".to_string())?;
+        let fm_str = &after_first[..end_idx];
+        let body = &after_first[end_idx + 4..]; // skip "\n---"
+
+        // Parse simple YAML key: value lines
+        let mut name = String::new();
+        let mut title = String::new();
+        let mut status = String::new();
+        let mut created_at = String::new();
+        let mut updated_at = String::new();
+        for line in fm_str.lines() {
+            let line = line.trim();
+            if let Some((key, val)) = line.split_once(": ") {
+                let key = key.trim();
+                let val = val.trim();
+                match key {
+                    "name" => name = val.to_string(),
+                    "title" => title = val.to_string(),
+                    "status" => status = val.to_string(),
+                    "created_at" => created_at = val.to_string(),
+                    "updated_at" => updated_at = val.to_string(),
+                    _ => {}
+                }
+            }
+        }
+        if name.is_empty() {
+            return Err("plan frontmatter missing 'name' field".to_string());
+        }
+
+        // Parse steps from markdown checklist lines
+        let mut steps = Vec::new();
+        for line in body.lines() {
+            let trimmed = line.trim();
+            // Match: - [x] **id**: description — detail
+            //        - [ ] **id**: description
+            let rest = if let Some(r) = trimmed.strip_prefix("- [x] ") {
+                Some(("completed", r))
+            } else if let Some(r) = trimmed.strip_prefix("- [>] ") {
+                Some(("in_progress", r))
+            } else if let Some(r) = trimmed.strip_prefix("- [-] ") {
+                Some(("failed", r))
+            } else if let Some(r) = trimmed.strip_prefix("- [ ] ") {
+                Some(("pending", r))
+            } else {
+                None
+            };
+            if let Some((status, rest)) = rest {
+                // Parse **id**: description — detail
+                if let Some(after_bold) = rest.strip_prefix("**") {
+                    if let Some(bold_end) = after_bold.find("**") {
+                        let id = &after_bold[..bold_end];
+                        let after_id = &after_bold[bold_end + 2..];
+                        let after_id = after_id
+                            .strip_prefix(": ")
+                            .unwrap_or(after_id.strip_prefix(":").unwrap_or(after_id));
+                        let (description, detail) = if let Some(idx) = after_id.find(" — ") {
+                            (&after_id[..idx], Some(after_id[idx + 5..].to_string()))
+                        } else {
+                            (after_id, None)
+                        };
+                        steps.push(PlanStep {
+                            id: id.to_string(),
+                            description: description.trim().to_string(),
+                            status: status.to_string(),
+                            detail,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(SavedPlan {
+            name,
+            title,
+            steps,
+            status,
+            created_at,
+            updated_at,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +328,7 @@ impl WorkspaceStore {
     // Plan persistence
     // -----------------------------------------------------------------------
 
-    /// Save a plan to `<cwd>/.bear/plans/<name>.json`.
+    /// Save a plan to `<cwd>/.bear/plans/<name>.md`.
     pub async fn save_plan(&self, cwd: &str, plan: &SavedPlan) -> Result<(), String> {
         let cwd_path = Path::new(cwd);
         let lock = self.dir_lock(cwd_path).await;
@@ -217,21 +338,25 @@ impl WorkspaceStore {
             .await
             .map_err(|e| format!("failed to create .bear/plans dir: {e}"))?;
 
-        let path = plans_dir.join(format!("{}.json", plan.name));
-        let json = serde_json::to_string_pretty(plan)
-            .map_err(|e| format!("failed to serialize plan: {e}"))?;
-        tokio::fs::write(&path, json)
+        let path = plans_dir.join(format!("{}.md", plan.name));
+        let md = plan.to_markdown()?;
+        tokio::fs::write(&path, md)
             .await
             .map_err(|e| format!("failed to write {}: {e}", path.display()))
     }
 
-    /// Load a plan by name from `<cwd>/.bear/plans/<name>.json`.
+    /// Load a plan by name from `<cwd>/.bear/plans/<name>.md`.
+    /// Falls back to `<name>.json` for backward compatibility.
     pub async fn load_plan(&self, cwd: &str, name: &str) -> Result<SavedPlan, String> {
-        let path = Path::new(cwd)
-            .join(BEAR_DIR)
-            .join(PLANS_DIR)
-            .join(format!("{name}.json"));
-        let data = tokio::fs::read_to_string(&path)
+        let base = Path::new(cwd).join(BEAR_DIR).join(PLANS_DIR);
+        // Try .md first
+        let md_path = base.join(format!("{name}.md"));
+        if let Ok(data) = tokio::fs::read_to_string(&md_path).await {
+            return SavedPlan::from_markdown(&data);
+        }
+        // Fallback to legacy .json
+        let json_path = base.join(format!("{name}.json"));
+        let data = tokio::fs::read_to_string(&json_path)
             .await
             .map_err(|e| format!("plan '{name}' not found: {e}"))?;
         serde_json::from_str(&data).map_err(|e| format!("failed to parse plan '{name}': {e}"))
@@ -246,9 +371,30 @@ impl WorkspaceStore {
         };
 
         let mut plans = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            let ext = path.extension().and_then(|e| e.to_str());
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string());
+            if ext == Some("md") {
+                if let Ok(data) = tokio::fs::read_to_string(&path).await {
+                    if let Ok(plan) = SavedPlan::from_markdown(&data) {
+                        if let Some(ref s) = stem {
+                            seen.insert(s.clone());
+                        }
+                        plans.push(plan);
+                    }
+                }
+            } else if ext == Some("json") {
+                // Legacy fallback — skip if .md version exists
+                if let Some(ref s) = stem {
+                    if seen.contains(s) {
+                        continue;
+                    }
+                }
                 if let Ok(data) = tokio::fs::read_to_string(&path).await {
                     if let Ok(plan) = serde_json::from_str::<SavedPlan>(&data) {
                         plans.push(plan);
@@ -260,19 +406,23 @@ impl WorkspaceStore {
         plans
     }
 
-    /// Delete a plan from `<cwd>/.bear/plans/<name>.json`.
+    /// Delete a plan from `<cwd>/.bear/plans/<name>.md`.
+    /// Also removes legacy `<name>.json` if present.
     pub async fn delete_plan(&self, cwd: &str, name: &str) -> Result<(), String> {
         let cwd_path = Path::new(cwd);
         let lock = self.dir_lock(cwd_path).await;
         let _guard = lock.lock().await;
 
-        let path = cwd_path
-            .join(BEAR_DIR)
-            .join(PLANS_DIR)
-            .join(format!("{name}.json"));
-        tokio::fs::remove_file(&path)
-            .await
-            .map_err(|e| format!("failed to delete plan '{name}': {e}"))
+        let base = cwd_path.join(BEAR_DIR).join(PLANS_DIR);
+        let md_path = base.join(format!("{name}.md"));
+        let json_path = base.join(format!("{name}.json"));
+        let md_ok = tokio::fs::remove_file(&md_path).await.is_ok();
+        let json_ok = tokio::fs::remove_file(&json_path).await.is_ok();
+        if md_ok || json_ok {
+            Ok(())
+        } else {
+            Err(format!("failed to delete plan '{name}': file not found"))
+        }
     }
 
     /// List all saved scripts in `<cwd>/.bear/scripts/`.
@@ -518,5 +668,72 @@ mod tests {
         });
         plan.recompute_status();
         assert_eq!(plan.status, "partially_implemented");
+    }
+
+    #[test]
+    fn plan_markdown_round_trip() {
+        let plan = SavedPlan {
+            name: "add_auth".to_string(),
+            title: "Add Authentication".to_string(),
+            steps: vec![
+                PlanStep {
+                    id: "step_1".into(),
+                    description: "Set up OAuth provider".into(),
+                    status: "completed".into(),
+                    detail: None,
+                },
+                PlanStep {
+                    id: "step_2".into(),
+                    description: "Implement login endpoint".into(),
+                    status: "in_progress".into(),
+                    detail: Some("working on token validation".into()),
+                },
+                PlanStep {
+                    id: "step_3".into(),
+                    description: "Add middleware".into(),
+                    status: "pending".into(),
+                    detail: None,
+                },
+                PlanStep {
+                    id: "step_4".into(),
+                    description: "Write error handler".into(),
+                    status: "failed".into(),
+                    detail: Some("timeout issue".into()),
+                },
+            ],
+            status: "in_progress".to_string(),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            updated_at: "2025-01-02T00:00:00Z".to_string(),
+        };
+
+        let md = plan.to_markdown().unwrap();
+        assert!(md.starts_with("---\n"));
+        assert!(md.contains("# Add Authentication"));
+        assert!(md.contains("- [x] **step_1**: Set up OAuth provider"));
+        assert!(
+            md.contains("- [>] **step_2**: Implement login endpoint — working on token validation")
+        );
+        assert!(md.contains("- [ ] **step_3**: Add middleware"));
+        assert!(md.contains("- [-] **step_4**: Write error handler — timeout issue"));
+
+        let parsed = SavedPlan::from_markdown(&md).unwrap();
+        assert_eq!(parsed.name, "add_auth");
+        assert_eq!(parsed.title, "Add Authentication");
+        assert_eq!(parsed.status, "in_progress");
+        assert_eq!(parsed.created_at, "2025-01-01T00:00:00Z");
+        assert_eq!(parsed.updated_at, "2025-01-02T00:00:00Z");
+        assert_eq!(parsed.steps.len(), 4);
+        assert_eq!(parsed.steps[0].id, "step_1");
+        assert_eq!(parsed.steps[0].status, "completed");
+        assert_eq!(parsed.steps[0].detail, None);
+        assert_eq!(parsed.steps[1].id, "step_2");
+        assert_eq!(parsed.steps[1].status, "in_progress");
+        assert_eq!(
+            parsed.steps[1].detail.as_deref(),
+            Some("working on token validation")
+        );
+        assert_eq!(parsed.steps[2].status, "pending");
+        assert_eq!(parsed.steps[3].status, "failed");
+        assert_eq!(parsed.steps[3].detail.as_deref(), Some("timeout issue"));
     }
 }

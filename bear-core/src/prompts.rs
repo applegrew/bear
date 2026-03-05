@@ -116,9 +116,9 @@ Arguments: {"name": "string", "args": {"arg_name": value, ...}}
 Auto-approved. Loads the script from `.bear/scripts/<name>.json`, injects argument values, and executes it in the sandboxed boa engine. Use js_script_list first to discover available scripts.
 
 ### 19. plan_save
-Create or replace a persistent task plan in `.bear/plans/`.
+Create or replace a persistent task plan in `.bear/plans/<name>.md`.
 Arguments: {"name?": "string", "title": "string", "steps": [{"id": "string", "description": "string", "status?": "pending"}]}
-Auto-approved. Plan names must match [a-z0-9_-]+. The saved plan becomes the session's current plan. If name is omitted, updates the current plan. Only one plan can be active at a time. The overall plan status (draft/in_progress/completed/failed) is auto-computed from step statuses.
+Auto-approved. Plan names must be short, readable snake_case describing the plan's purpose (e.g. `add_auth`, `refactor_api`, `fix_login_bug`). Names must match [a-z0-9_-]+. The saved plan becomes the session's current plan. If name is omitted, updates the current plan. Only one plan can be active at a time. The overall plan status (draft/in_progress/completed/failed) is auto-computed from step statuses.
 
 ### 20. plan_read
 Read the current plan, a plan by name, or list all plans if no name and no current plan.

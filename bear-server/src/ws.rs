@@ -1613,8 +1613,35 @@ async fn execute_task_plan(
         let sessions = state.sessions.read().await;
         sessions.get(&session_id).map(|s| s.info.cwd.clone())
     };
-    // Derive a short plan name from plan_id (e.g. "plan_abc123" -> "plan-abc123")
-    let disk_plan_name = plan_id.replace('_', "-");
+    // Derive a readable snake_case plan name from the first task description
+    let disk_plan_name = {
+        let raw = &tasks[0].description;
+        let slug: String = raw
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        // Collapse consecutive underscores, trim leading/trailing
+        let collapsed: String = slug
+            .split('_')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("_");
+        // Truncate to ~40 chars on a word boundary
+        if collapsed.len() > 40 {
+            collapsed[..40]
+                .rfind('_')
+                .map(|i| collapsed[..i].to_string())
+                .unwrap_or_else(|| collapsed[..40].to_string())
+        } else {
+            collapsed
+        }
+    };
     // Build title from first task descriptions
     let plan_title = if tasks.len() == 1 {
         tasks[0].description.clone()

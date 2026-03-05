@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Bear Browser Client — OpenCode-style TUI powered by xterm.js
 // ---------------------------------------------------------------------------
-const BEAR_VERSION = '0.3.0';
+const BEAR_VERSION = '0.3.1';
 // Relay configuration: these globals must be set by the hosting page.
 // bear.js communicates exclusively via the public server, which proxies
 // all signaling (offer, answer, ICE) to the relay on behalf of the browser.
@@ -644,7 +644,7 @@ export class BearClient {
           : '\u00b7\u00b7\u00b7\u00b7\u00b7';
         const session = this._sessionName || 'bear';
         const subagentInfo = this._activeSubagents.size > 0
-          ? `  \uD83D\uDD0D${this._activeSubagents.size}`
+          ? `  \uD83D\uDD0D${this._activeSubagents.size} sub-agent${this._activeSubagents.size === 1 ? '' : 's'}`
           : '';
         this._statusSpinner.textContent = spinner;
         this._statusSession.textContent = session + subagentInfo;
@@ -1356,7 +1356,7 @@ export class BearClient {
         this.toolConfirmCall = tc;
         this._tcIdx = 0;
         this.inToolConfirm = true;
-        this._playAlert();
+        this._scheduleAlert();
         this._renderToolConfirm();
         break;
       }
@@ -1427,6 +1427,7 @@ export class BearClient {
 
       case 'tool_resolved':
         // Another client resolved the tool confirmation — dismiss our picker
+        this._cancelAlert();
         if (this.inToolConfirm && this.toolConfirmCall && this.toolConfirmCall.id === msg.tool_call_id) {
           this.inToolConfirm = false;
           this.toolConfirmCall = null;
@@ -1443,6 +1444,7 @@ export class BearClient {
       case 'prompt_resolved': {
         // Another client resolved a user prompt or task plan — dismiss our picker.
         // Task plan prompts use `__taskplan__<plan_id>` as the userPromptId.
+        this._cancelAlert();
         const matchesPrompt = this.inUserPrompt && (
           this.userPromptId === msg.prompt_id ||
           this.userPromptId === `__taskplan__${msg.prompt_id}`
@@ -1499,7 +1501,7 @@ export class BearClient {
         this.userPromptSelected = new Array(msg.options.length).fill(false);
         this._pushLine(`${C.bold}${C.cyan}  ${msg.question}${C.reset}`);
         this._fullRepaint();
-        this._playAlert();
+        this._scheduleAlert();
         this._renderUserPrompt();
         break;
 
@@ -1523,7 +1525,7 @@ export class BearClient {
         this.userPromptSelected = [false, false];
         this._pushLine(`${C.bold}${C.cyan}  Execute this plan?${C.reset}`);
         this._fullRepaint();
-        this._playAlert();
+        this._scheduleAlert();
         this._renderUserPrompt();
         break;
       }
@@ -2338,6 +2340,21 @@ export class BearClient {
   // -------------------------------------------------------------------------
   // Audio alert
   // -------------------------------------------------------------------------
+
+  _scheduleAlert() {
+    this._cancelAlert();
+    this._alertTimer = setTimeout(() => {
+      this._alertTimer = null;
+      this._playAlert();
+    }, 80);
+  }
+
+  _cancelAlert() {
+    if (this._alertTimer) {
+      clearTimeout(this._alertTimer);
+      this._alertTimer = null;
+    }
+  }
 
   _playAlert() {
     try {
