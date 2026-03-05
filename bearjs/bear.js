@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Bear Browser Client — OpenCode-style TUI powered by xterm.js
 // ---------------------------------------------------------------------------
-const BEAR_VERSION = '0.2.2.4';
+const BEAR_VERSION = '0.2.2.5';
 // Relay configuration: these globals must be set by the hosting page.
 // bear.js communicates exclusively via the public server, which proxies
 // all signaling (offer, answer, ICE) to the relay on behalf of the browser.
@@ -711,8 +711,8 @@ export class BearClient {
       this._fullRepaint();
     });
 
-    // iOS keyboard / rotation: use visualViewport to resize and reposition
-    // the layout so the input bar stays visible above the keyboard.
+    // iOS keyboard / rotation: reposition the fixed body so it matches
+    // the visual viewport (the area actually visible above the keyboard).
     const vv = window.visualViewport;
     if (vv) {
       let resizeRaf = null;
@@ -720,14 +720,11 @@ export class BearClient {
         if (resizeRaf) return;
         resizeRaf = requestAnimationFrame(() => {
           resizeRaf = null;
-          const h = vv.height;
-          const offsetTop = vv.offsetTop;
-          document.documentElement.style.height = h + 'px';
-          document.body.style.height = h + 'px';
-          // Translate body to match the visual viewport position —
-          // when iOS keyboard pushes the viewport down, offsetTop > 0
-          // and we need to shift our layout to stay in view.
-          document.body.style.transform = offsetTop ? `translateY(${offsetTop}px)` : '';
+          // position:fixed body — set top and height to match visual viewport
+          document.body.style.top = vv.offsetTop + 'px';
+          document.body.style.height = vv.height + 'px';
+          // Clear bottom so height wins
+          document.body.style.bottom = 'auto';
           this.fitAddon.fit();
         });
       };

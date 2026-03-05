@@ -1,7 +1,7 @@
 /* ---------------------------------------------------------------------------
  * Bear Browser Client — Styles for bear.js DOM elements
  * Tokyo Night theme
- * bear version: 0.2.2
+ * bear version: 0.2.2.5
  * --------------------------------------------------------------------------- */
 
 :root {
@@ -20,18 +20,23 @@
   --font:      'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
-html, body {
-  height: 100vh;
-  height: 100dvh; /* dynamic viewport height — accounts for iOS keyboard */
+html {
+  height: 100%;
+  background: var(--bg);
+  overflow: hidden;
+  font-family: var(--font);
+  color: var(--fg);
+}
+body {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  display: flex;
+  flex-direction: column;
   background: var(--bg);
   overflow: hidden;
   font-family: var(--font);
   color: var(--fg);
   touch-action: none; /* prevent browser pull-to-refresh and overscroll */
-}
-body {
-  display: flex;
-  flex-direction: column;
 }
 
 /* --- Output area (xterm) --- */
