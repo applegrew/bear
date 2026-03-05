@@ -42,6 +42,7 @@ body {
 }
 .xterm { height: 100%; }
 .xterm-cursor-layer { display: none !important; }
+.xterm-helper-textarea { opacity: 0 !important; pointer-events: none !important; }
 
 /* --- Slash command dropdown (above input) --- */
 #slash-dropdown {
