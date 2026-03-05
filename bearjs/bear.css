@@ -1,7 +1,7 @@
 /* ---------------------------------------------------------------------------
  * Bear Browser Client — Styles for bear.js DOM elements
  * Tokyo Night theme
- * bear version: 0.2.2.5
+ * bear version: 0.2.2.6
  * --------------------------------------------------------------------------- */
 
 :root {
@@ -48,6 +48,7 @@ body {
 }
 .xterm { height: 100%; }
 .xterm-cursor-layer { display: none !important; }
+.xterm-cursor { display: none !important; }
 .xterm-helper-textarea { opacity: 0 !important; pointer-events: none !important; }
 
 /* --- Slash command dropdown (above input) --- */
