@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Bear Browser Client — OpenCode-style TUI powered by xterm.js
 // ---------------------------------------------------------------------------
-const BEAR_VERSION = '0.2.2.3';
+const BEAR_VERSION = '0.2.2.4';
 // Relay configuration: these globals must be set by the hosting page.
 // bear.js communicates exclusively via the public server, which proxies
 // all signaling (offer, answer, ICE) to the relay on behalf of the browser.
@@ -711,25 +711,28 @@ export class BearClient {
       this._fullRepaint();
     });
 
-    // iOS keyboard / rotation: use visualViewport to resize the layout
-    // so the browser never adds its own scrollbar.
+    // iOS keyboard / rotation: use visualViewport to resize and reposition
+    // the layout so the input bar stays visible above the keyboard.
     const vv = window.visualViewport;
     if (vv) {
       let resizeRaf = null;
-      const onViewportResize = () => {
+      const applyViewport = () => {
         if (resizeRaf) return;
         resizeRaf = requestAnimationFrame(() => {
           resizeRaf = null;
           const h = vv.height;
+          const offsetTop = vv.offsetTop;
           document.documentElement.style.height = h + 'px';
           document.body.style.height = h + 'px';
-          // Scroll the page back to top in case iOS shifted it
-          window.scrollTo(0, 0);
+          // Translate body to match the visual viewport position —
+          // when iOS keyboard pushes the viewport down, offsetTop > 0
+          // and we need to shift our layout to stay in view.
+          document.body.style.transform = offsetTop ? `translateY(${offsetTop}px)` : '';
           this.fitAddon.fit();
         });
       };
-      vv.addEventListener('resize', onViewportResize);
-      vv.addEventListener('scroll', () => window.scrollTo(0, 0));
+      vv.addEventListener('resize', applyViewport);
+      vv.addEventListener('scroll', applyViewport);
     }
   }
 
