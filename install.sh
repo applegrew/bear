@@ -140,6 +140,34 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Restart server if running
+# ---------------------------------------------------------------------------
+
+PID_FILE="$HOME/.bear/server.pid"
+if [ -f "$PID_FILE" ]; then
+  SERVER_PID="$(cat "$PID_FILE" 2>/dev/null || echo "")"
+  if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    if [ -t 0 ]; then
+      printf "Server is running (pid %s). Restart now for changes to take effect? [y/N] " "$SERVER_PID"
+      read -r restart_response
+    elif [ -e /dev/tty ]; then
+      printf "Server is running (pid %s). Restart now for changes to take effect? [y/N] " "$SERVER_PID"
+      read -r restart_response < /dev/tty
+    else
+      restart_response="n"
+    fi
+    case "$restart_response" in
+      [yY][eE][sS]|[yY])
+        "$INSTALL_DIR/bear" --restart
+        ;;
+      *)
+        echo "  Skipped restart. Run 'bear --restart' to restart later."
+        ;;
+    esac
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Add to PATH if needed
 # ---------------------------------------------------------------------------
 
