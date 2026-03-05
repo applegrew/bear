@@ -67,6 +67,12 @@ pub enum RenderCmd {
         status: String,
         detail: Option<String>,
     },
+    PlanUpdate {
+        name: String,
+        title: String,
+        status: String,
+        steps: Vec<(String, String, String, Option<String>)>, // (id, description, status, detail)
+    },
     Thinking,
     /// Another client submitted a chat prompt — display it.
     UserInput {
@@ -1954,6 +1960,51 @@ impl TermState {
                     color_fn(&description),
                     a_gray(&detail_str)
                 ));
+                self.full_repaint();
+            }
+            RenderCmd::PlanUpdate {
+                name: _,
+                title,
+                status,
+                steps,
+            } => {
+                let status_color: fn(&str) -> String = match status.as_str() {
+                    "completed" => a_green,
+                    "failed" => a_red,
+                    "in_progress" => a_yellow,
+                    _ => a_gray,
+                };
+                self.push_line("");
+                self.push_line(&format!(
+                    "  {} {}",
+                    a_cyan(&a_bold("Plan:")),
+                    status_color(&format!("{title} [{status}]"))
+                ));
+                for (id, desc, st, detail) in &steps {
+                    let icon = match st.as_str() {
+                        "completed" => "✓",
+                        "in_progress" => "→",
+                        "failed" => "✗",
+                        _ => "○",
+                    };
+                    let color_fn: fn(&str) -> String = match st.as_str() {
+                        "completed" => a_green,
+                        "in_progress" => a_yellow,
+                        "failed" => a_red,
+                        _ => a_gray,
+                    };
+                    let detail_str = detail
+                        .as_ref()
+                        .map(|d| format!(" — {d}"))
+                        .unwrap_or_default();
+                    self.push_line(&format!(
+                        "    {} {}{}",
+                        color_fn(icon),
+                        color_fn(&format!("{id}: {desc}")),
+                        a_gray(&detail_str)
+                    ));
+                }
+                self.push_line("");
                 self.full_repaint();
             }
             RenderCmd::UserInput { text } => {

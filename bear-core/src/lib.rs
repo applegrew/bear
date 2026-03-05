@@ -11,6 +11,7 @@ use uuid::Uuid;
 pub use config::{
     config_path, relay_path, server_pid_path, AppConfig, ConfigFile, LlmProvider, RelayConfig,
 };
+pub use workspace::{PlanStep, SavedPlan};
 
 pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:49321";
 
@@ -311,6 +312,13 @@ pub enum ServerMessage {
     /// Response to SessionCreate: the newly created session.
     SessionCreated {
         session: SessionInfo,
+    },
+    /// Full plan state broadcast when a plan is created, updated, or viewed.
+    PlanUpdate {
+        name: String,
+        title: String,
+        status: String,
+        steps: Vec<PlanStep>,
     },
     /// Relay health status broadcast to all connected clients.
     RelayStatus {

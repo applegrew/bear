@@ -165,6 +165,30 @@ impl ToolContext for ServerState {
         self.workspace_store.list_scripts(cwd).await
     }
 
+    async fn save_plan(
+        &self,
+        cwd: &str,
+        plan: &bear_core::workspace::SavedPlan,
+    ) -> Result<(), String> {
+        self.workspace_store.save_plan(cwd, plan).await
+    }
+
+    async fn load_plan(
+        &self,
+        cwd: &str,
+        name: &str,
+    ) -> Result<bear_core::workspace::SavedPlan, String> {
+        self.workspace_store.load_plan(cwd, name).await
+    }
+
+    async fn list_plans(&self, cwd: &str) -> Vec<bear_core::workspace::SavedPlan> {
+        self.workspace_store.list_plans(cwd).await
+    }
+
+    async fn delete_plan(&self, cwd: &str, name: &str) -> Result<(), String> {
+        self.workspace_store.delete_plan(cwd, name).await
+    }
+
     async fn lsp_diagnostics(
         &self,
         file_path: &str,

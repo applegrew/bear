@@ -115,39 +115,54 @@ Run a previously saved reusable script by name, passing arguments.
 Arguments: {"name": "string", "args": {"arg_name": value, ...}}
 Auto-approved. Loads the script from `.bear/scripts/<name>.json`, injects argument values, and executes it in the sandboxed boa engine. Use js_script_list first to discover available scripts.
 
-### 19. git_commit
+### 19. plan_save
+Create or replace a persistent task plan in `.bear/plans/`.
+Arguments: {"name": "string", "title": "string", "steps": [{"id": "string", "description": "string", "status?": "pending"}]}
+Auto-approved. Plan names must match [a-z0-9_-]+. Use for multi-step tasks that benefit from persistent tracking. The overall plan status (draft/in_progress/completed/failed) is auto-computed from step statuses.
+
+### 20. plan_read
+Read a plan by name, or list all plans if name is omitted.
+Arguments: {"name?": "string"}
+Auto-approved. Returns plan details with step statuses.
+
+### 21. plan_update
+Update the status of a single step in an existing plan.
+Arguments: {"name": "string", "step_id": "string", "status": "pending|in_progress|completed|failed", "detail?": "string"}
+Auto-approved. Recalculates overall plan status and broadcasts the update to all clients.
+
+### 22. git_commit
 Commit all staged and unstaged changes to git with a message.
 Arguments: {"message": "string"}
 Stages all changes (git add -A) and commits with the given message. A Co-authored-by trailer is automatically appended — do NOT include one yourself. Use this instead of run_command for git commits.
 "#;
 
 const SYSTEM_PROMPT_LSP_TOOLS: &str = r#"
-### 20. lsp_diagnostics
+### 23. lsp_diagnostics
 Get compiler errors and warnings for a file (requires language server).
 Arguments: {"path": "string"}
 Auto-approved (no user confirmation needed). Lazily spawns the appropriate language server.
 
-### 21. lsp_hover
+### 24. lsp_hover
 Get type information and documentation for a symbol at a position.
 Arguments: {"path": "string", "line": number, "character": number}
 Line and character are 1-indexed. Auto-approved.
 
-### 22. lsp_references
+### 25. lsp_references
 Find all references to a symbol at a position.
 Arguments: {"path": "string", "line": number, "character": number}
 Line and character are 1-indexed. Auto-approved.
 
-### 23. lsp_symbols
+### 26. lsp_symbols
 Get a structured outline of a file (functions, structs, classes with line ranges).
 Arguments: {"path": "string"}
 Auto-approved. Use to understand file structure without reading the entire file.
 
-### 24. read_symbol
+### 27. read_symbol
 Read just one symbol (function, struct, impl block, class, etc.) from a file using LSP.
 Arguments: {"path": "string", "symbol": "string"}
 Auto-approved. Returns the symbol's source code with line numbers. Much more efficient than read_file for large files — prefer this when you only need one function or type definition. Use lsp_symbols first to discover available symbol names.
 
-### 25. patch_symbol
+### 28. patch_symbol
 Replace an entire symbol (function, struct, etc.) with new content using LSP to locate it.
 Arguments: {"path": "string", "symbol": "string", "content": "string"}
 The content should be the complete new source for the symbol (including signature, body, etc.). The old symbol is replaced entirely. Supports undo. Use when rewriting a function/struct — avoids the need for precise old_text matching in edit_file.
@@ -176,7 +191,7 @@ const SYSTEM_PROMPT_GUIDELINES_PRE: &str = r#"
 
 10. **Break complex changes into smaller steps.** For very complex changes, break it down into smaller steps and proactively run tests and builds to verify your changes.
 
-11. **Track your work.** For complex multi-step tasks, use todo_write to create a plan and update item statuses as you complete them. Use todo_read to review your progress.
+11. **Track your work.** For persistent multi-step work, use plan_save/plan_update to create and track plans in `.bear/plans/`. Plans survive session restarts and are visible to the user via `/plan`. Use todo_write/todo_read for lightweight session-scoped tracking.
 
 12. **Use web tools when needed.** Use web_search to find documentation, APIs, or solutions. Use web_fetch to read specific web pages. Prefer authoritative sources.
 

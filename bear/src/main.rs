@@ -737,6 +737,23 @@ fn dispatch_server_msg(
         ServerMessage::UserInput { text } => {
             let _ = render_tx.send(RenderCmd::UserInput { text: text.clone() });
         }
+        ServerMessage::PlanUpdate {
+            name,
+            title,
+            status,
+            steps,
+        } => {
+            let step_tuples: Vec<(String, String, String, Option<String>)> = steps
+                .iter()
+                .map(|s| (s.id.clone(), s.description.clone(), s.status.clone(), s.detail.clone()))
+                .collect();
+            let _ = render_tx.send(RenderCmd::PlanUpdate {
+                name: name.clone(),
+                title: title.clone(),
+                status: status.clone(),
+                steps: step_tuples,
+            });
+        }
         ServerMessage::RelayStatus { status, detail } => {
             let msg = match detail {
                 Some(d) => format!("Relay: {} ({})", status, d),

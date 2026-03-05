@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 const BEAR_DIR: &str = ".bear";
 const AUTO_APPROVED_FILE: &str = "auto_approved.json";
 const SCRIPTS_DIR: &str = "scripts";
+const PLANS_DIR: &str = "plans";
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -24,6 +25,45 @@ pub struct SavedScript {
 pub struct ScriptArg {
     pub name: String,
     pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedPlan {
+    pub name: String,
+    pub title: String,
+    pub steps: Vec<PlanStep>,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanStep {
+    pub id: String,
+    pub description: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl SavedPlan {
+    /// Recompute the overall plan status from step statuses.
+    pub fn recompute_status(&mut self) {
+        let all_pending = self.steps.iter().all(|s| s.status == "pending");
+        let any_in_progress = self.steps.iter().any(|s| s.status == "in_progress");
+        let all_completed = self.steps.iter().all(|s| s.status == "completed");
+        let any_failed = self.steps.iter().any(|s| s.status == "failed");
+
+        self.status = if all_pending {
+            "draft".to_string()
+        } else if all_completed {
+            "completed".to_string()
+        } else if any_failed && !any_in_progress {
+            "failed".to_string()
+        } else {
+            "in_progress".to_string()
+        };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -67,6 +107,13 @@ impl WorkspaceStore {
     /// Ensure `.bear/scripts/` directory exists under `cwd`.
     async fn ensure_scripts_dir(cwd: &Path) -> std::io::Result<PathBuf> {
         let dir = cwd.join(BEAR_DIR).join(SCRIPTS_DIR);
+        tokio::fs::create_dir_all(&dir).await?;
+        Ok(dir)
+    }
+
+    /// Ensure `.bear/plans/` directory exists under `cwd`.
+    async fn ensure_plans_dir(cwd: &Path) -> std::io::Result<PathBuf> {
+        let dir = cwd.join(BEAR_DIR).join(PLANS_DIR);
         tokio::fs::create_dir_all(&dir).await?;
         Ok(dir)
     }
@@ -142,6 +189,78 @@ impl WorkspaceStore {
             .await
             .map_err(|e| format!("script '{name}' not found: {e}"))?;
         serde_json::from_str(&data).map_err(|e| format!("failed to parse script '{name}': {e}"))
+    }
+
+    // -----------------------------------------------------------------------
+    // Plan persistence
+    // -----------------------------------------------------------------------
+
+    /// Save a plan to `<cwd>/.bear/plans/<name>.json`.
+    pub async fn save_plan(&self, cwd: &str, plan: &SavedPlan) -> Result<(), String> {
+        let cwd_path = Path::new(cwd);
+        let lock = self.dir_lock(cwd_path).await;
+        let _guard = lock.lock().await;
+
+        let plans_dir = Self::ensure_plans_dir(cwd_path)
+            .await
+            .map_err(|e| format!("failed to create .bear/plans dir: {e}"))?;
+
+        let path = plans_dir.join(format!("{}.json", plan.name));
+        let json = serde_json::to_string_pretty(plan)
+            .map_err(|e| format!("failed to serialize plan: {e}"))?;
+        tokio::fs::write(&path, json)
+            .await
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))
+    }
+
+    /// Load a plan by name from `<cwd>/.bear/plans/<name>.json`.
+    pub async fn load_plan(&self, cwd: &str, name: &str) -> Result<SavedPlan, String> {
+        let path = Path::new(cwd)
+            .join(BEAR_DIR)
+            .join(PLANS_DIR)
+            .join(format!("{name}.json"));
+        let data = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| format!("plan '{name}' not found: {e}"))?;
+        serde_json::from_str(&data).map_err(|e| format!("failed to parse plan '{name}': {e}"))
+    }
+
+    /// List all saved plans in `<cwd>/.bear/plans/`.
+    pub async fn list_plans(&self, cwd: &str) -> Vec<SavedPlan> {
+        let dir = Path::new(cwd).join(BEAR_DIR).join(PLANS_DIR);
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(e) => e,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut plans = Vec::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                if let Ok(data) = tokio::fs::read_to_string(&path).await {
+                    if let Ok(plan) = serde_json::from_str::<SavedPlan>(&data) {
+                        plans.push(plan);
+                    }
+                }
+            }
+        }
+        plans.sort_by(|a, b| a.name.cmp(&b.name));
+        plans
+    }
+
+    /// Delete a plan from `<cwd>/.bear/plans/<name>.json`.
+    pub async fn delete_plan(&self, cwd: &str, name: &str) -> Result<(), String> {
+        let cwd_path = Path::new(cwd);
+        let lock = self.dir_lock(cwd_path).await;
+        let _guard = lock.lock().await;
+
+        let path = cwd_path
+            .join(BEAR_DIR)
+            .join(PLANS_DIR)
+            .join(format!("{name}.json"));
+        tokio::fs::remove_file(&path)
+            .await
+            .map_err(|e| format!("failed to delete plan '{name}': {e}"))
     }
 
     /// List all saved scripts in `<cwd>/.bear/scripts/`.
@@ -275,5 +394,82 @@ mod tests {
         assert!(!re.is_match("../escape"));
         assert!(!re.is_match(""));
         assert!(!re.is_match("has space"));
+    }
+
+    #[tokio::test]
+    async fn plan_save_load_list() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().to_str().unwrap();
+        let store = WorkspaceStore::new();
+
+        let plan = SavedPlan {
+            name: "refactor".to_string(),
+            title: "Refactor auth module".to_string(),
+            steps: vec![
+                PlanStep { id: "1".into(), description: "Read code".into(), status: "completed".into(), detail: None },
+                PlanStep { id: "2".into(), description: "Write tests".into(), status: "pending".into(), detail: None },
+            ],
+            status: "in_progress".to_string(),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            updated_at: "2025-01-01T00:00:00Z".to_string(),
+        };
+
+        store.save_plan(cwd, &plan).await.unwrap();
+
+        let loaded = store.load_plan(cwd, "refactor").await.unwrap();
+        assert_eq!(loaded.name, "refactor");
+        assert_eq!(loaded.steps.len(), 2);
+
+        let all = store.list_plans(cwd).await;
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].title, "Refactor auth module");
+    }
+
+    #[tokio::test]
+    async fn plan_delete() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().to_str().unwrap();
+        let store = WorkspaceStore::new();
+
+        let plan = SavedPlan {
+            name: "temp".to_string(),
+            title: "Temp plan".to_string(),
+            steps: vec![],
+            status: "draft".to_string(),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            updated_at: "2025-01-01T00:00:00Z".to_string(),
+        };
+        store.save_plan(cwd, &plan).await.unwrap();
+        assert!(store.load_plan(cwd, "temp").await.is_ok());
+
+        store.delete_plan(cwd, "temp").await.unwrap();
+        assert!(store.load_plan(cwd, "temp").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn plan_recompute_status() {
+        let mut plan = SavedPlan {
+            name: "t".into(), title: "t".into(),
+            steps: vec![
+                PlanStep { id: "1".into(), description: "a".into(), status: "pending".into(), detail: None },
+                PlanStep { id: "2".into(), description: "b".into(), status: "pending".into(), detail: None },
+            ],
+            status: "".into(), created_at: "".into(), updated_at: "".into(),
+        };
+        plan.recompute_status();
+        assert_eq!(plan.status, "draft");
+
+        plan.steps[0].status = "in_progress".to_string();
+        plan.recompute_status();
+        assert_eq!(plan.status, "in_progress");
+
+        plan.steps[0].status = "completed".to_string();
+        plan.steps[1].status = "completed".to_string();
+        plan.recompute_status();
+        assert_eq!(plan.status, "completed");
+
+        plan.steps[1].status = "failed".to_string();
+        plan.recompute_status();
+        assert_eq!(plan.status, "failed");
     }
 }

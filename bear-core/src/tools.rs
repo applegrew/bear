@@ -168,6 +168,18 @@ pub trait ToolContext: Send + Sync {
         name: &str,
     ) -> Result<crate::workspace::SavedScript, String>;
     async fn list_scripts(&self, cwd: &str) -> Vec<crate::workspace::SavedScript>;
+    async fn save_plan(
+        &self,
+        cwd: &str,
+        plan: &crate::workspace::SavedPlan,
+    ) -> Result<(), String>;
+    async fn load_plan(
+        &self,
+        cwd: &str,
+        name: &str,
+    ) -> Result<crate::workspace::SavedPlan, String>;
+    async fn list_plans(&self, cwd: &str) -> Vec<crate::workspace::SavedPlan>;
+    async fn delete_plan(&self, cwd: &str, name: &str) -> Result<(), String>;
 
     // LSP access
     async fn lsp_diagnostics(
@@ -338,6 +350,9 @@ async fn execute_tool_inner(
         "js_script_list" => execute_js_script_list(ctx, session_id).await,
         "js_script" => execute_js_script(ctx, session_id, ptc).await,
         "git_commit" => execute_git_commit(ptc).await,
+        "plan_save" => execute_plan_save(ctx, bus, session_id, ptc).await,
+        "plan_read" => execute_plan_read(ctx, session_id, ptc).await,
+        "plan_update" => execute_plan_update(ctx, bus, session_id, ptc).await,
         other => format!("Unknown tool: {other}"),
     }
 }
@@ -1403,6 +1418,204 @@ async fn execute_todo_read(ctx: &dyn ToolContext, session_id: Uuid) -> String {
         ));
     }
     lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// plan_save / plan_read / plan_update
+// ---------------------------------------------------------------------------
+
+async fn execute_plan_save(
+    ctx: &dyn ToolContext,
+    bus: &dyn ToolBus,
+    session_id: Uuid,
+    ptc: &PendingToolCall,
+) -> String {
+    let name = match ptc.tool_call.arguments["name"].as_str() {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return "Error: plan_save requires a 'name' argument.".to_string(),
+    };
+
+    // Validate name: [a-z0-9_-]+ only
+    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+        return "Error: plan name must match [a-z0-9_-]+.".to_string();
+    }
+
+    let title = ptc.tool_call.arguments["title"]
+        .as_str()
+        .unwrap_or(&name)
+        .to_string();
+
+    let steps_arr = match ptc.tool_call.arguments["steps"].as_array() {
+        Some(arr) => arr,
+        None => return "Error: plan_save requires a 'steps' array.".to_string(),
+    };
+
+    let mut steps = Vec::new();
+    for item in steps_arr {
+        let id = item["id"].as_str().unwrap_or("").to_string();
+        let description = item["description"].as_str().unwrap_or("").to_string();
+        let status = item["status"].as_str().unwrap_or("pending").to_string();
+        let detail = item["detail"].as_str().map(|s| s.to_string());
+        if !description.is_empty() {
+            steps.push(crate::workspace::PlanStep {
+                id,
+                description,
+                status,
+                detail,
+            });
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let cwd = match ctx.get_session_cwd(session_id).await {
+        Some(c) => c,
+        None => return "Error: session not found.".to_string(),
+    };
+
+    // Try to load existing plan to preserve created_at
+    let created_at = if let Ok(existing) = ctx.load_plan(&cwd, &name).await {
+        existing.created_at
+    } else {
+        now.clone()
+    };
+
+    let mut plan = crate::workspace::SavedPlan {
+        name: name.clone(),
+        title: title.clone(),
+        steps: steps.clone(),
+        status: String::new(),
+        created_at,
+        updated_at: now,
+    };
+    plan.recompute_status();
+
+    match ctx.save_plan(&cwd, &plan).await {
+        Ok(()) => {
+            bus.send(ServerMessage::PlanUpdate {
+                name: plan.name,
+                title: plan.title,
+                status: plan.status,
+                steps: plan.steps,
+            })
+            .await;
+            format!("Plan '{name}' saved ({} steps).", steps.len())
+        }
+        Err(e) => format!("Error saving plan: {e}"),
+    }
+}
+
+async fn execute_plan_read(
+    ctx: &dyn ToolContext,
+    session_id: Uuid,
+    ptc: &PendingToolCall,
+) -> String {
+    let cwd = match ctx.get_session_cwd(session_id).await {
+        Some(c) => c,
+        None => return "Error: session not found.".to_string(),
+    };
+
+    let name = ptc.tool_call.arguments["name"].as_str().unwrap_or("");
+
+    if name.is_empty() {
+        // List all plans
+        let plans = ctx.list_plans(&cwd).await;
+        if plans.is_empty() {
+            return "No plans found.".to_string();
+        }
+        let mut lines = Vec::new();
+        for p in &plans {
+            let done = p.steps.iter().filter(|s| s.status == "completed").count();
+            let total = p.steps.len();
+            lines.push(format!(
+                "[{}] {} — {} ({}/{} done)",
+                p.status, p.name, p.title, done, total
+            ));
+        }
+        lines.join("\n")
+    } else {
+        // Read specific plan
+        match ctx.load_plan(&cwd, name).await {
+            Ok(plan) => {
+                let mut lines = vec![format!(
+                    "Plan: {} — {} [{}]",
+                    plan.name, plan.title, plan.status
+                )];
+                for step in &plan.steps {
+                    let icon = match step.status.as_str() {
+                        "completed" => "✓",
+                        "in_progress" => "→",
+                        "failed" => "✗",
+                        _ => "○",
+                    };
+                    let detail_str = step
+                        .detail
+                        .as_ref()
+                        .map(|d| format!(" — {d}"))
+                        .unwrap_or_default();
+                    lines.push(format!("  {icon} {}: {}{detail_str}", step.id, step.description));
+                }
+                lines.join("\n")
+            }
+            Err(e) => format!("Error: {e}"),
+        }
+    }
+}
+
+async fn execute_plan_update(
+    ctx: &dyn ToolContext,
+    bus: &dyn ToolBus,
+    session_id: Uuid,
+    ptc: &PendingToolCall,
+) -> String {
+    let name = match ptc.tool_call.arguments["name"].as_str() {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return "Error: plan_update requires a 'name' argument.".to_string(),
+    };
+    let step_id = match ptc.tool_call.arguments["step_id"].as_str() {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return "Error: plan_update requires a 'step_id' argument.".to_string(),
+    };
+    let new_status = match ptc.tool_call.arguments["status"].as_str() {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return "Error: plan_update requires a 'status' argument.".to_string(),
+    };
+    let detail = ptc.tool_call.arguments["detail"]
+        .as_str()
+        .map(|s| s.to_string());
+
+    let cwd = match ctx.get_session_cwd(session_id).await {
+        Some(c) => c,
+        None => return "Error: session not found.".to_string(),
+    };
+
+    let mut plan = match ctx.load_plan(&cwd, &name).await {
+        Ok(p) => p,
+        Err(e) => return format!("Error: {e}"),
+    };
+
+    let step = match plan.steps.iter_mut().find(|s| s.id == step_id) {
+        Some(s) => s,
+        None => return format!("Error: step '{step_id}' not found in plan '{name}'."),
+    };
+    step.status = new_status;
+    step.detail = detail;
+
+    plan.updated_at = chrono::Utc::now().to_rfc3339();
+    plan.recompute_status();
+
+    match ctx.save_plan(&cwd, &plan).await {
+        Ok(()) => {
+            bus.send(ServerMessage::PlanUpdate {
+                name: plan.name,
+                title: plan.title,
+                status: plan.status,
+                steps: plan.steps,
+            })
+            .await;
+            format!("Plan '{name}' step '{step_id}' updated.")
+        }
+        Err(e) => format!("Error saving plan: {e}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2697,6 +2910,9 @@ impl ToolCallFilter {
 pub const AUTO_APPROVED_TOOLS: &[&str] = &[
     "todo_write",
     "todo_read",
+    "plan_save",
+    "plan_read",
+    "plan_update",
     "web_fetch",
     "web_search",
     "lsp_diagnostics",

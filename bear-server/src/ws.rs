@@ -55,6 +55,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/session max_subagents",
         "Set max concurrent subagents (usage: /session max_subagents <count>)",
     ),
+    ("/plan", "List/view/delete plans (usage: /plan [name] | /plan delete <name>)"),
     ("/allowed", "Show auto-approved commands"),
     ("/exit", "Disconnect, keep session alive"),
     ("/end", "End session, pick another"),
@@ -1198,6 +1199,62 @@ async fn handle_slash_command(
         return true;
     }
 
+    // /plan [name] | /plan delete <name>
+    if trimmed == "/plan" || trimmed.starts_with("/plan ") {
+        let rest = trimmed.strip_prefix("/plan").unwrap_or("").trim();
+        let cwd = {
+            let sessions = state.sessions.read().await;
+            sessions.get(&session_id).map(|s| s.info.cwd.clone())
+        };
+        let Some(cwd) = cwd else {
+            bus.send(ServerMessage::Error { text: "Session not found.".to_string() }).await;
+            return true;
+        };
+
+        if rest.is_empty() {
+            // List all plans
+            let plans = state.workspace_store.list_plans(&cwd).await;
+            if plans.is_empty() {
+                bus.send(ServerMessage::Notice { text: "No plans found.".to_string() }).await;
+            } else {
+                let mut lines = vec!["Plans:".to_string()];
+                for p in &plans {
+                    let done = p.steps.iter().filter(|s| s.status == "completed").count();
+                    let total = p.steps.len();
+                    lines.push(format!("  [{:>11}] {:<20} {} ({}/{} done)", p.status, p.name, p.title, done, total));
+                }
+                bus.send(ServerMessage::Notice { text: lines.join("\n") }).await;
+            }
+        } else if let Some(name) = rest.strip_prefix("delete ") {
+            let name = name.trim();
+            match state.workspace_store.delete_plan(&cwd, name).await {
+                Ok(()) => {
+                    bus.send(ServerMessage::Notice { text: format!("Plan '{name}' deleted.") }).await;
+                }
+                Err(e) => {
+                    bus.send(ServerMessage::Error { text: format!("Error: {e}") }).await;
+                }
+            }
+        } else {
+            // View specific plan
+            let name = rest;
+            match state.workspace_store.load_plan(&cwd, name).await {
+                Ok(plan) => {
+                    bus.send(ServerMessage::PlanUpdate {
+                        name: plan.name,
+                        title: plan.title,
+                        status: plan.status,
+                        steps: plan.steps,
+                    }).await;
+                }
+                Err(e) => {
+                    bus.send(ServerMessage::Error { text: format!("Error: {e}") }).await;
+                }
+            }
+        }
+        return true;
+    }
+
     if let Some(rest) = trimmed.strip_prefix("/session ") {
         if let Some(name) = rest.strip_prefix("name ") {
             let name = name.trim();
@@ -1448,6 +1505,45 @@ async fn execute_task_plan(
             .unwrap_or(3)
     };
 
+    // Auto-persist: save plan to .bear/plans/ on disk
+    let cwd = {
+        let sessions = state.sessions.read().await;
+        sessions.get(&session_id).map(|s| s.info.cwd.clone())
+    };
+    // Derive a short plan name from plan_id (e.g. "plan_abc123" -> "plan-abc123")
+    let disk_plan_name = plan_id.replace('_', "-");
+    // Build title from first task descriptions
+    let plan_title = if tasks.len() == 1 {
+        tasks[0].description.clone()
+    } else {
+        format!("{} ({} tasks)", tasks[0].description.split_once('.').map(|(s, _)| s).unwrap_or(&tasks[0].description), tasks.len())
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut disk_plan = bear_core::workspace::SavedPlan {
+        name: disk_plan_name.clone(),
+        title: plan_title.clone(),
+        steps: tasks.iter().map(|t| bear_core::workspace::PlanStep {
+            id: t.id.clone(),
+            description: t.description.clone(),
+            status: "pending".to_string(),
+            detail: None,
+        }).collect(),
+        status: "draft".to_string(),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    if let Some(ref cwd) = cwd {
+        if let Err(e) = state.workspace_store.save_plan(cwd, &disk_plan).await {
+            tracing::warn!("failed to auto-persist plan: {e}");
+        }
+        bus.send(ServerMessage::PlanUpdate {
+            name: disk_plan.name.clone(),
+            title: disk_plan.title.clone(),
+            status: disk_plan.status.clone(),
+            steps: disk_plan.steps.clone(),
+        }).await;
+    }
+
     // Collect read-only tasks and write tasks
     let mut read_tasks: Vec<&TaskItem> = Vec::new();
     let mut write_tasks: Vec<&TaskItem> = Vec::new();
@@ -1477,6 +1573,7 @@ async fn execute_task_plan(
                     detail: None,
                 })
                 .await;
+                persist_step_status(&state.workspace_store, cwd.as_deref(), &mut disk_plan, &task.id, "in_progress", None, bus).await;
 
                 let subagent_id = format!("sa_{}", Uuid::new_v4());
                 bus.send(ServerMessage::SubagentUpdate {
@@ -1688,6 +1785,7 @@ async fn execute_task_plan(
                     detail: None,
                 })
                 .await;
+                persist_step_status(&state.workspace_store, cwd.as_deref(), &mut disk_plan, task_id, "completed", None, bus).await;
             }
 
             // Inject subagent results into session history as context
@@ -1719,6 +1817,7 @@ async fn execute_task_plan(
                 detail: Some("Terminated by user".to_string()),
             })
             .await;
+            persist_step_status(&state.workspace_store, cwd.as_deref(), &mut disk_plan, &task.id, "failed", Some("Terminated by user"), bus).await;
             continue;
         }
 
@@ -1729,6 +1828,7 @@ async fn execute_task_plan(
             detail: None,
         })
         .await;
+        persist_step_status(&state.workspace_store, cwd.as_deref(), &mut disk_plan, &task.id, "in_progress", None, bus).await;
 
         // Inject the task description as a user message so the LLM knows what to do
         {
@@ -1764,7 +1864,40 @@ async fn execute_task_plan(
             detail: None,
         })
         .await;
+        persist_step_status(&state.workspace_store, cwd.as_deref(), &mut disk_plan, &task.id, "completed", None, bus).await;
     }
+}
+
+/// Update a single step's status in the in-memory plan, recompute overall status,
+/// persist to disk, and broadcast PlanUpdate.
+async fn persist_step_status(
+    store: &bear_core::workspace::WorkspaceStore,
+    cwd: Option<&str>,
+    plan: &mut bear_core::workspace::SavedPlan,
+    step_id: &str,
+    status: &str,
+    detail: Option<&str>,
+    bus: &BusSender,
+) {
+    if let Some(step) = plan.steps.iter_mut().find(|s| s.id == step_id) {
+        step.status = status.to_string();
+        step.detail = detail.map(|s| s.to_string());
+    }
+    plan.updated_at = chrono::Utc::now().to_rfc3339();
+    plan.recompute_status();
+
+    if let Some(cwd) = cwd {
+        if let Err(e) = store.save_plan(cwd, plan).await {
+            tracing::warn!("failed to persist plan step update: {e}");
+        }
+    }
+    bus.send(ServerMessage::PlanUpdate {
+        name: plan.name.clone(),
+        title: plan.title.clone(),
+        status: plan.status.clone(),
+        steps: plan.steps.clone(),
+    })
+    .await;
 }
 
 /// Run a single read-only subagent: its own LLM loop with restricted tools.

@@ -1556,6 +1556,24 @@ export class BearClient {
         break;
       }
 
+      case 'plan_update': {
+        const statusColors = { completed: C.green, failed: C.red, in_progress: C.yellow, draft: C.gray };
+        const sc = statusColors[msg.status] || C.gray;
+        this._pushLine('');
+        this._pushLine(`  ${C.cyan}${C.bold}Plan:${C.reset} ${sc}${msg.title} [${msg.status}]${C.reset}`);
+        for (const step of (msg.steps || [])) {
+          const icons = { completed: '✓', in_progress: '→', failed: '✗', pending: '○' };
+          const colors = { completed: C.green, in_progress: C.yellow, failed: C.red, pending: C.gray };
+          const icon = icons[step.status] || '○';
+          const color = colors[step.status] || C.gray;
+          const detail = step.detail ? ` — ${step.detail}` : '';
+          this._pushLine(`    ${color}${icon} ${step.id}: ${step.description}${C.reset}${C.gray}${detail}${C.reset}`);
+        }
+        this._pushLine('');
+        this._fullRepaint();
+        break;
+      }
+
       case 'pong':
         this._lastPongAt = Date.now();
         break;
