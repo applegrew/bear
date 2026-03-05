@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Bear Browser Client — OpenCode-style TUI powered by xterm.js
 // ---------------------------------------------------------------------------
-const BEAR_VERSION = '0.2.2.2';
+const BEAR_VERSION = '0.2.2.3';
 // Relay configuration: these globals must be set by the hosting page.
 // bear.js communicates exclusively via the public server, which proxies
 // all signaling (offer, answer, ICE) to the relay on behalf of the browser.
@@ -398,6 +398,9 @@ export class BearClient {
     this._heartbeatTimer = null;
     this._lastPongAt = 0;
 
+    // ICE connection type indicator
+    this._iceType = null; // 'TURN', 'STUN', or 'P2P' — detected after connection
+
     // Auto-reconnect state
     this._reconnectAttempt = 0;
     this._reconnectTimer = null;
@@ -646,7 +649,13 @@ export class BearClient {
         this._statusSpinner.textContent = spinner;
         this._statusSession.textContent = session + subagentInfo;
       }
-      this._statusRight.textContent = '';
+      // Connection media indicator on the right
+      if (this._iceType) {
+        const icons = { TURN: '☁', STUN: '↔', P2P: '⚡' };
+        this._statusRight.textContent = `${icons[this._iceType] || '•'}${this._iceType}`;
+      } else {
+        this._statusRight.textContent = '';
+      }
     }
   }
 
@@ -912,6 +921,8 @@ export class BearClient {
         this._autoRejoining = true;
       }
       this._drawStatusBar();
+      // Detect ICE connection type after a short delay for stats to settle
+      setTimeout(() => this._detectIceType(), 1000);
     };
 
     this.dc.onclose = () => {
@@ -1136,10 +1147,49 @@ export class BearClient {
     if (this.pc) { try { this.pc.close(); } catch {} this.pc = null; }
     this._connId = null;
     this._chunkBufs = {};
+    this._iceType = null;
   }
 
   _isConnected() {
     return this.dc && this.dc.readyState === 'open';
+  }
+
+  async _detectIceType() {
+    if (!this.pc) return;
+    try {
+      const stats = await this.pc.getStats();
+      let activeLocalId = null;
+      // Find the nominated candidate pair
+      stats.forEach(report => {
+        if (report.type === 'transport' && report.selectedCandidatePairId) {
+          const pair = stats.get(report.selectedCandidatePairId);
+          if (pair) activeLocalId = pair.localCandidateId;
+        }
+      });
+      // Fallback: look for succeeded candidate-pair directly
+      if (!activeLocalId) {
+        stats.forEach(report => {
+          if (report.type === 'candidate-pair' && (report.nominated || report.state === 'succeeded')) {
+            activeLocalId = report.localCandidateId;
+          }
+        });
+      }
+      if (activeLocalId) {
+        const local = stats.get(activeLocalId);
+        if (local) {
+          const ct = local.candidateType;
+          if (ct === 'relay') this._iceType = 'TURN';
+          else if (ct === 'srflx' || ct === 'prflx') this._iceType = 'STUN';
+          else if (ct === 'host') this._iceType = 'P2P';
+          else this._iceType = ct?.toUpperCase() || null;
+          console.log(`[bear] Connection type: ${this._iceType} (${ct})`);
+          this._drawStatusBar();
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn(`[bear] Failed to detect ICE type: ${e.message}`);
+    }
   }
 
   // -------------------------------------------------------------------------
