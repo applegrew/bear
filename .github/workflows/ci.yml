@@ -92,16 +92,20 @@ jobs:
             runner: ubuntu-latest
             artifact: bear-linux-x86_64.tar.gz
           - name: macOS Intel
-            runner: macos-12
+            runner: macos-latest
+            target: x86_64-apple-darwin
             artifact: bear-macos-x86_64.tar.gz
           - name: macOS ARM
             runner: macos-latest
+            target: ""
             artifact: bear-macos-arm64.tar.gz
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo registry & build
         uses: actions/cache@v4
@@ -110,18 +114,28 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-release-
 
       - name: Build release binaries
-        run: cargo build --workspace --release
+        run: |
+          if [ -n "${{ matrix.target }}" ]; then
+            cargo build --workspace --release --target ${{ matrix.target }}
+          else
+            cargo build --workspace --release
+          fi
 
       - name: Package artifacts
         run: |
           mkdir -p dist
-          cp target/release/bear dist/
-          cp target/release/bear-server dist/
+          if [ -n "${{ matrix.target }}" ]; then
+            cp target/${{ matrix.target }}/release/bear dist/
+            cp target/${{ matrix.target }}/release/bear-server dist/
+          else
+            cp target/release/bear dist/
+            cp target/release/bear-server dist/
+          fi
           tar czf ${{ matrix.artifact }} -C dist .
 
       - name: Upload to GitHub Release
