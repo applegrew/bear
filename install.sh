@@ -50,20 +50,36 @@ echo "Detected: $OS ($ARCH) -> $ARTIFACT"
 
 echo "Fetching latest release..."
 
+TAG=""
+
+# Try the Bear portal first (avoids GitHub API rate limits)
 if command -v curl >/dev/null 2>&1; then
-  RELEASE_JSON="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")"
+  VERSION_JSON="$(curl -fsSL "https://bear.applegrew.com/api/version" 2>/dev/null || echo "")"
 elif command -v wget >/dev/null 2>&1; then
-  RELEASE_JSON="$(wget -qO- "https://api.github.com/repos/$REPO/releases/latest")"
+  VERSION_JSON="$(wget -qO- "https://bear.applegrew.com/api/version" 2>/dev/null || echo "")"
 else
   echo "Error: curl or wget is required." >&2
   exit 1
 fi
 
-# Extract tag_name without requiring jq
-TAG="$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')"
+if [ -n "$VERSION_JSON" ]; then
+  TAG="$(echo "$VERSION_JSON" | grep '"version"' | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')"
+fi
+
+# Fallback to GitHub API if portal didn't return a version
+if [ -z "$TAG" ]; then
+  echo "  Portal unavailable, falling back to GitHub API..."
+  if command -v curl >/dev/null 2>&1; then
+    RELEASE_JSON="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null || echo "")"
+  else
+    RELEASE_JSON="$(wget -qO- "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null || echo "")"
+  fi
+  TAG="$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')"
+fi
 
 if [ -z "$TAG" ]; then
   echo "Error: could not determine latest release." >&2
+  echo "  GitHub API may be rate-limited. Try again later or set GITHUB_TOKEN." >&2
   exit 1
 fi
 
