@@ -146,25 +146,16 @@ fn run_setup_wizard(existing: Option<ConfigFile>) -> Result<()> {
     )?;
 
     // Google Custom Search
-    let google_key = prompt_optional(
-        "Google API key",
-        config.google_api_key.as_deref(),
-    )?;
+    let google_key = prompt_optional("Google API key", config.google_api_key.as_deref())?;
     config.google_api_key = google_key;
 
     if config.google_api_key.is_some() {
-        let cx = prompt_optional(
-            "Google Custom Search CX",
-            config.google_cx.as_deref(),
-        )?;
+        let cx = prompt_optional("Google Custom Search CX", config.google_cx.as_deref())?;
         config.google_cx = cx;
     }
 
     // Brave Search
-    let brave_key = prompt_optional(
-        "Brave Search API key",
-        config.brave_api_key.as_deref(),
-    )?;
+    let brave_key = prompt_optional("Brave Search API key", config.brave_api_key.as_deref())?;
     config.brave_api_key = brave_key;
 
     // -----------------------------------------------------------------------
