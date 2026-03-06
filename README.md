@@ -27,7 +27,7 @@ Supports macOS (Intel & Apple Silicon) and Linux (x86_64).
 - **LSP-powered** — `read_symbol`, `patch_symbol`, `lsp_diagnostics`, `lsp_hover`, `lsp_references`, `lsp_symbols`
 - **Shell** — `run_command` (with live streaming output)
 - **Git** — `git_commit` (stages all changes, commits with co-author trailer)
-- **Web** — `web_fetch`, `web_search` (DDG → Google → Brave fallback chain)
+- **Web** — `web_fetch`, `web_search` (DDG → Brave fallback chain)
 - **Computation** — `js_eval` (sandboxed JavaScript REPL via boa_engine)
 - **Reusable scripts** — `js_script_save`, `js_script_list`, `js_script` (LLM-authored workspace scripts persisted in `.bear/`)
 - **Session** — `session_workdir`, `undo` (up to 10 steps)
@@ -138,8 +138,6 @@ Bear is configured via environment variables on the **server**, or interactively
 | `BEAR_MAX_TOOL_OUTPUT_CHARS` | `32000` | Truncation limit for tool output |
 | `BEAR_CONTEXT_BUDGET` | `16000` | Context window budget (characters) for conversation history |
 | `BEAR_KEEP_RECENT` | `20` | Number of recent messages always kept in context |
-| `BEAR_GOOGLE_API_KEY` | *(none)* | Google Custom Search API key (web_search fallback) |
-| `BEAR_GOOGLE_CX` | *(none)* | Google Custom Search engine ID |
 | `BEAR_BRAVE_API_KEY` | *(none)* | Brave Search API key (web_search fallback) |
 | `BEAR_LSP_<LANG>` | *(per-language defaults)* | Override LSP server command for a language |
 

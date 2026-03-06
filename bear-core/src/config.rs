@@ -27,8 +27,6 @@ pub struct AppConfig {
     pub context_budget: usize,
     pub keep_recent: usize,
     // Web search fallback keys
-    pub google_api_key: Option<String>,
-    pub google_cx: Option<String>,
     pub brave_api_key: Option<String>,
 }
 
@@ -48,8 +46,6 @@ pub struct ConfigFile {
     pub max_tool_output_chars: Option<usize>,
     pub context_budget: Option<usize>,
     pub keep_recent: Option<usize>,
-    pub google_api_key: Option<String>,
-    pub google_cx: Option<String>,
     pub brave_api_key: Option<String>,
     pub relay_disabled: Option<bool>,
 }
@@ -200,8 +196,6 @@ impl AppConfig {
             ),
             context_budget: env_or("BEAR_CONTEXT_BUDGET", file.context_budget, 16_000),
             keep_recent: env_or("BEAR_KEEP_RECENT", file.keep_recent, 20),
-            google_api_key: env_or_opt("BEAR_GOOGLE_API_KEY", file.google_api_key),
-            google_cx: env_or_opt("BEAR_GOOGLE_CX", file.google_cx),
             brave_api_key: env_or_opt("BEAR_BRAVE_API_KEY", file.brave_api_key),
         }
     }
@@ -241,8 +235,6 @@ impl AppConfig {
             max_tool_output_chars: env_or("BEAR_MAX_TOOL_OUTPUT_CHARS", 32_000),
             context_budget: env_or("BEAR_CONTEXT_BUDGET", 16_000),
             keep_recent: env_or("BEAR_KEEP_RECENT", 20),
-            google_api_key: std::env::var("BEAR_GOOGLE_API_KEY").ok(),
-            google_cx: std::env::var("BEAR_GOOGLE_CX").ok(),
             brave_api_key: std::env::var("BEAR_BRAVE_API_KEY").ok(),
         }
     }

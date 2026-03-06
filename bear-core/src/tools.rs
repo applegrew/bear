@@ -121,8 +121,6 @@ pub trait ToolContext: Send + Sync {
     fn max_tool_output_chars(&self) -> usize;
 
     // Web search fallback keys
-    fn google_api_key(&self) -> Option<&str>;
-    fn google_cx(&self) -> Option<&str>;
     fn brave_api_key(&self) -> Option<&str>;
 
     // Session state access
@@ -1866,7 +1864,7 @@ async fn execute_web_search(ctx: &dyn ToolContext, ptc: &PendingToolCall) -> Str
     };
     let max_results = ptc.tool_call.arguments["max_results"].as_u64().unwrap_or(5) as usize;
 
-    // Fallback chain: DDG → Google → Brave → error
+    // Fallback chain: DDG → Brave → error
     let mut last_error;
 
     // 1. Try DuckDuckGo (no API key needed)
@@ -1877,17 +1875,7 @@ async fn execute_web_search(ctx: &dyn ToolContext, ptc: &PendingToolCall) -> Str
         }
     }
 
-    // 2. Try Google Custom Search (if keys present)
-    if let (Some(api_key), Some(cx)) = (ctx.google_api_key(), ctx.google_cx()) {
-        match search_google(ctx.http_client(), api_key, cx, &query, max_results).await {
-            Ok(results) => return results,
-            Err(err) => {
-                last_error = format!("Google: {err}");
-            }
-        }
-    }
-
-    // 3. Try Brave Search (if key present)
+    // 2. Try Brave Search (if key present)
     if let Some(api_key) = ctx.brave_api_key() {
         match search_brave(ctx.http_client(), api_key, &query, max_results).await {
             Ok(results) => return results,
@@ -2048,65 +2036,6 @@ fn extract_href(fragment: &str) -> String {
         }
     }
     String::new()
-}
-
-// ---------------------------------------------------------------------------
-// Google Custom Search API
-// ---------------------------------------------------------------------------
-
-async fn search_google(
-    client: &reqwest::Client,
-    api_key: &str,
-    cx: &str,
-    query: &str,
-    max_results: usize,
-) -> Result<String, String> {
-    let num = max_results.min(10); // Google CSE max is 10 per request
-    let url = format!(
-        "https://www.googleapis.com/customsearch/v1?key={}&cx={}&q={}&num={}",
-        urlencoding::encode(api_key),
-        urlencoding::encode(cx),
-        urlencoding::encode(query),
-        num,
-    );
-
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
-
-    let status = response.status();
-    if status.as_u16() == 429 {
-        return Err("rate-limited (HTTP 429)".to_string());
-    }
-    if !status.is_success() {
-        return Err(format!("HTTP {status}"));
-    }
-
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| format!("JSON parse failed: {e}"))?;
-
-    let items = body["items"].as_array();
-    let Some(items) = items else {
-        return Err("no results in response".to_string());
-    };
-
-    let mut results = Vec::new();
-    for (i, item) in items.iter().enumerate().take(max_results) {
-        let title = item["title"].as_str().unwrap_or("(no title)");
-        let link = item["link"].as_str().unwrap_or("(no url)");
-        let snippet = item["snippet"].as_str().unwrap_or("(no snippet)");
-        results.push(format!("{}. {}\n   {}\n   {}", i + 1, title, link, snippet));
-    }
-
-    if results.is_empty() {
-        Err("no results".to_string())
-    } else {
-        Ok(results.join("\n\n"))
-    }
 }
 
 // ---------------------------------------------------------------------------

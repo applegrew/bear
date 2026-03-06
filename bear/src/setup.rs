@@ -154,25 +154,16 @@ fn run_setup_wizard(existing: Option<ConfigFile>) -> Result<()> {
             description: "Free, scraped results — may hit CAPTCHAs".to_string(),
         },
         MenuItem {
-            label: "Google (Programmable Search Engine)".to_string(),
-            description:
-                "Requires API key + Search Engine ID (https://programmablesearchengine.google.com)"
-                    .to_string(),
-        },
-        MenuItem {
             label: "Brave Search".to_string(),
             description: "Requires API key".to_string(),
         },
     ];
 
-    // Pre-select based on existing config: DDG is always available (index 0),
-    // Google if keys are set (index 1), Brave if key is set (index 2).
+    // Pre-select based on existing config: DDG always on (index 0),
+    // Brave if key is set (index 1).
     let mut preselected: Vec<usize> = vec![0]; // DDG on by default
-    if config.google_api_key.is_some() {
-        preselected.push(1);
-    }
     if config.brave_api_key.is_some() {
-        preselected.push(2);
+        preselected.push(1);
     }
 
     let search_selection = interactive_menu_multi_preselected(
@@ -189,21 +180,8 @@ fn run_setup_wizard(existing: Option<ConfigFile>) -> Result<()> {
         _ => vec![0],
     };
 
-    // Google Custom Search — ask for keys only if selected
-    if selected_search.contains(&1) {
-        let google_key = prompt_optional("Google API key", config.google_api_key.as_deref())?;
-        config.google_api_key = google_key;
-        if config.google_api_key.is_some() {
-            let cx = prompt_optional("Google Search Engine ID (CX)", config.google_cx.as_deref())?;
-            config.google_cx = cx;
-        }
-    } else {
-        config.google_api_key = None;
-        config.google_cx = None;
-    }
-
     // Brave Search — ask for key only if selected
-    if selected_search.contains(&2) {
+    if selected_search.contains(&1) {
         let brave_key = prompt_optional("Brave Search API key", config.brave_api_key.as_deref())?;
         config.brave_api_key = brave_key;
     } else {
