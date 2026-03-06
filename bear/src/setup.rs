@@ -133,6 +133,68 @@ fn run_setup_wizard(existing: Option<ConfigFile>) -> Result<()> {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Web search configuration
+    // -----------------------------------------------------------------------
+
+    execute!(
+        stdout,
+        Print("\n"),
+        SetForegroundColor(Color::Cyan),
+        Print("Web search (optional — press Enter to skip)\n\n"),
+        ResetColor,
+    )?;
+
+    // Google Custom Search
+    let google_key = prompt_optional(
+        "Google API key",
+        config.google_api_key.as_deref(),
+    )?;
+    config.google_api_key = google_key;
+
+    if config.google_api_key.is_some() {
+        let cx = prompt_optional(
+            "Google Custom Search CX",
+            config.google_cx.as_deref(),
+        )?;
+        config.google_cx = cx;
+    }
+
+    // Brave Search
+    let brave_key = prompt_optional(
+        "Brave Search API key",
+        config.brave_api_key.as_deref(),
+    )?;
+    config.brave_api_key = brave_key;
+
+    // -----------------------------------------------------------------------
+    // Advanced settings
+    // -----------------------------------------------------------------------
+
+    execute!(
+        stdout,
+        Print("\n"),
+        SetForegroundColor(Color::Cyan),
+        Print("Advanced settings (press Enter to keep defaults)\n\n"),
+        ResetColor,
+    )?;
+
+    let def_depth = config.max_tool_depth.unwrap_or(100).to_string();
+    let depth_str = prompt_with_default("Max tool depth", &def_depth)?;
+    config.max_tool_depth = depth_str.parse().ok();
+
+    let def_output = config.max_tool_output_chars.unwrap_or(32_000).to_string();
+    let output_str = prompt_with_default("Max tool output chars", &def_output)?;
+    config.max_tool_output_chars = output_str.parse().ok();
+
+    let def_budget = config.context_budget.unwrap_or(16_000).to_string();
+    let budget_str = prompt_with_default("Context budget (tokens)", &def_budget)?;
+    config.context_budget = budget_str.parse().ok();
+
+    let def_recent = config.keep_recent.unwrap_or(20).to_string();
+    let recent_str = prompt_with_default("Keep recent messages", &def_recent)?;
+    config.keep_recent = recent_str.parse().ok();
+
     config.save()?;
 
     let path_display = bear_core::config_path()
@@ -203,6 +265,56 @@ fn prompt_with_existing(label: &str, existing: Option<&str>) -> Result<String> {
             }
         }
         _ => prompt_required(label),
+    }
+}
+
+/// Prompt for an optional sensitive value (e.g. API key).
+/// Shows masked existing value if present; Enter keeps it, typing "-" clears it,
+/// empty input with no existing value skips.
+fn prompt_optional(label: &str, existing: Option<&str>) -> Result<Option<String>> {
+    let mut stdout = io::stdout();
+    match existing {
+        Some(val) if !val.is_empty() => {
+            let masked = if val.len() > 4 {
+                format!("{}****", &val[..4])
+            } else {
+                "****".to_string()
+            };
+            execute!(
+                stdout,
+                SetForegroundColor(Color::White),
+                Print(format!("{label} [{masked}] (Enter=keep, -=clear): ")),
+                ResetColor,
+            )?;
+            stdout.flush()?;
+            let mut line = String::new();
+            io::stdin().lock().read_line(&mut line)?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                Ok(Some(val.to_string()))
+            } else if trimmed == "-" {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        _ => {
+            execute!(
+                stdout,
+                SetForegroundColor(Color::White),
+                Print(format!("{label}: ")),
+                ResetColor,
+            )?;
+            stdout.flush()?;
+            let mut line = String::new();
+            io::stdin().lock().read_line(&mut line)?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
     }
 }
 
