@@ -29,6 +29,115 @@ pub fn interactive_menu(title: &str, items: &[MenuItem], mode: MenuMode) -> Menu
     interactive_menu_with_default(title, items, mode, 0)
 }
 
+/// Multi-select menu with pre-selected items. `preselected` contains indices
+/// that should be toggled on initially.
+pub fn interactive_menu_multi_preselected(
+    title: &str,
+    items: &[MenuItem],
+    preselected: &[usize],
+) -> MenuResult {
+    if items.is_empty() {
+        return MenuResult::Cancelled;
+    }
+
+    let mut stdout = io::stdout();
+    let _ = terminal::enable_raw_mode();
+
+    let mut cursor_idx: usize = 0;
+    let mut selected: Vec<bool> = vec![false; items.len()];
+    for &idx in preselected {
+        if idx < items.len() {
+            selected[idx] = true;
+        }
+    }
+    let is_multi = true;
+
+    draw_menu(
+        &mut stdout,
+        title,
+        items,
+        cursor_idx,
+        &selected,
+        is_multi,
+        true,
+    );
+
+    let result = loop {
+        if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
+            if let Ok(Event::Key(key)) = event::read() {
+                match key.code {
+                    KeyCode::Up => {
+                        if cursor_idx > 0 {
+                            cursor_idx -= 1;
+                        } else {
+                            cursor_idx = items.len() - 1;
+                        }
+                        draw_menu(
+                            &mut stdout,
+                            title,
+                            items,
+                            cursor_idx,
+                            &selected,
+                            is_multi,
+                            false,
+                        );
+                    }
+                    KeyCode::Down => {
+                        if cursor_idx + 1 < items.len() {
+                            cursor_idx += 1;
+                        } else {
+                            cursor_idx = 0;
+                        }
+                        draw_menu(
+                            &mut stdout,
+                            title,
+                            items,
+                            cursor_idx,
+                            &selected,
+                            is_multi,
+                            false,
+                        );
+                    }
+                    KeyCode::Char(' ') => {
+                        selected[cursor_idx] = !selected[cursor_idx];
+                        draw_menu(
+                            &mut stdout,
+                            title,
+                            items,
+                            cursor_idx,
+                            &selected,
+                            is_multi,
+                            false,
+                        );
+                    }
+                    KeyCode::Enter => {
+                        let indices: Vec<usize> = selected
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, &s)| s)
+                            .map(|(i, _)| i)
+                            .collect();
+                        break MenuResult::Multi(indices);
+                    }
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        break MenuResult::Cancelled;
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        break MenuResult::Cancelled;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    let _ = terminal::disable_raw_mode();
+    let _ = execute!(stdout, Print("\r\n"));
+    let _ = stdout.flush();
+
+    result
+}
+
 pub fn interactive_menu_with_default(
     title: &str,
     items: &[MenuItem],

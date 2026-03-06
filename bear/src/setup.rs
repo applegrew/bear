@@ -4,7 +4,10 @@ use crossterm::execute;
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use std::io::{self, BufRead, Write};
 
-use crate::menu::{interactive_menu_with_default, MenuItem, MenuMode, MenuResult};
+use crate::menu::{
+    interactive_menu_multi_preselected, interactive_menu_with_default, MenuItem, MenuMode,
+    MenuResult,
+};
 
 /// Check if `~/.bear/config.json` exists. If not, run the setup wizard.
 pub fn ensure_config() -> Result<()> {
@@ -141,22 +144,69 @@ fn run_setup_wizard(existing: Option<ConfigFile>) -> Result<()> {
         stdout,
         Print("\n"),
         SetForegroundColor(Color::Cyan),
-        Print("Web search (optional — press Enter to skip)\n\n"),
+        Print("Web search — providers are tried in order; select all you want.\n\n"),
         ResetColor,
     )?;
 
-    // Google Custom Search
-    let google_key = prompt_optional("Google API key", config.google_api_key.as_deref())?;
-    config.google_api_key = google_key;
+    let search_items = vec![
+        MenuItem {
+            label: "DuckDuckGo (no key needed)".to_string(),
+            description: "Free, scraped results — may hit CAPTCHAs".to_string(),
+        },
+        MenuItem {
+            label: "Google (Programmable Search Engine)".to_string(),
+            description: "Requires API key + Search Engine ID (https://programmablesearchengine.google.com)".to_string(),
+        },
+        MenuItem {
+            label: "Brave Search".to_string(),
+            description: "Requires API key".to_string(),
+        },
+    ];
 
+    // Pre-select based on existing config: DDG is always available (index 0),
+    // Google if keys are set (index 1), Brave if key is set (index 2).
+    let mut preselected: Vec<usize> = vec![0]; // DDG on by default
     if config.google_api_key.is_some() {
-        let cx = prompt_optional("Google Custom Search CX", config.google_cx.as_deref())?;
-        config.google_cx = cx;
+        preselected.push(1);
+    }
+    if config.brave_api_key.is_some() {
+        preselected.push(2);
     }
 
-    // Brave Search
-    let brave_key = prompt_optional("Brave Search API key", config.brave_api_key.as_deref())?;
-    config.brave_api_key = brave_key;
+    let search_selection = interactive_menu_multi_preselected(
+        "Which search providers would you like to enable?",
+        &search_items,
+        &preselected,
+    );
+
+    let selected_search = match search_selection {
+        MenuResult::Multi(indices) => indices,
+        MenuResult::Cancelled => {
+            anyhow::bail!("Setup cancelled.");
+        }
+        _ => vec![0],
+    };
+
+    // Google Custom Search — ask for keys only if selected
+    if selected_search.contains(&1) {
+        let google_key = prompt_optional("Google API key", config.google_api_key.as_deref())?;
+        config.google_api_key = google_key;
+        if config.google_api_key.is_some() {
+            let cx = prompt_optional("Google Search Engine ID (CX)", config.google_cx.as_deref())?;
+            config.google_cx = cx;
+        }
+    } else {
+        config.google_api_key = None;
+        config.google_cx = None;
+    }
+
+    // Brave Search — ask for key only if selected
+    if selected_search.contains(&2) {
+        let brave_key = prompt_optional("Brave Search API key", config.brave_api_key.as_deref())?;
+        config.brave_api_key = brave_key;
+    } else {
+        config.brave_api_key = None;
+    }
 
     // -----------------------------------------------------------------------
     // Advanced settings
