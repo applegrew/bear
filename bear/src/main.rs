@@ -768,6 +768,12 @@ fn dispatch_server_msg(
             };
             let _ = render_tx.send(RenderCmd::Notice(msg));
         }
+        ServerMessage::ReplayStart { .. } => {
+            let _ = render_tx.send(RenderCmd::ReplayStart);
+        }
+        ServerMessage::ReplayEnd => {
+            let _ = render_tx.send(RenderCmd::ReplayEnd);
+        }
         ServerMessage::Pong => {}
         // These are only used by the browser client (DataChannel lobby)
         ServerMessage::SessionListResult { .. } => {}

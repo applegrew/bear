@@ -106,18 +106,18 @@ async fn handle_data_channel_lobby(state: ServerState, dc: Arc<RTCDataChannel>) 
                                 ).await;
                                 // Auto-bind to the newly created session
                                 tracing::info!("rtc: lobby — created and binding to session {}", info.id);
-                                handle_data_channel_bound(state, info.id, info, dc, dc_msg_rx, close_rx).await;
+                                handle_data_channel_bound(state, info.id, info, dc, dc_msg_rx, close_rx, false).await;
                                 return;
                             }
-                            ClientMessage::SessionSelect { session_id } => {
+                            ClientMessage::SessionSelect { session_id, reconnect } => {
                                 let session_info = {
                                     let sessions = state.sessions.read().await;
                                     sessions.get(&session_id).map(|s| s.info.clone())
                                 };
                                 match session_info {
                                     Some(info) => {
-                                        tracing::info!("rtc: lobby — binding to session {session_id}");
-                                        handle_data_channel_bound(state, session_id, info, dc, dc_msg_rx, close_rx).await;
+                                        tracing::info!("rtc: lobby — binding to session {session_id} (reconnect={reconnect})");
+                                        handle_data_channel_bound(state, session_id, info, dc, dc_msg_rx, close_rx, reconnect).await;
                                         return;
                                     }
                                     None => {
@@ -158,6 +158,7 @@ async fn handle_data_channel_bound(
     dc: Arc<RTCDataChannel>,
     mut dc_msg_rx: mpsc::Receiver<String>,
     mut close_rx: mpsc::Receiver<()>,
+    reconnect: bool,
 ) {
     // Send initial messages (same as WS flow after session selection)
     let _ = dc_send_msg(
@@ -206,7 +207,7 @@ async fn handle_data_channel_bound(
     // Ensure the session worker is running
     let client_tx = ensure_worker_running(&state, session_id).await;
 
-    // Create a consumer for this client (starts at offset 0 — full replay)
+    // Create a consumer — reconnect starts at end (no replay), fresh starts at 0
     let mut consumer = {
         let buses = state.buses.read().await;
         let Some(bus) = buses.get(&session_id) else {
@@ -219,15 +220,34 @@ async fn handle_data_channel_bound(
             .await;
             return;
         };
-        bus.consumer()
+        if reconnect {
+            bus.consumer_at_end().await
+        } else {
+            bus.consumer()
+        }
     };
 
-    tracing::info!("rtc: client connected to session {session_id}");
+    tracing::info!("rtc: client connected to session {session_id} (reconnect={reconnect})");
 
     let mut prompt_active = false;
     let mut scanned_len: usize = 0;
 
-    // Main relay loop (same as before)
+    // For fresh connects, wrap the initial drain with ReplayStart/ReplayEnd
+    // so clients can suppress already-resolved prompts during history replay.
+    if !reconnect {
+        let replay_msgs = consumer.peek().await;
+        let count = replay_msgs.len();
+        if count > 0 {
+            let _ = dc_send_msg(&dc, &ServerMessage::ReplayStart { count }).await;
+            dc_drain_unconsumed(&mut consumer, &dc, &mut prompt_active).await;
+            let _ = dc_send_msg(&dc, &ServerMessage::ReplayEnd).await;
+            if prompt_active {
+                scanned_len = consumer.offset();
+            }
+        }
+    }
+
+    // Main relay loop
     loop {
         if prompt_active {
             tokio::select! {

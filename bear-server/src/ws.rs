@@ -218,7 +218,12 @@ pub async fn ensure_worker_running(
     client_tx
 }
 
-pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: WebSocket) {
+pub async fn handle_socket(
+    state: ServerState,
+    session_id: Uuid,
+    mut socket: WebSocket,
+    reconnect: bool,
+) {
     // Verify session exists
     let session_info = {
         let sessions = state.sessions.read().await;
@@ -291,7 +296,7 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
     // Ensure the session worker is running and get the client_tx
     let client_tx = ensure_worker_running(&state, session_id).await;
 
-    // Create a consumer for this client (starts at offset 0 — full replay)
+    // Create a consumer — reconnect starts at end (no replay), fresh starts at 0
     let mut consumer = {
         let buses = state.buses.read().await;
         let Some(bus) = buses.get(&session_id) else {
@@ -304,10 +309,14 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
             .await;
             return;
         };
-        bus.consumer()
+        if reconnect {
+            bus.consumer_at_end().await
+        } else {
+            bus.consumer()
+        }
     };
 
-    tracing::info!("ws: client connected to session {session_id}");
+    tracing::info!("ws: client connected to session {session_id} (reconnect={reconnect})");
 
     // Main relay loop: forward between WebSocket and session bus
     let (mut ws_sink, mut ws_stream) = socket.split();
@@ -322,6 +331,36 @@ pub async fn handle_socket(state: ServerState, session_id: Uuid, mut socket: Web
     // How far we have scanned in the log during prompt-active mode (to avoid
     // busy-looping when peeked messages contain no resolution).
     let mut scanned_len: usize = 0;
+
+    // For fresh connects, wrap the initial drain with ReplayStart/ReplayEnd
+    // so clients can suppress already-resolved prompts during history replay.
+    if !reconnect {
+        let replay_msgs = consumer.peek().await;
+        let count = replay_msgs.len();
+        if count > 0 {
+            if ws_send_sm(&mut ws_sink, &ServerMessage::ReplayStart { count })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if ws_drain_unconsumed(&mut consumer, &mut ws_sink, &mut prompt_active)
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if ws_send_sm(&mut ws_sink, &ServerMessage::ReplayEnd)
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if prompt_active {
+                scanned_len = consumer.offset();
+            }
+        }
+    }
 
     loop {
         if prompt_active {

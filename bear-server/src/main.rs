@@ -10,7 +10,7 @@ mod tools;
 mod ws;
 
 use axum::{
-    extract::{ws::WebSocketUpgrade, Path, State},
+    extract::{ws::WebSocketUpgrade, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -517,9 +517,16 @@ fn read_readme_from_dir(dir: &str) -> Option<String> {
 // WebSocket upgrade handler
 // ---------------------------------------------------------------------------
 
+#[derive(serde::Deserialize, Default)]
+struct WsQueryParams {
+    #[serde(default)]
+    reconnect: bool,
+}
+
 async fn ws_handler(
     State(state): State<ServerState>,
     Path(session_id): Path<Uuid>,
+    Query(params): Query<WsQueryParams>,
     upgrade: WebSocketUpgrade,
 ) -> impl IntoResponse {
     let exists = {
@@ -530,5 +537,5 @@ async fn ws_handler(
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    upgrade.on_upgrade(move |socket| ws::handle_socket(state, session_id, socket))
+    upgrade.on_upgrade(move |socket| ws::handle_socket(state, session_id, socket, params.reconnect))
 }

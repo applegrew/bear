@@ -192,6 +192,10 @@ pub enum ClientMessage {
     /// Select/bind to an existing session (used by browser client over DataChannel).
     SessionSelect {
         session_id: Uuid,
+        /// If true, skip history replay (auto-reconnect to a previously
+        /// connected session).
+        #[serde(default)]
+        reconnect: bool,
     },
     /// Native client tells server to (re-)read relay.json and start polling.
     RelayStart,
@@ -330,6 +334,14 @@ pub enum ServerMessage {
         detail: Option<String>,
     },
     Pong,
+    /// Sent before replaying history on a fresh connect. `count` is the
+    /// number of messages that will follow before `ReplayEnd`.
+    ReplayStart {
+        count: usize,
+    },
+    /// Marks the end of the history replay. If no pending interactive
+    /// prompt was encountered during replay, the client is fully caught up.
+    ReplayEnd,
 }
 
 impl ServerMessage {

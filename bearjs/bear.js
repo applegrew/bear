@@ -409,6 +409,7 @@ export class BearClient {
     this._wasConnected = false;    // true after first successful DataChannel open
     this._lastSessionId = null;    // for silent auto-rejoin after reconnect
     this._autoRejoining = false;   // suppresses session_info output during rejoin
+    this._inReplay = false;        // true while receiving replay_start..replay_end
 
     // Last tool tracking
     this._lastToolName = '';
@@ -1250,6 +1251,14 @@ export class BearClient {
 
   _handleServerMessage(msg) {
     switch (msg.type) {
+      case 'replay_start':
+        this._inReplay = true;
+        break;
+
+      case 'replay_end':
+        this._inReplay = false;
+        break;
+
       case 'slash_commands':
         this.slashCommands = Array.isArray(msg.commands) ? msg.commands : [];
         this._updateSlashDropdown();
@@ -1259,7 +1268,7 @@ export class BearClient {
           this._lobbyPending = false;
           if (this._autoRejoining && this._lastSessionId) {
             // Silent auto-rejoin: skip session picker, go straight to last session
-            this._sendJson({ type: 'session_select', session_id: this._lastSessionId });
+            this._sendJson({ type: 'session_select', session_id: this._lastSessionId, reconnect: true });
           } else {
             this._showSessionPicker();
           }
@@ -1352,12 +1361,14 @@ export class BearClient {
         }
         this._pushLine(`${C.gray}  └─${C.reset}`);
 
-        // Enter picker mode
-        this.toolConfirmCall = tc;
-        this._tcIdx = 0;
-        this.inToolConfirm = true;
-        this._scheduleAlert();
-        this._renderToolConfirm();
+        // Enter picker mode (suppress during replay — prompt is already resolved)
+        if (!this._inReplay) {
+          this.toolConfirmCall = tc;
+          this._tcIdx = 0;
+          this.inToolConfirm = true;
+          this._scheduleAlert();
+          this._renderToolConfirm();
+        }
         break;
       }
 
@@ -1493,16 +1504,19 @@ export class BearClient {
         break;
 
       case 'user_prompt':
-        this.inUserPrompt = true;
-        this.userPromptId = msg.prompt_id;
-        this.userPromptOptions = msg.options;
-        this.userPromptMulti = msg.multi;
-        this.userPromptIdx = 0;
-        this.userPromptSelected = new Array(msg.options.length).fill(false);
         this._pushLine(`${C.bold}${C.cyan}  ${msg.question}${C.reset}`);
         this._fullRepaint();
-        this._scheduleAlert();
-        this._renderUserPrompt();
+        // Suppress picker during replay — prompt is already resolved
+        if (!this._inReplay) {
+          this.inUserPrompt = true;
+          this.userPromptId = msg.prompt_id;
+          this.userPromptOptions = msg.options;
+          this.userPromptMulti = msg.multi;
+          this.userPromptIdx = 0;
+          this.userPromptSelected = new Array(msg.options.length).fill(false);
+          this._scheduleAlert();
+          this._renderUserPrompt();
+        }
         break;
 
       case 'task_plan': {
@@ -1516,17 +1530,19 @@ export class BearClient {
           this._pushLine(`${C.gray}    ${task.id}. ${tag} ${C.white}${task.description}${C.reset}`);
         }
         this._pushLine('');
-        // Reuse user prompt picker for approval
-        this.inUserPrompt = true;
-        this.userPromptId = `__taskplan__${msg.plan_id}`;
-        this.userPromptOptions = ['Approve', 'Reject'];
-        this.userPromptMulti = false;
-        this.userPromptIdx = 0;
-        this.userPromptSelected = [false, false];
         this._pushLine(`${C.bold}${C.cyan}  Execute this plan?${C.reset}`);
         this._fullRepaint();
-        this._scheduleAlert();
-        this._renderUserPrompt();
+        // Suppress picker during replay — prompt is already resolved
+        if (!this._inReplay) {
+          this.inUserPrompt = true;
+          this.userPromptId = `__taskplan__${msg.plan_id}`;
+          this.userPromptOptions = ['Approve', 'Reject'];
+          this.userPromptMulti = false;
+          this.userPromptIdx = 0;
+          this.userPromptSelected = [false, false];
+          this._scheduleAlert();
+          this._renderUserPrompt();
+        }
         break;
       }
 

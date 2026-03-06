@@ -80,6 +80,10 @@ pub enum RenderCmd {
     },
     /// Tell the terminal to skip the next UserInput echo (we already rendered it locally).
     SuppressNextInputEcho,
+    /// Begin history replay — suppress interactive prompts until ReplayEnd.
+    ReplayStart,
+    /// End history replay — resume normal interactive prompt handling.
+    ReplayEnd,
     Quit,
 }
 
@@ -195,6 +199,14 @@ pub fn spawn_terminal_thread(
                     state.cleanup();
                     return;
                 }
+                if matches!(cmd, RenderCmd::ReplayStart) {
+                    state.in_replay = true;
+                    continue;
+                }
+                if matches!(cmd, RenderCmd::ReplayEnd) {
+                    state.in_replay = false;
+                    continue;
+                }
                 if let RenderCmd::ToolRequest {
                     tool_call_id,
                     name,
@@ -202,6 +214,20 @@ pub fn spawn_terminal_thread(
                     ..
                 } = cmd
                 {
+                    // During replay, just render the tool card without entering the picker
+                    if state.in_replay {
+                        let desc = format_tool_description(
+                            &name,
+                            &serde_json::from_str(&args).unwrap_or_default(),
+                        );
+                        state.push_line(&format!("  {} ⚡ {} ─", a_gray("┌─"), a_magenta(&name)));
+                        for line in &desc {
+                            state.push_line(&format!("  {} {}", a_gray("│ "), line));
+                        }
+                        state.push_line(&a_gray("  └─"));
+                        state.full_repaint();
+                        continue;
+                    }
                     if let Some(choice) =
                         state.run_tool_confirm_picker(&render_rx, &tool_call_id, &name, &args)
                     {
@@ -226,6 +252,12 @@ pub fn spawn_terminal_thread(
                     multi,
                 } = cmd
                 {
+                    // During replay, just render the question text without the picker
+                    if state.in_replay {
+                        state.push_line(&a_cyan(&question));
+                        state.full_repaint();
+                        continue;
+                    }
                     if let Some(selected) = state.run_inline_menu(
                         &render_rx,
                         Some(&prompt_id),
@@ -264,6 +296,11 @@ pub fn spawn_terminal_thread(
                         ));
                     }
                     state.push_line("");
+                    // During replay, skip the approval picker
+                    if state.in_replay {
+                        state.full_repaint();
+                        continue;
+                    }
                     // Use the existing inline menu for approval
                     let options = vec!["Approve".to_string(), "Reject".to_string()];
                     if let Some(selected) = state.run_inline_menu(
@@ -516,6 +553,9 @@ struct TermState {
 
     /// Track active subagent count by subagent_id.
     active_subagents: std::collections::HashSet<String>,
+
+    /// True while replaying history — suppress interactive prompts.
+    in_replay: bool,
 }
 
 /// Format a tool call into human-readable description lines for the card UI.
@@ -944,6 +984,7 @@ impl TermState {
             interrupt_pending_text: None,
             interrupt_warning_start: None,
             active_subagents: std::collections::HashSet::new(),
+            in_replay: false,
         })
     }
 
@@ -2067,6 +2108,8 @@ impl TermState {
             RenderCmd::UserPrompt { .. } => {}
             RenderCmd::ToolResolved { .. } => {}
             RenderCmd::PromptResolved { .. } => {}
+            RenderCmd::ReplayStart => {}
+            RenderCmd::ReplayEnd => {}
             RenderCmd::Quit => {}
         }
     }

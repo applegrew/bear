@@ -64,6 +64,17 @@ impl TopicLog {
         }
     }
 
+    /// Create a consumer starting at the current end of the log.
+    /// The consumer will only see messages appended after this call —
+    /// no history replay.
+    pub async fn consumer_at_end(&self) -> TopicConsumer {
+        let offset = self.len().await;
+        TopicConsumer {
+            log: self.clone(),
+            offset,
+        }
+    }
+
     /// Read messages from absolute offset `start` to current end.
     /// Returns the messages and the new absolute offset (end of log at
     /// time of read). If `start` is behind the base offset (messages
@@ -192,6 +203,12 @@ impl SessionBus {
     /// so the client receives the full message history.
     pub fn consumer(&self) -> TopicConsumer {
         self.topic.consumer()
+    }
+
+    /// Create a consumer starting at the current end of the log (no replay).
+    /// Used for auto-reconnect when the client has already seen the history.
+    pub async fn consumer_at_end(&self) -> TopicConsumer {
+        self.topic.consumer_at_end().await
     }
 }
 
