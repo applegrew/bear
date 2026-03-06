@@ -155,7 +155,9 @@ fn run_setup_wizard(existing: Option<ConfigFile>) -> Result<()> {
         },
         MenuItem {
             label: "Google (Programmable Search Engine)".to_string(),
-            description: "Requires API key + Search Engine ID (https://programmablesearchengine.google.com)".to_string(),
+            description:
+                "Requires API key + Search Engine ID (https://programmablesearchengine.google.com)"
+                    .to_string(),
         },
         MenuItem {
             label: "Brave Search".to_string(),
