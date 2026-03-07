@@ -1611,7 +1611,10 @@ impl TermState {
         let always_label = if extracted_commands.is_empty() {
             None
         } else {
-            let quoted: Vec<String> = extracted_commands.iter().map(|c| format!("'{c}'")).collect();
+            let quoted: Vec<String> = extracted_commands
+                .iter()
+                .map(|c| format!("'{c}'"))
+                .collect();
             Some(format!("Always approve {} for session", quoted.join(", ")))
         };
 

@@ -790,24 +790,40 @@ async fn session_worker(
                             if approved {
                                 // Handle auto-approve (always) for the session
                                 if always {
-                                    let display = tool_display_name(&ptc.tool_call.name).to_string();
-                                    let all_cmds: Vec<String> = if ptc.tool_call.name == "run_command" {
-                                        let cmd_str = ptc.tool_call.arguments["command"]
-                                            .as_str()
-                                            .unwrap_or("");
-                                        let extracted = extract_shell_commands(cmd_str);
-                                        if extracted.is_empty() { vec![display] } else { extracted }
-                                    } else {
-                                        vec![display]
-                                    };
+                                    let display =
+                                        tool_display_name(&ptc.tool_call.name).to_string();
+                                    let all_cmds: Vec<String> =
+                                        if ptc.tool_call.name == "run_command" {
+                                            let cmd_str = ptc.tool_call.arguments["command"]
+                                                .as_str()
+                                                .unwrap_or("");
+                                            let extracted = extract_shell_commands(cmd_str);
+                                            if extracted.is_empty() {
+                                                vec![display]
+                                            } else {
+                                                extracted
+                                            }
+                                        } else {
+                                            vec![display]
+                                        };
                                     let new_cmds: Vec<String> = {
                                         let sessions = state.sessions.read().await;
-                                        let already = sessions.get(&session_id)
-                                            .map(|s| &s.auto_approved).cloned().unwrap_or_default();
-                                        all_cmds.into_iter().filter(|c| !already.contains(c)).collect()
+                                        let already = sessions
+                                            .get(&session_id)
+                                            .map(|s| &s.auto_approved)
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        all_cmds
+                                            .into_iter()
+                                            .filter(|c| !already.contains(c))
+                                            .collect()
                                     };
                                     if !new_cmds.is_empty() {
-                                        let label = new_cmds.iter().map(|c| format!("'{c}'")).collect::<Vec<_>>().join(", ");
+                                        let label = new_cmds
+                                            .iter()
+                                            .map(|c| format!("'{c}'"))
+                                            .collect::<Vec<_>>()
+                                            .join(", ");
                                         {
                                             let mut sessions = state.sessions.write().await;
                                             if let Some(session) = sessions.get_mut(&session_id) {
@@ -818,8 +834,12 @@ async fn session_worker(
                                         }
                                         persist_auto_approved(&state, session_id).await;
                                         bus.send(ServerMessage::Notice {
-                                            text: format!("{} will be auto-approved for this session.", label),
-                                        }).await;
+                                            text: format!(
+                                                "{} will be auto-approved for this session.",
+                                                label
+                                            ),
+                                        })
+                                        .await;
                                     }
                                 }
                                 // Execute the tool and send output
@@ -3061,7 +3081,11 @@ async fn handle_tool_confirm(
                 .collect()
         };
         if !new_cmds.is_empty() {
-            let label = new_cmds.iter().map(|c| format!("'{c}'")).collect::<Vec<_>>().join(", ");
+            let label = new_cmds
+                .iter()
+                .map(|c| format!("'{c}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
             {
                 let mut sessions = state.sessions.write().await;
                 if let Some(session) = sessions.get_mut(&session_id) {
