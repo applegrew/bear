@@ -11,7 +11,7 @@ import { createDatabase } from "./db.js";
 
 const PORT = parseInt(Deno.env.get("PORT") ?? "8080");
 const INTERNAL_PORT = parseInt(Deno.env.get("INTERNAL_PORT") ?? "8081");
-const RELAY_VERSION = "0.3.3";
+const RELAY_VERSION = "0.3.4";
 const SIGNALING_TTL_MS = 60_000; // 60s for offers/answers/ICE
 const ROOM_PRUNE_DAYS = 30;
 const RATE_LIMIT_WINDOW_MS = 60_000;
