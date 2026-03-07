@@ -790,24 +790,37 @@ async fn session_worker(
                             if approved {
                                 // Handle auto-approve (always) for the session
                                 if always {
-                                    let display = tool_display_name(&ptc.tool_call.name);
-                                    if ptc.tool_call.name == "run_command" {
+                                    let display = tool_display_name(&ptc.tool_call.name).to_string();
+                                    let all_cmds: Vec<String> = if ptc.tool_call.name == "run_command" {
                                         let cmd_str = ptc.tool_call.arguments["command"]
                                             .as_str()
                                             .unwrap_or("");
-                                        for cmd in extract_shell_commands(cmd_str) {
+                                        let extracted = extract_shell_commands(cmd_str);
+                                        if extracted.is_empty() { vec![display] } else { extracted }
+                                    } else {
+                                        vec![display]
+                                    };
+                                    let new_cmds: Vec<String> = {
+                                        let sessions = state.sessions.read().await;
+                                        let already = sessions.get(&session_id)
+                                            .map(|s| &s.auto_approved).cloned().unwrap_or_default();
+                                        all_cmds.into_iter().filter(|c| !already.contains(c)).collect()
+                                    };
+                                    if !new_cmds.is_empty() {
+                                        let label = new_cmds.iter().map(|c| format!("'{c}'")).collect::<Vec<_>>().join(", ");
+                                        {
                                             let mut sessions = state.sessions.write().await;
                                             if let Some(session) = sessions.get_mut(&session_id) {
-                                                session.auto_approved.insert(cmd);
+                                                for cmd in &new_cmds {
+                                                    session.auto_approved.insert(cmd.clone());
+                                                }
                                             }
                                         }
-                                    } else {
-                                        let mut sessions = state.sessions.write().await;
-                                        if let Some(session) = sessions.get_mut(&session_id) {
-                                            session.auto_approved.insert(display.to_string());
-                                        }
+                                        persist_auto_approved(&state, session_id).await;
+                                        bus.send(ServerMessage::Notice {
+                                            text: format!("{} will be auto-approved for this session.", label),
+                                        }).await;
                                     }
-                                    persist_auto_approved(&state, session_id).await;
                                 }
                                 // Execute the tool and send output
                                 let output = execute_tool(&state, session_id, &bus, &ptc).await;
@@ -2945,17 +2958,29 @@ async fn present_next_tool(
         return;
     }
 
-    // For run_command, extract individual command names from the shell string
-    let extracted_commands = if ptc.tool_call.name == "run_command" {
-        let cmd_str = ptc.tool_call.arguments["command"].as_str().unwrap_or("");
-        let cmds = extract_shell_commands(cmd_str);
-        if cmds.is_empty() {
+    // Build extracted_commands: the list of command/tool names that "Always
+    // approve" would add.  Filter out names already in the session's
+    // auto-approved set so the client only sees what is NEW.
+    let extracted_commands = {
+        let new_cmds: Vec<String> = if ptc.tool_call.name == "run_command" {
+            let cmd_str = ptc.tool_call.arguments["command"].as_str().unwrap_or("");
+            extract_shell_commands(cmd_str)
+                .into_iter()
+                .filter(|c| !session_auto_approved.contains(c))
+                .collect()
+        } else {
+            let display = tool_display_name(&ptc.tool_call.name).to_string();
+            if session_auto_approved.contains(&display) {
+                vec![]
+            } else {
+                vec![display]
+            }
+        };
+        if new_cmds.is_empty() {
             None
         } else {
-            Some(cmds)
+            Some(new_cmds)
         }
-    } else {
-        None
     };
 
     // Send the tool request with the display name so the client sees
@@ -3011,7 +3036,7 @@ async fn handle_tool_confirm(
     // run_command) to the session's server-side auto-approved set.
     if always && approved {
         let display = tool_display_name(&ptc.tool_call.name).to_string();
-        let cmds: Vec<String> = if ptc.tool_call.name == "run_command" {
+        let all_cmds: Vec<String> = if ptc.tool_call.name == "run_command" {
             let cmd_str = ptc.tool_call.arguments["command"].as_str().unwrap_or("");
             let extracted = extract_shell_commands(cmd_str);
             if extracted.is_empty() {
@@ -3022,20 +3047,35 @@ async fn handle_tool_confirm(
         } else {
             vec![display]
         };
-        let label = cmds.join("', '");
-        {
-            let mut sessions = state.sessions.write().await;
-            if let Some(session) = sessions.get_mut(&session_id) {
-                for cmd in &cmds {
-                    session.auto_approved.insert(cmd.clone());
+        // Filter out commands already in the auto-approved set
+        let new_cmds: Vec<String> = {
+            let sessions = state.sessions.read().await;
+            let already = sessions
+                .get(&session_id)
+                .map(|s| &s.auto_approved)
+                .cloned()
+                .unwrap_or_default();
+            all_cmds
+                .into_iter()
+                .filter(|c| !already.contains(c))
+                .collect()
+        };
+        if !new_cmds.is_empty() {
+            let label = new_cmds.iter().map(|c| format!("'{c}'")).collect::<Vec<_>>().join(", ");
+            {
+                let mut sessions = state.sessions.write().await;
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    for cmd in &new_cmds {
+                        session.auto_approved.insert(cmd.clone());
+                    }
                 }
             }
+            persist_auto_approved(state, session_id).await;
+            bus.send(ServerMessage::Notice {
+                text: format!("{} will be auto-approved for this session.", label),
+            })
+            .await;
         }
-        persist_auto_approved(state, session_id).await;
-        bus.send(ServerMessage::Notice {
-            text: format!("'{}' will be auto-approved for this session.", label),
-        })
-        .await;
     }
 
     if !approved {

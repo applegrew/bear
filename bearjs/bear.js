@@ -37,7 +37,7 @@ const C = {
 };
 
 // Tool confirmation picker
-const TOOL_CONFIRM_LABELS = ['Approve', 'Deny', 'Always approve for session'];
+const TOOL_CONFIRM_BASE = ['Approve', 'Deny'];
 
 // Spinner frames
 const SPINNER = ['·····', '●····', '·●···', '··●··', '···●·', '····●', '·····'];
@@ -1797,7 +1797,7 @@ export class BearClient {
       if (key === 'ArrowUp' && this._tcIdx > 0) {
         this._tcIdx--;
         this._renderToolConfirm();
-      } else if (key === 'ArrowDown' && this._tcIdx < TOOL_CONFIRM_LABELS.length - 1) {
+      } else if (key === 'ArrowDown' && this._tcIdx < (this._tcLabels || TOOL_CONFIRM_BASE).length - 1) {
         this._tcIdx++;
         this._renderToolConfirm();
       } else if (key === 'Enter') {
@@ -1864,13 +1864,24 @@ export class BearClient {
     const summary = tc ? toolSummary(tc.name, tc.arguments || {}) : '';
     const tcClasses = ['tc-approve', 'tc-deny', 'tc-always'];
 
+    // Build labels: include "Always" only if there are new commands to approve
+    const cmds = this._lastExtractedCommands || [];
+    const labels = [...TOOL_CONFIRM_BASE];
+    if (cmds.length > 0) {
+      const quoted = cmds.map(c => `'${c}'`).join(', ');
+      labels.push(`Always approve ${quoted} for session`);
+    }
+    this._tcLabels = labels;
+    // Clamp index if labels shrunk
+    if (this._tcIdx >= labels.length) this._tcIdx = labels.length - 1;
+
     let html = `<div class="tc-summary"><span class="tc-icon">\u26A1</span> ${this._esc(summary)}</div>`;
-    for (let i = 0; i < TOOL_CONFIRM_LABELS.length; i++) {
+    for (let i = 0; i < labels.length; i++) {
       const cls = `picker-item ${tcClasses[i]}` + (i === this._tcIdx ? ' active' : '');
       const ind = i === this._tcIdx ? '\u276F' : ' ';
       html += `<div class="${cls}" data-idx="${i}">` +
         `<span class="pi-indicator">${ind}</span>` +
-        `<span class="pi-label">${this._esc(TOOL_CONFIRM_LABELS[i])}</span></div>`;
+        `<span class="pi-label">${this._esc(labels[i])}</span></div>`;
     }
     html += '<div class="picker-hint">Tap to select</div>';
     this._pickerOverlay.innerHTML = html;
@@ -1888,8 +1899,9 @@ export class BearClient {
     const tc = this.toolConfirmCall;
     if (!tc) return;
 
+    const labels = this._tcLabels || TOOL_CONFIRM_BASE;
     const approved = idx !== 1;
-    const always = idx === 2;
+    const always = idx === 2 && labels.length > 2;
 
     this.inToolConfirm = false;
     this.toolConfirmCall = null;

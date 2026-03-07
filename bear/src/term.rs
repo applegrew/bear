@@ -24,6 +24,9 @@ pub enum RenderCmd {
         tool_call_id: String,
         name: String,
         args: String,
+        /// Commands/tool names that "Always approve" would add (already-approved
+        /// ones are filtered out by the server). Empty/None means no new names.
+        extracted_commands: Vec<String>,
     },
     /// Another client resolved this tool confirmation — dismiss picker.
     ToolResolved {
@@ -211,7 +214,7 @@ pub fn spawn_terminal_thread(
                     tool_call_id,
                     name,
                     args,
-                    ..
+                    extracted_commands,
                 } = cmd
                 {
                     // During replay, just render the tool card without entering the picker
@@ -228,9 +231,13 @@ pub fn spawn_terminal_thread(
                         state.full_repaint();
                         continue;
                     }
-                    if let Some(choice) =
-                        state.run_tool_confirm_picker(&render_rx, &tool_call_id, &name, &args)
-                    {
+                    if let Some(choice) = state.run_tool_confirm_picker(
+                        &render_rx,
+                        &tool_call_id,
+                        &name,
+                        &args,
+                        &extracted_commands,
+                    ) {
                         let _ = rt.block_on(event_tx.send(TermEvent::ToolConfirmResult {
                             tool_call_id,
                             choice,
@@ -1580,6 +1587,7 @@ impl TermState {
         tool_call_id: &str,
         name: &str,
         args: &str,
+        extracted_commands: &[String],
     ) -> Option<ToolConfirmChoice> {
         // Show tool card in output buffer
         let args_val: serde_json::Value =
@@ -1598,8 +1606,31 @@ impl TermState {
         }
         self.push_line(&format!("  {}", a_gray("└─")));
 
-        let choices = ["Approve", "Deny", "Always approve for session"];
-        let colors: [fn(&str) -> String; 3] = [a_green, a_red, a_yellow];
+        // Build picker choices — include "Always" only if there are new
+        // commands to auto-approve (server filters out already-approved ones).
+        let always_label = if extracted_commands.is_empty() {
+            None
+        } else {
+            let quoted: Vec<String> = extracted_commands.iter().map(|c| format!("'{c}'")).collect();
+            Some(format!("Always approve {} for session", quoted.join(", ")))
+        };
+
+        let mut choices: Vec<&str> = vec!["Approve", "Deny"];
+        // Map each choice index → ToolConfirmChoice
+        let mut choice_map: Vec<ToolConfirmChoice> =
+            vec![ToolConfirmChoice::Approve, ToolConfirmChoice::Deny];
+        let always_str;
+        if let Some(ref label) = always_label {
+            always_str = label.as_str();
+            choices.push(always_str);
+            choice_map.push(ToolConfirmChoice::Always);
+        }
+
+        let colors: &[fn(&str) -> String] = if always_label.is_some() {
+            &[a_green, a_red, a_yellow]
+        } else {
+            &[a_green, a_red]
+        };
         let mut idx: usize = 0;
 
         // Add picker lines
@@ -1684,11 +1715,7 @@ impl TermState {
                                 colors[idx](chosen_label)
                             ));
                             self.push_line("");
-                            return Some(match idx {
-                                0 => ToolConfirmChoice::Approve,
-                                1 => ToolConfirmChoice::Deny,
-                                _ => ToolConfirmChoice::Always,
-                            });
+                            return Some(choice_map[idx]);
                         }
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             self.output_lines.truncate(picker_start);

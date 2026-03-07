@@ -591,13 +591,17 @@ fn dispatch_server_msg(
         ServerMessage::AssistantText { text } => {
             let _ = render_tx.send(RenderCmd::AssistantChunk(text.clone()));
         }
-        ServerMessage::ToolRequest { tool_call, .. } => {
+        ServerMessage::ToolRequest {
+            tool_call,
+            extracted_commands,
+        } => {
             *last_tool = (tool_call.name.clone(), tool_call.arguments.clone());
             let _ = render_tx.send(RenderCmd::ToolRequest {
                 tool_call_id: tool_call.id.clone(),
                 name: tool_call.name.clone(),
                 args: serde_json::to_string_pretty(&tool_call.arguments)
                     .unwrap_or_else(|_| tool_call.arguments.to_string()),
+                extracted_commands: extracted_commands.clone().unwrap_or_default(),
             });
         }
         ServerMessage::ToolAutoApproved { tool_call } => {
