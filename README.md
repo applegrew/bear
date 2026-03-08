@@ -22,6 +22,22 @@ Supports macOS (Intel & Apple Silicon) and Linux (x86_64).
 - **Multi-client sync** — multiple clients can connect to the same session; prompts are broadcast to all clients and dismissed everywhere when any client responds
 - **Interactive session picker** on connect (create new or resume existing)
 
+## How Bear Differs from Claude Code (Teleport Sessions)
+
+Bear and Claude Code's teleport session feature solve a similar problem — using a coding assistant across terminal and browser — but with fundamentally different architectures.
+
+### Architecture: Client-Server vs Monolithic
+
+Bear has a **persistent server** (`bear-server`) that runs independently of any client. The server owns the LLM connection, session state, tool execution, and LSP integration. Clients are thin — they render UI and relay user choices. Claude Code is a single CLI process; teleport moves that session to a browser tab, but it's still one process hosting the session.
+
+### Multi-client sync (simultaneous)
+
+Bear supports **multiple clients connected to the same session at the same time** — native terminal + browser, or multiple terminals. Prompts are broadcast to all clients; when any client responds, all others dismiss their picker. Claude Code teleport is a hand-off — you move the session from one place to another, not share it simultaneously.
+
+### Session persistence
+
+Bear sessions survive client disconnects. Close your terminal, reopen it later, and resume the same session with full history replay. The server keeps running independently. Claude Code sessions are tied to the process lifecycle.
+
 ### Tools (25)
 - **File I/O** — `read_file`, `write_file`, `edit_file`, `patch_file` (unified diff), `list_files`, `search_text`
 - **LSP-powered** — `read_symbol`, `patch_symbol`, `lsp_diagnostics`, `lsp_hover`, `lsp_references`, `lsp_symbols`
