@@ -138,6 +138,30 @@ async fn call_ollama(
 }
 
 // ---------------------------------------------------------------------------
+// Ensure at least one "user" role message exists.
+// Some local-model Jinja templates (e.g. Qwen 3.x) reject requests that
+// contain only system/assistant messages.
+// ---------------------------------------------------------------------------
+
+fn ensure_user_message(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    let has_user = messages.iter().any(|m| m.role == "user");
+    if has_user {
+        return messages.to_vec();
+    }
+    tracing::warn!(
+        "no user-role message found in {} messages (roles: {:?}), injecting placeholder",
+        messages.len(),
+        messages.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(),
+    );
+    let mut fixed = messages.to_vec();
+    fixed.push(ChatMessage {
+        role: "user".to_string(),
+        content: "Go ahead.".to_string(),
+    });
+    fixed
+}
+
+// ---------------------------------------------------------------------------
 // Non-streaming OpenAI call
 // ---------------------------------------------------------------------------
 
@@ -146,6 +170,7 @@ async fn call_openai(
     config: &AppConfig,
     messages: &[ChatMessage],
 ) -> anyhow::Result<ChatMessage> {
+    let messages = ensure_user_message(messages);
     let url = format!(
         "{}/v1/chat/completions",
         config.openai_url.trim_end_matches('/')
@@ -168,8 +193,9 @@ async fn call_openai(
         req = req.header("Authorization", format!("Bearer {key}"));
     }
 
+    let role_summary: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
     tracing::info!(
-        "openai non-streaming request to {url} model={}",
+        "openai non-streaming request to {url} model={} roles={role_summary:?}",
         config.openai_model
     );
     let response = req.send().await?;
@@ -204,6 +230,7 @@ pub async fn call_openai_streaming(
     messages: &[ChatMessage],
     chunk_tx: &mpsc::Sender<String>,
 ) -> anyhow::Result<ChatMessage> {
+    let messages = ensure_user_message(messages);
     let url = format!(
         "{}/v1/chat/completions",
         config.openai_url.trim_end_matches('/')
@@ -226,8 +253,9 @@ pub async fn call_openai_streaming(
         req = req.header("Authorization", format!("Bearer {key}"));
     }
 
+    let role_summary: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
     tracing::info!(
-        "openai streaming request to {url} model={}",
+        "openai streaming request to {url} model={} roles={role_summary:?}",
         config.openai_model
     );
     let response = req.send().await?;
